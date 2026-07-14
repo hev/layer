@@ -7,7 +7,7 @@ info:
     proxy layer for document retrieval (cache), document cache operations, snapshot
     jobs, scans, result counts, and namespace metadata.
 
-'
+    '
   version: 0.1.0
   contact:
     name: Hev
@@ -151,7 +151,7 @@ paths:
         toggleable. Blob hydration is explicit: callers must pass `blobs=true` plus
         `blob_budget_bytes`.
 
-'
+        '
       tags:
       - cache
       parameters:
@@ -225,7 +225,7 @@ paths:
             or `snapshots` is requested while the cache is down; the bare passthrough
             does not touch the gateway cache.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -433,7 +433,7 @@ paths:
         width resolved from `Index.spec.scan.threads` and the gateway default. Stored
         and cache reads do not fan out.
 
-'
+        '
       tags:
       - snapshots
       parameters:
@@ -473,7 +473,7 @@ paths:
       description: 'Return the API-managed snapshot policy for a namespace. The JSON
         shape mirrors `Index.spec.snapshot`: `facetFields`, `interval`, and `retention`.
 
-'
+        '
       tags:
       - snapshots
       parameters:
@@ -500,7 +500,7 @@ paths:
       description: 'Set the API-managed snapshot policy for a namespace. This is the
         shared-gateway/API-only entry point for the same policy shape carried by `Index.spec.snapshot`.
 
-'
+        '
       tags:
       - snapshots
       parameters:
@@ -583,7 +583,7 @@ paths:
       description: 'Starts an asynchronous warm job that pages through Turbopuffer
         and batch-populates the Aerospike cache.
 
-'
+        '
       tags:
       - cache
       parameters:
@@ -709,7 +709,7 @@ paths:
           description: 'ID or values scan created. Snapshot-served values scans return
             with `status: completed` and results readable immediately.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -719,7 +719,7 @@ paths:
             cover the request — count filter not snapshot-eligible, values scan carrying
             filters, or values `field` not pre-aggregated.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -731,7 +731,7 @@ paths:
             `timeout_seconds: 0`, `mode: values` without `field`, or `field` on another
             mode.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -840,7 +840,7 @@ paths:
           description: 'Mode-dependent results — `{ids, total}` for ID scans, `{values,
             total, truncated}` for values scans.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -885,7 +885,7 @@ paths:
         and filter writes request affected ids from Turbopuffer and apply cache invalidation
         and write-triggered UDF enqueue from the upstream affected-id set after success.
 
-'
+        '
       tags:
       - namespaces
       - documents
@@ -932,7 +932,7 @@ paths:
         Local cleanup failures after the upstream delete return 502 so callers can
         retry the same delete.
 
-'
+        '
       tags:
       - namespaces
       parameters:
@@ -962,7 +962,7 @@ paths:
         async operation response. Backends without a native binary import path return
         `UnsupportedByStore`.
 
-'
+        '
       tags:
       - namespaces
       - documents
@@ -1028,7 +1028,7 @@ paths:
         the body to Turbopuffer''s `/v2/namespaces/{namespace}/query` endpoint without
         applying native Layer query validation.
 
-'
+        '
       tags:
       - turbopuffer
       parameters:
@@ -1066,7 +1066,7 @@ paths:
         hybrid routes. `namespaces: ["*"]` or an omitted `namespaces` field expands
         the authenticated key''s namespace allowlist at request time.
 
-'
+        '
       tags:
       - query
       requestBody:
@@ -1093,7 +1093,7 @@ paths:
             fusion options, invalid underlying query shape, or strict vector merge
             with missing/mismatched embedding profiles.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -1144,7 +1144,7 @@ paths:
         description: 'Human query text to record in search history as `raw_query`.
           Keep search text here rather than encoding it as a tag.
 
-'
+          '
       - name: x-hevlayer-tags
         in: header
         required: false
@@ -1156,7 +1156,7 @@ paths:
           ''-'', ''.'', ''/'', ''='', or ''+''. Commas separate tags and cannot be
           escaped.
 
-'
+          '
       requestBody:
         required: true
         content:
@@ -1199,7 +1199,7 @@ paths:
             a `queries` body, an option is out of range, the fused cursor exceeds
             the bounded depth, or a forced `semantic`/`fused` route lacks a `vector`.
 
-'
+            '
           content:
             application/json:
               schema:
@@ -1298,7 +1298,7 @@ paths:
       description: 'Get metadata for a namespace including schema, row counts, byte
         sizes, and custom config.
 
-'
+        '
       tags:
       - namespaces
       parameters:
@@ -1333,7 +1333,7 @@ paths:
         to the embedded shard backfill task, and return the current init status. Scatter/gather
         remains inactive until `shard_lag_rows` reaches zero.
 
-'
+        '
       tags:
       - namespaces
       parameters:
@@ -1387,7 +1387,7 @@ paths:
         derives state from the configured license token plus the gateway''s codified
         grace cushion.
 
-'
+        '
       tags:
       - license
       responses:
@@ -1408,7 +1408,7 @@ paths:
         `/api/v1/query` endpoint. The response body is returned with the same JSON
         shape as the upstream Prometheus API.
 
-'
+        '
       tags:
       - observability
       parameters:
@@ -1454,7 +1454,7 @@ paths:
         `/api/v1/query_range` endpoint. The response body is returned with the same
         JSON shape as the upstream Prometheus API.
 
-'
+        '
       tags:
       - observability
       parameters:
@@ -1513,7 +1513,7 @@ paths:
         `/api/v1/query` endpoint. The response body is returned with the same JSON
         shape as the upstream Prometheus API.
 
-'
+        '
       tags:
       - observability
       parameters:
@@ -1560,7 +1560,7 @@ paths:
         VictoriaMetrics-compatible `/api/v1/query_range` endpoint. The response body
         is returned with the same JSON shape as the upstream Prometheus API.
 
-'
+        '
       tags:
       - observability
       parameters:
@@ -1631,7 +1631,7 @@ paths:
           explicit `family` attribute (not a name-prefix heuristic). Returns 400 with
           an `invalid_family` error code if the value is not one of the known families.
 
-'
+          '
       responses:
         '200':
           description: Catalog returned
@@ -1666,7 +1666,7 @@ paths:
         Convenience surface for `layer explain <metric-name>` — returns the entry
         without the envelope. 404 when unknown.
 
-'
+        '
       tags:
       - observability
       security: []
@@ -1708,7 +1708,7 @@ paths:
         namespace. The response is a credential-safe projection: it includes Secret
         reference names and keys, but never Secret contents. Requires read scope.
 
-'
+        '
       tags:
       - vectorstores
       responses:
@@ -1734,7 +1734,7 @@ paths:
       description: 'Get one credential-safe VectorStore projection. `turbopufferUrl`
         is present only when `spec.turbopuffer.orgId` is set. Requires read scope.
 
-'
+        '
       tags:
       - vectorstores
       parameters:
@@ -1805,7 +1805,7 @@ components:
         in `include_attributes`, the gateway never returns vectors, so the field was
         removed from the response.
 
-'
+        '
       schema:
         type: string
         enum:
@@ -2134,7 +2134,7 @@ components:
         the body is Turbopuffer''s own `hint_cache_warm` response, passed through
         verbatim — its shape is owned by upstream, so all per-step fields are absent.
 
-'
+        '
       additionalProperties: true
       properties:
         namespace:
@@ -2211,7 +2211,7 @@ components:
       description: 'Automatic snapshot writer policy. Mirrors `Index.spec.snapshot`
         so the Kubernetes CR and API entry point use one vocabulary.
 
-'
+        '
       properties:
         facetFields:
           type: array
@@ -2221,27 +2221,27 @@ components:
           description: 'Facet fields to histogram. Empty disables the automatic writer
             for the namespace.
 
-'
+            '
         interval:
           type: string
           default: 5m
           description: 'Minimum spacing between automatic snapshot writes after upstream-stable
             advances.
 
-'
+            '
         retention:
           type: string
           default: never
           description: 'Retention window for snapshot bodies, or `never` to keep history.
 
-'
+            '
     CreateScanRequest:
       type: object
       description: 'Carries at most one ranked selector (`fts`, `hybrid_text`, or
         `ann`). `filters` is the sole selector when no ranked selector is present,
         all rows when omitted, or an extra AND constraint on a ranked scan.
 
-'
+        '
       properties:
         source:
           "$ref": "#/components/schemas/ScanCountSource"
@@ -2249,7 +2249,7 @@ components:
           description: 'Optional Turbopuffer filter expression. Standalone filter
             selector, or an additional AND constraint on a ranked scan.
 
-'
+            '
         as_of:
           type: integer
           format: int64
@@ -2258,7 +2258,7 @@ components:
             The gateway conjoins `_hevlayer_upserted_at <= as_of` with `filters` before
             evaluating the scan.
 
-'
+            '
         between:
           type: array
           minItems: 2
@@ -2270,7 +2270,7 @@ components:
           description: 'Epoch-ms temporal window `[lo, hi]` interpreted as `lo < _hevlayer_upserted_at
             <= hi`. Mutually exclusive with `as_of` and requires `lo < hi`.
 
-'
+            '
         fts:
           "$ref": "#/components/schemas/FtsScan"
         hybrid_text:
@@ -2286,7 +2286,7 @@ components:
             attributes, plus arrays of strings (each element counts once per containing
             document).
 
-'
+            '
         exhaustive:
           type: boolean
           default: false
@@ -2296,7 +2296,7 @@ components:
             and ANN scans do not use score-band pagination; saturated pages remain
             bounded.
 
-'
+            '
         threads:
           type: integer
           minimum: 1
@@ -2305,7 +2305,7 @@ components:
             gateway default. Values above the server cap are clamped and echoed in
             the response/job; ignored on snapshot and cache reads.
 
-'
+            '
         page_size:
           type: integer
           minimum: 1
@@ -2339,7 +2339,7 @@ components:
         only adds the surfacing legs when its primary legs return nothing. Origin
         scatter/gather.
 
-'
+        '
       required:
       - field
       - query
@@ -2365,7 +2365,7 @@ components:
         a distance-ball scan evaluated by approximate nearest-neighbour search. Approximate;
         origin scatter/gather.
 
-'
+        '
       required:
       - vector
       - radius
@@ -2385,7 +2385,7 @@ components:
             ball the scan counts. The gateway applies the bound to returned `$dist`
             rows; it is not pushed upstream as a filter.
 
-'
+            '
     WarmStepStatus:
       type: string
       enum:
@@ -2578,20 +2578,20 @@ components:
             format: int64
             description: 'Values mode — distinct values held by the completed job.
 
-'
+              '
           truncated:
             type: boolean
             description: 'Values mode — the 1,000,000 distinct-value cap was crossed;
               the listing holds the top values by count, each with an exact count.
 
-'
+              '
           bounded:
             type: boolean
             description: 'Ranked values scans — a shard saturated its `top_k` cap
               or the deadline elapsed, so per-value counts are `>=` lower bounds and
               the listing may be incomplete.
 
-'
+              '
           approximate:
             type: boolean
             description: Ranked `ann` values scans — ANN recall error.
@@ -2600,20 +2600,20 @@ components:
             description: 'Snapshot-served values scans — content SHA of the snapshot
               body that answered the scan.
 
-'
+              '
           watermark_ms:
             type: integer
             format: int64
             description: 'Snapshot-served values scans — the snapshot''s stable watermark.
 
-'
+              '
           threads:
             type: integer
             format: int32
             description: 'Effective origin fan-out width. Present only when the scan
               job actually ran origin scatter/gather.
 
-'
+              '
     ScanJobList:
       type: object
       required:
@@ -2628,7 +2628,7 @@ components:
       description: 'One distinct value of a values scan, in the snapshot body''s `{v,
         n}` vocabulary — `v` is the value, `n` its document count.
 
-'
+        '
       required:
       - v
       - n
@@ -2706,7 +2706,7 @@ components:
           description: 'Effective origin fan-out width. Present only when the count
             ran origin scatter/gather; snapshot and cache reads do not fan out.
 
-'
+            '
         elapsed_ms:
           type: integer
           format: int64
@@ -2717,7 +2717,7 @@ components:
         cache. The shape is designed so a dashboard or `layer` CLI does not have to
         fan out across `/metadata` + `/health` for every row.
 
-'
+        '
       required:
       - namespaces
       properties:
@@ -2732,7 +2732,7 @@ components:
           description: 'Opaque pagination cursor returned by the upstream namespace
             list. Present iff there are more pages.
 
-'
+            '
     NamespaceListEntry:
       type: object
       description: 'Layer-augmented per-namespace row. Freshness fields come from
@@ -2741,7 +2741,7 @@ components:
         `is_stable` are omitted, `cache_state.state` is `"cold"` when no cache demand
         has been observed, and `warm_inflight` is false.
 
-'
+        '
       required:
       - name
       properties:
@@ -2756,7 +2756,7 @@ components:
           description: 'Approximate row count from upstream `approx_row_count`. `null`
             when per-namespace metadata could not be fetched.
 
-'
+            '
         size_bytes:
           type:
           - integer
@@ -2765,7 +2765,7 @@ components:
           description: 'Approximate logical byte size from upstream `approx_logical_bytes`.
             `null` when metadata is unavailable.
 
-'
+            '
         stable_as_of_ms:
           type:
           - integer
@@ -2775,7 +2775,7 @@ components:
             Present when the per-row metadata fetch reports `index.status == "up-to-date"`.
             Null when metadata is unavailable, updating, or has no index signal.
 
-'
+            '
         is_stable:
           type:
           - boolean
@@ -2784,7 +2784,7 @@ components:
             == "up-to-date"`, false when it reports `"updating"`, and null when metadata
             is unavailable or has no index signal.
 
-'
+            '
         schema_summary:
           "$ref": "#/components/schemas/NamespaceSchemaSummary"
         index:
@@ -2800,13 +2800,13 @@ components:
             from upstream `last_write_at`; falls back to `stable_as_of_ms` when the
             upstream field is absent. Null when neither is available.
 
-'
+            '
         shadow:
           type: boolean
           description: 'True when the namespace is a shadow/secondary index. The current
             convention is a `-shadow` suffix on the namespace name.
 
-'
+            '
         labels:
           type: object
           additionalProperties:
@@ -2814,20 +2814,20 @@ components:
           description: 'User-set labels associated with the namespace, lifted from
             upstream metadata. Empty when none are set.
 
-'
+            '
         metadata_error:
           type: string
           description: 'Present when the per-namespace metadata fetch failed for this
             row. The row is still returned (with name only) so the UI can render a
             "metadata unavailable" badge instead of dropping it.
 
-'
+            '
     NamespaceSchemaSummary:
       type: object
       description: 'Minimal schema view for list responses. The full upstream schema
         is still available via `/v2/namespaces/{namespace}/metadata`.
 
-'
+        '
       properties:
         vector_dim:
           type:
@@ -2836,7 +2836,7 @@ components:
           description: 'Dimensions of the vector field, when one is present in the
             upstream schema. Null for namespaces without a vector column.
 
-'
+            '
         fields:
           type: array
           items:
@@ -2849,7 +2849,7 @@ components:
         list rows derive `is_stable` and `stable_as_of_ms` from this same metadata
         fetch. Additional upstream sub-fields ride through unmodified.
 
-'
+        '
       additionalProperties: true
       properties:
         status:
@@ -2860,7 +2860,7 @@ components:
           description: '`"up-to-date"` when the upstream index is fully caught up;
             `"updating"` while writes are still being indexed.
 
-'
+            '
         unindexed_bytes:
           type:
           - integer
@@ -2872,14 +2872,14 @@ components:
             non-zero value means "behind, but serving" — watch it fall to confirm
             indexing is draining rather than wedged.
 
-'
+            '
     NamespaceCacheState:
       type: object
       description: 'Aerospike document-cache state for the namespace. Mirrors the
         per- namespace entries reported by `/health` so a single list call is enough
         to power dashboard fullness badges.
 
-'
+        '
       required:
       - state
       - warm_inflight
@@ -2898,7 +2898,7 @@ components:
           description: 'Epoch-ms watermark observed at the end of the last completed
             origin warm job. Null when no warm has completed yet.
 
-'
+            '
         warm_inflight:
           type: boolean
           description: True when a background warm is currently running.
@@ -2951,13 +2951,13 @@ components:
           description: 'Epoch-ms watermark from the most recent stable consistency
             poll. Null before the watcher has observed a stable namespace.
 
-'
+            '
         is_stable:
           type: boolean
           description: 'True when the most recent consistency poll observed `index.status
             == "up-to-date"`; false on cold start or while the upstream index is updating.
 
-'
+            '
         indexed:
           type:
           - boolean
@@ -2968,7 +2968,7 @@ components:
             without a vector column, when the latest stored snapshot predates row-count
             capture, or when the snapshot lookup fails.
 
-'
+            '
         index_lag_rows:
           type:
           - integer
@@ -2977,7 +2977,7 @@ components:
           description: 'Upstream namespace row count minus latest snapshot row count,
             clamped at zero. Null when `indexed` is null.
 
-'
+            '
         schema_version:
           type: integer
           format: int64
@@ -3050,7 +3050,7 @@ components:
           description: 'Query vector. Mutually exclusive with `nearest_to_id`; exactly
             one of the two is required.
 
-'
+            '
         nearest_to_id:
           type: array
           items:
@@ -3063,7 +3063,7 @@ components:
             VectorStore (with a cache backfill) on miss. Returns 404 naming any ids
             with no vector in either place.
 
-'
+            '
         top_k:
           type: integer
           minimum: 1
@@ -3079,7 +3079,7 @@ components:
             The gateway conjoins `_hevlayer_upserted_at <= as_of` with the caller
             filter before querying.
 
-'
+            '
         between:
           type: array
           minItems: 2
@@ -3091,7 +3091,7 @@ components:
           description: 'Epoch-ms temporal window `[lo, hi]` interpreted as `lo < _hevlayer_upserted_at
             <= hi`. Mutually exclusive with `as_of` and requires `lo < hi`.
 
-'
+            '
         include_attributes:
           oneOf:
           - type: boolean
@@ -3102,7 +3102,7 @@ components:
             from the response; explicitly listing it triggers an `x-layer-warning`
             header.
 
-'
+            '
         include_leg_breakdown:
           type: boolean
           default: false
@@ -3114,7 +3114,7 @@ components:
             cut. Default false, so payload and unsharded query fan-out are unchanged
             for callers that do not ask.
 
-'
+            '
         cursor:
           type: string
           description: 'Opaque pagination token returned by a prior response''s `next_cursor`.
@@ -3124,7 +3124,7 @@ components:
             executed `Auto` routes decode it into a bounded server-side re-fetch offset
             capped at 10,000 ranked rows.
 
-'
+            '
         rank_by:
           type: array
           items: {}
@@ -3139,7 +3139,7 @@ components:
             "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). When `rank_by`
             is present, `vector` and `nearest_to_id` must be absent.
 
-'
+            '
     FederatedQueryRequest:
       allOf:
       - "$ref": "#/components/schemas/QueryRequest"
@@ -3155,7 +3155,7 @@ components:
             description: 'Explicit namespace set to query. `["*"]`, or omitting this
               field, expands the authenticated key''s namespace allowlist.
 
-'
+              '
           strict:
             type: boolean
             default: false
@@ -3163,7 +3163,7 @@ components:
               Default false returns successful namespace legs and reports failed legs
               in `errors`.
 
-'
+              '
           fusion:
             "$ref": "#/components/schemas/FederatedFusionOptions"
     FederatedFusionOptions:
@@ -3175,7 +3175,7 @@ components:
           description: 'Rows each namespace returns to the cross-namespace merge.
             Default is `clamp(2 * top_k, 10, 100)`.
 
-'
+            '
         rank_constant:
           type: integer
           minimum: 1
@@ -3183,7 +3183,7 @@ components:
           description: 'Reserved RRF constant echo. Inert on rank-interleave text
             routes.
 
-'
+            '
     FederatedQueryResponse:
       type: object
       required:
@@ -3199,7 +3199,7 @@ components:
           description: 'Fused rows. Every row includes `id`, `$namespace`, `$rank`,
             and route-native `$dist`/`$score` plus requested attributes when present.
 
-'
+            '
         merge:
           type: object
           required:
@@ -3225,7 +3225,7 @@ components:
               description: 'Present when a vector route could not safely merge by
                 raw distance and fell back to rank-interleave in best-effort mode.
 
-'
+                '
         routing:
           "$ref": "#/components/schemas/RoutingEcho"
         hybrid:
@@ -3277,7 +3277,7 @@ components:
         invisible. Present on `HybridText` responses and on routed responses whose
         route expanded hybrid-text legs.
 
-'
+        '
       properties:
         tokens:
           type: array
@@ -3289,7 +3289,7 @@ components:
           description: 'Tokens removed by the 15-token cap (not by the length or punctuation
             rules).
 
-'
+            '
         fuzziness:
           oneOf:
           - type: string
@@ -3311,7 +3311,7 @@ components:
             route). On the RFC 0057 surfacing fallback (`surfaced: true`) there is
             no BM25 leg, so `legs` equals the token count (one fuzzy leg per token).
 
-'
+            '
         per_leg_limit:
           type: integer
           description: How deep each leg retrieved before fusion.
@@ -3323,14 +3323,14 @@ components:
             field/token edit distance, and fused those instead. Absent on the normal
             path.
 
-'
+            '
         threads:
           type: integer
           description: 'Effective scatter/gather fan-out width (the scans `threads`
             control, clamped to active shards). Present only on sharded namespaces,
             where the gateway fans each leg out per shard.
 
-'
+            '
     RoutingEcho:
       type: object
       required:
@@ -3352,7 +3352,7 @@ components:
           description: 'Routing policy version that made the decision (`v1`), or `forced`
             when the request supplied `route`.
 
-'
+            '
         tokens:
           type: integer
           description: Token count the policy read, post tokenizer policy.
@@ -3403,7 +3403,7 @@ components:
             *might* be more results), and is `null` on the last page (the header is
             then omitted). Pass a non-null value back in the next `QueryRequest.cursor`.
 
-'
+            '
         hybrid:
           "$ref": "#/components/schemas/HybridEcho"
         routing:
@@ -3438,7 +3438,7 @@ components:
       description: 'Logical grouping used by the dashboard''s observe pane sidebar.
         Assigned explicitly on every `MetricDoc`, not derived from the name prefix.
 
-'
+        '
     MetricAlert:
       type: object
       required:
@@ -3542,7 +3542,7 @@ components:
           description: 'Turbopuffer organization id used only for dashboard deep links
             and support orientation. It is not used for auth or routing.
 
-'
+            '
     VectorStoreCredential:
       type: object
       required:
@@ -3593,7 +3593,7 @@ components:
           description: 'True when this store is the default for indexes that omit
             `spec.backend.storeRef`.
 
-'
+            '
         endpoint:
           "$ref": "#/components/schemas/VectorStoreEndpoint"
         turbopuffer:
@@ -3609,7 +3609,7 @@ components:
           description: 'Gateway-computed Turbopuffer dashboard URL. Omitted when `turbopuffer.orgId`
             is absent.
 
-'
+            '
     VectorStoreList:
       type: object
       required:

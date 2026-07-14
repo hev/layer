@@ -1,5 +1,0 @@
-apiVersion: v2
-name: hevlayer-ce-karpenter-pools
-description: Scale-from-zero CPU and GPU pools for the CE module
-type: application
-version: 0.1.0

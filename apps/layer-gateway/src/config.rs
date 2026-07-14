@@ -302,6 +302,20 @@ fn stores_json_from_env() -> Option<String> {
         eprintln!("warning: LAYER_STORES_JSON is deprecated; use LAYER_STORE_JSON");
         return Some(stores_json.to_string());
     }
+    // TPUF_URL alone configures the default store — the turbopuffer region is
+    // already encoded in the endpoint host, so no region field is synthesized.
+    if let Some(url) = env::var("TPUF_URL").ok().and_then(trimmed_non_empty) {
+        return Some(
+            serde_json::json!({
+                "default": {
+                    "kind": "turbopuffer",
+                    "endpoint": {"url": url},
+                    "inboundAuth": {"mode": "deriveFromStore"}
+                }
+            })
+            .to_string(),
+        );
+    }
     let region = env::var("TURBOPUFFER_REGION")
         .ok()
         .and_then(trimmed_non_empty)
