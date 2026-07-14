@@ -1,0 +1,18 @@
+{{- if not .Values.clusterName }}{{ fail "clusterName is required" }}{{ end }}
+{{- if not .Values.nodeRole }}{{ fail "nodeRole is required" }}{{ end }}
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: hevlayer-ce
+spec:
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: {{ .Values.nodeRole | quote }}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.clusterName | quote }}
+  tags:
+    {{- toYaml .Values.tags | nindent 4 }}

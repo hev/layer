@@ -1,0 +1,80 @@
+license:
+  token: ""
+  existingSecret: ""
+  secretKey: license
+
+gateway:
+  image: hevlayer/layer-gateway:latest
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 8080
+  service:
+    type: LoadBalancer
+    port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+vectorStore:
+  name: local
+  kind: turbopuffer
+  default: true
+  endpoint:
+    url: https://api.turbopuffer.com
+    region: aws-us-east-1
+  credential:
+    apiKey: ""
+    existingSecret: ""
+    secretKey: api-key
+  inboundAuth:
+    mode: deriveFromStore
+
+metrics:
+  backend: prometheus
+  backendUrl: ""
+
+dashboard:
+  enabled: true
+  image: hevlayer/layer-dashboard:latest
+  imagePullPolicy: IfNotPresent
+  port: 8081
+  service:
+    type: ClusterIP
+    port: 8081
+  writeAccess:
+    enabled: false
+  panels:
+    metrics: true
+    routing: true
+    introspection: true
+    cost: false
+    searchHistory: false
+  basicAuth:
+    user: ops
+    password: ""
+    existingSecret: ""
+    userKey: username
+    passwordKey: password
+  resources: {}
+
+prometheus:
+  alertmanager:
+    enabled: false
+  kube-state-metrics:
+    enabled: false
+  prometheus-node-exporter:
+    enabled: false
+  prometheus-pushgateway:
+    enabled: false
+  server:
+    retention: 15d
+    persistentVolume:
+      size: 10Gi
+  extraScrapeConfigs: |
+    - job_name: hevlayer-gateway
+      metrics_path: /metrics
+      static_configs:
+        - targets: ["{{ .Release.Name }}-gateway:8080"]

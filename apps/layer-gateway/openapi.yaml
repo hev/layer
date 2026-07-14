@@ -1,0 +1,3621 @@
+---
+openapi: 3.1.0
+info:
+  title: Hevlayer API
+  description: 'Hevlayer-specific endpoints that extend the Turbopuffer API. These
+    endpoints are not part of the Turbopuffer client — they are added by the Hevlayer
+    proxy layer for document retrieval (cache), document cache operations, snapshot
+    jobs, scans, result counts, and namespace metadata.
+
+'
+  version: 0.1.0
+  contact:
+    name: Hev
+    url: https://github.com/hev/hevlayer
+servers:
+- url: http://localhost:8080
+  description: Local development
+- url: http://hevlayer.internal:8080
+  description: In-cluster (Kubernetes)
+security:
+- bearerAuth: []
+paths:
+  "/v2/namespaces/{namespace}/documents/{doc_id}":
+    get:
+      operationId: fetchDocument
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Fetch a single document by ID
+      description: |
+        Retrieve a document by ID. On Aerospike cache miss, Hevlayer fetches the document from the namespace's configured VectorStore, writes it into Aerospike, and returns it.
+        Known limitation: if Aerospike itself is unavailable, Hevlayer returns 503 instead of bypassing cache and reading directly from the configured VectorStore.
+        Returns 404 if the document does not exist upstream. Returns 503 if the cache is unavailable.
+      tags:
+      - documents
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: doc_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Document ID
+      - name: include_attributes
+        in: query
+        required: false
+        schema:
+          type: array
+          items:
+            type: string
+        description: Attributes to include in the response. If omitted, all attributes
+          are returned.
+      responses:
+        '200':
+          description: Document found
+          headers:
+            x-layer-cache:
+              schema:
+                type: string
+                enum:
+                - hit
+                - miss
+                - miss-on-error
+              description: Cache serving status for the fetch.
+            x-layer-warning:
+              "$ref": "#/components/headers/LayerWarning"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Document"
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cache unavailable
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/documents":
+    post:
+      operationId: fetchDocuments
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Fetch multiple documents by ID
+      description: |
+        Batch retrieve documents by ID. On Aerospike cache miss, Hevlayer fetches missing documents from the namespace's configured VectorStore, writes them into Aerospike, and returns found documents plus a list of true upstream misses.
+        Known limitation: if Aerospike itself is unavailable, Hevlayer returns 503 instead of bypassing cache and reading directly from the configured VectorStore.
+      tags:
+      - documents
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/FetchDocumentsRequest"
+      responses:
+        '200':
+          description: Documents retrieved
+          headers:
+            x-layer-cache:
+              schema:
+                type: string
+                enum:
+                - hit
+                - miss
+                - miss-on-error
+                - partial
+              description: Worst-case cache serving status across the batch.
+            x-layer-warning:
+              "$ref": "#/components/headers/LayerWarning"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/FetchDocumentsResponse"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cache unavailable
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/hint_cache_warm":
+    get:
+      operationId: hintCacheWarm
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: GET /v1/namespaces/{namespace}/hint_cache_warm
+      summary: Warm namespace caches
+      description: 'Turbopuffer-compatible warm-cache endpoint. With no query parameters,
+        this is a raw upstream-compatible `hint_cache_warm` passthrough and the response
+        body is Turbopuffer''s own, returned verbatim. When any warm option (`turbopuffer`,
+        `documents`, `snapshots`, `blobs`, `blob_budget_bytes`, `page_size`) is supplied,
+        the gateway runs Layer warm steps — forward the warm hint to Turbopuffer,
+        start an asynchronous warm job that populates Aerospike, mirror the latest
+        S3 snapshot body into Aerospike, and optionally hydrate declared blob references
+        from S3 into Aerospike — and returns per-step results. Document, snapshot,
+        and Turbopuffer steps default on once any option is supplied and are independently
+        toggleable. Blob hydration is explicit: callers must pass `blobs=true` plus
+        `blob_budget_bytes`.
+
+'
+      tags:
+      - cache
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: turbopuffer
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+        description: Forward `hint_cache_warm` to Turbopuffer.
+      - name: documents
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+        description: Start a warm job to backfill Aerospike from origin.
+      - name: snapshots
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+        description: Mirror the latest S3 snapshot body into Aerospike.
+      - name: blobs
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+        description: Hydrate declared blob references from S3 into Aerospike.
+      - name: blob_budget_bytes
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+        description: Required byte budget when `blobs=true`; warm stops before crossing
+          this budget.
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+        description: Page size for the document-cache warm job.
+      responses:
+        '200':
+          description: Warm request accepted
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/HintCacheWarmResponse"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: 'Cache unavailable (`cache_cold`). Returned only when `documents`
+            or `snapshots` is requested while the cache is down; the bare passthrough
+            does not touch the gateway cache.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces":
+    get:
+      operationId: listTurbopufferNamespaces
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: GET /v1/namespaces
+      summary: List Turbopuffer namespaces
+      description: Raw Turbopuffer-compatible namespace listing passthrough.
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: prefix
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+      responses:
+        '200':
+          description: Namespaces listed in Turbopuffer's native shape
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferNamespaceList"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/schema":
+    get:
+      operationId: getTurbopufferNamespaceSchema
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: GET /v1/namespaces/{namespace}/schema
+      summary: Get Turbopuffer namespace schema
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Namespace schema
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferSchema"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    post:
+      operationId: updateTurbopufferNamespaceSchema
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: POST /v1/namespaces/{namespace}/schema
+      summary: Update Turbopuffer namespace schema
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferSchema"
+      responses:
+        '200':
+          description: Updated namespace schema
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferSchema"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/metadata":
+    get:
+      operationId: getTurbopufferV1NamespaceMetadata
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: GET /v1/namespaces/{namespace}/metadata
+      summary: Get Turbopuffer v1 namespace metadata
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Namespace metadata
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NamespaceMetadata"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    patch:
+      operationId: updateTurbopufferNamespaceMetadata
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: PATCH /v1/namespaces/{namespace}/metadata
+      summary: Update Turbopuffer namespace metadata
+      description: Raw passthrough for upstream metadata configuration, currently
+        used for namespace pinning.
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferMetadataPatch"
+      responses:
+        '200':
+          description: Updated namespace metadata
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NamespaceMetadata"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/_debug/recall":
+    post:
+      operationId: evaluateTurbopufferRecall
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: POST /v1/namespaces/{namespace}/_debug/recall
+      summary: Evaluate Turbopuffer recall
+      tags:
+      - turbopuffer
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferRecallRequest"
+      responses:
+        '200':
+          description: Recall metrics
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferRecallResponse"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/snapshots":
+    post:
+      operationId: createSnapshot
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Materialize a snapshot for a field
+      description: 'Create an on-demand snapshot job for one field. Jobs that resolve
+        to `source: origin` use the same bounded shard fan-out as origin scans, with
+        width resolved from `Index.spec.scan.threads` and the gateway default. Stored
+        and cache reads do not fan out.
+
+'
+      tags:
+      - snapshots
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateSnapshotRequest"
+      responses:
+        '202':
+          description: Snapshot job created
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SnapshotJob"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cache unavailable
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/snapshot-policy":
+    get:
+      operationId: getSnapshotPolicy
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get snapshot policy
+      description: 'Return the API-managed snapshot policy for a namespace. The JSON
+        shape mirrors `Index.spec.snapshot`: `facetFields`, `interval`, and `retention`.
+
+'
+      tags:
+      - snapshots
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Snapshot policy
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SnapshotPolicy"
+        '404':
+          description: Snapshot policy not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    put:
+      operationId: putSnapshotPolicy
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Set snapshot policy
+      description: 'Set the API-managed snapshot policy for a namespace. This is the
+        shared-gateway/API-only entry point for the same policy shape carried by `Index.spec.snapshot`.
+
+'
+      tags:
+      - snapshots
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SnapshotPolicy"
+      responses:
+        '200':
+          description: Snapshot policy saved
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SnapshotPolicy"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: S3 error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/snapshot-jobs":
+    get:
+      operationId: listSnapshotJobs
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List snapshot jobs
+      tags:
+      - snapshots
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Snapshot jobs listed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SnapshotJobList"
+  "/v2/namespaces/{namespace}/snapshot-jobs/{job_id}":
+    get:
+      operationId: getSnapshotJob
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get snapshot job status
+      tags:
+      - snapshots
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - "$ref": "#/components/parameters/job_id"
+      responses:
+        '200':
+          description: Snapshot job status
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SnapshotJob"
+        '404':
+          description: Snapshot job not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/warm":
+    post:
+      operationId: warmCache
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Warm the Aerospike cache
+      description: 'Starts an asynchronous warm job that pages through Turbopuffer
+        and batch-populates the Aerospike cache.
+
+'
+      tags:
+      - cache
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+      responses:
+        '202':
+          description: Cache warm job created and started
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/WarmJob"
+        '422':
+          description: Validation error (`page_size` out of range)
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cache unavailable
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/warm-jobs":
+    get:
+      operationId: listWarmJobs
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List warm jobs
+      tags:
+      - cache
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Warm jobs listed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/WarmJobList"
+  "/v2/namespaces/{namespace}/warm-jobs/{job_id}":
+    get:
+      operationId: getWarmJob
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get warm job status
+      tags:
+      - cache
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - "$ref": "#/components/parameters/job_id"
+      responses:
+        '200':
+          description: Warm job status
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/WarmJob"
+        '404':
+          description: Warm job not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/scans":
+    post:
+      operationId: createScan
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Create a scan (filter, full-text, or radius)
+      description: |
+        On-demand row selection over a namespace. A scan picks rows by one of three selectors and returns their IDs (`mode: ids`, async job), their count (`mode: count`, synchronous), or the distinct values of one attribute `field` with per-value counts (`mode: values`, async job):
+        - `filters` — an attribute predicate, or all rows when omitted with
+          no ranked selector. Exact. Count and values modes resolve
+          snapshot / cache / origin; IDs mode iterates cache / origin.
+
+        - `fts` — a full-text (BM25) predicate. Exact. Origin scatter/gather.
+        - `hybrid_text` — counts the de-duplicated union of the BM25 leg, the
+          per-token fuzzy legs, and the per-token surfacing legs (one fuzzy leg
+          per token from the RFC 0057 fallback). The scan always evaluates all
+          three sets, so its count is a superset of the `hybrid_text` query
+          route's deduped rows: on a query whose primary legs return rows the
+          route never adds the surfacing legs, so the scan can count more.
+          Origin scatter/gather.
+
+        - `ann` — a vector **radius** selector: rows within `radius` of a
+          query vector. Approximate (ANN recall). Origin scatter/gather.
+
+        At most one ranked selector (`fts`, `hybrid_text`, or `ann`) may be present; `filters` rides alongside any of them as an extra AND constraint. Ranked selectors support `mode: count` and `mode: values` and run origin scatter/gather, so `source` must be omitted, `auto`, or `origin`. Ranked scans honor `exhaustive` (default `false`) and a deadline (`timeout_seconds`, default 30s, server max 300s).
+        Values scans cap at 1,000,000 distinct values per job. The cap is applied after the full pass — retained values keep exact counts and the listing truncates deterministically to the top values by count (value-asc tiebreak), flagged `truncated: true`. A snapshot-served values scan (unfiltered, field present in the latest snapshot `fields[]`) completes during the create call: the `202` body already carries the final state with `effective_source: snapshot`, `snapshot_sha`, and `watermark_ms`.
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateScanRequest"
+      responses:
+        '200':
+          description: Count-mode scan result
+          headers:
+            x-layer-stable-as-of:
+              "$ref": "#/components/headers/LayerStableAsOf"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ScanCountResponse"
+        '202':
+          description: 'ID or values scan created. Snapshot-served values scans return
+            with `status: completed` and results readable immediately.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ScanJob"
+        '412':
+          description: 'Snapshot source requested but the latest snapshot does not
+            cover the request — count filter not snapshot-eligible, values scan carrying
+            filters, or values `field` not pre-aggregated.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: 'Invalid scan request — more than one ranked selector (`fts`,
+            `hybrid_text`, `ann`) supplied, a ranked selector with `mode: ids` or
+            a snapshot/cache `source`, an empty `fts.query`, a non-finite `ann.radius`,
+            `timeout_seconds: 0`, `mode: values` without `field`, or `field` on another
+            mode.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cache unavailable
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    get:
+      operationId: listScans
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List ID and values scan jobs
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Scan jobs listed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ScanJobList"
+  "/v2/namespaces/{namespace}/scans/{scan_id}":
+    get:
+      operationId: getScan
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get scan status
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - "$ref": "#/components/parameters/scan_id"
+      responses:
+        '200':
+          description: Scan status
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ScanJob"
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    delete:
+      operationId: deleteScan
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Delete scan state
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - "$ref": "#/components/parameters/scan_id"
+      responses:
+        '200':
+          description: Scan state removed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/StatusResponse"
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/scans/{scan_id}/results":
+    get:
+      operationId: getScanResults
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get scan IDs or values
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - "$ref": "#/components/parameters/scan_id"
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        '200':
+          description: 'Mode-dependent results — `{ids, total}` for ID scans, `{values,
+            total, truncated}` for values scans.
+
+'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - "$ref": "#/components/schemas/ScanIdsResponse"
+                - "$ref": "#/components/schemas/ScanValuesResponse"
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}":
+    post:
+      operationId: writeNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: POST /v2/namespaces/{namespace}
+      x-hevlayer-client-aliases:
+      - operationId: branchNamespace
+        upstreamKey: POST /v2/namespaces/{namespace}?stainless_overload=branchFrom
+        query:
+          stainless_overload: branchFrom
+        requestBodySchema:
+          "$ref": "#/components/schemas/TurbopufferBranchFromRequest"
+        responseSchema:
+          "$ref": "#/components/schemas/TurbopufferWriteResponse"
+      - operationId: copyNamespace
+        upstreamKey: POST /v2/namespaces/{namespace}?stainless_overload=copyFrom
+        query:
+          stainless_overload: copyFrom
+        requestBodySchema:
+          "$ref": "#/components/schemas/TurbopufferCopyFromRequest"
+        responseSchema:
+          "$ref": "#/components/schemas/TurbopufferWriteResponse"
+      summary: Write namespace rows
+      description: 'Native Turbopuffer write body for upserts, deletes, patches, filter
+        writes, schema updates, branch, copy, encryption, and related write options.
+        Row-producing writes are server-stamped and mirrored into Layer''s document
+        cache best-effort before the upstream call when ids are explicit. Conditional
+        and filter writes request affected ids from Turbopuffer and apply cache invalidation
+        and write-triggered UDF enqueue from the upstream affected-id set after success.
+
+'
+      tags:
+      - namespaces
+      - documents
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferWriteRequest"
+      responses:
+        '200':
+          description: Native Turbopuffer write response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferWriteResponse"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Turbopuffer write failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+    delete:
+      operationId: deleteNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: DELETE /v2/namespaces/{namespace}
+      summary: Delete a namespace
+      description: 'Hard-delete the upstream Turbopuffer namespace, then purge gateway-owned
+        namespace state: Aerospike document rows and snapshot mirrors, S3 snapshots/search
+        history/clickstream/shard metadata, in-memory job/cache/consistency state,
+        and the operator-discovered Index CR when Index garbage collection is enabled.
+        Turbopuffer 404 is treated as idempotent success and still triggers local
+        cleanup. Other Turbopuffer failures return 502 before local cleanup runs.
+        Local cleanup failures after the upstream delete return 502 so callers can
+        retry the same delete.
+
+'
+      tags:
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Namespace deleted and local cleanup completed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/StatusResponse"
+        '502':
+          description: Turbopuffer delete failed or local cleanup was incomplete
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/import":
+    post:
+      operationId: importNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Bulk import Arrow IPC rows
+      description: 'Forward an Arrow IPC stream to a backend bulk import path. Search-backed
+        VectorStores map this to `POST /ns/{namespace}/import` and return the backend''s
+        async operation response. Backends without a native binary import path return
+        `UnsupportedByStore`.
+
+'
+      tags:
+      - namespaces
+      - documents
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/vnd.apache.arrow.stream:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          description: Import operation accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - operation_id
+                - kind
+                - namespace
+                - status
+                properties:
+                  operation_id:
+                    type: string
+                  kind:
+                    type: string
+                    enum:
+                    - import
+                  namespace:
+                    type: string
+                  status:
+                    type: string
+        '422':
+          description: Backend does not support binary import or request validation
+            failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Import forwarding failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/query":
+    post:
+      operationId: queryTurbopufferNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: POST /v2/namespaces/{namespace}/query
+      summary: Query a namespace with a raw Turbopuffer request
+      description: 'Passthrough for upstream Turbopuffer query bodies, including `rank_by`,
+        `filters`, `include_attributes`, and raw query pagination. Layer forwards
+        the body to Turbopuffer''s `/v2/namespaces/{namespace}/query` endpoint without
+        applying native Layer query validation.
+
+'
+      tags:
+      - turbopuffer
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferQueryRequest"
+      responses:
+        '200':
+          description: Upstream Turbopuffer query response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferQueryResponse"
+        '502':
+          description: Turbopuffer passthrough failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/query":
+    post:
+      operationId: query
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Federate one query across namespaces
+      description: 'Runs one logical query against a caller-supplied set of namespaces
+        and returns one fused `rows` list. The gateway fans out to the normal per-namespace
+        query machinery, annotates every row with `$namespace` and `$rank`, and merges
+        by distance for vector/semantic routes or by rank-interleave for text and
+        hybrid routes. `namespaces: ["*"]` or an omitted `namespaces` field expands
+        the authenticated key''s namespace allowlist at request time.
+
+'
+      tags:
+      - query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/FederatedQueryRequest"
+      responses:
+        '200':
+          description: Fused cross-namespace query response.
+          headers:
+            x-layer-stable-as-of:
+              "$ref": "#/components/headers/LayerStableAsOf"
+            x-layer-partial:
+              "$ref": "#/components/headers/LayerPartial"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/FederatedQueryResponse"
+        '422':
+          description: 'Request validation error. Returned for an empty namespace
+            set, `namespaces: ["*"]` mixed with other names, cursor usage, invalid
+            fusion options, invalid underlying query shape, or strict vector merge
+            with missing/mismatched embedding profiles.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '403':
+          description: A named namespace is outside the authenticated minted key's
+            namespace grant.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: All namespace legs failed, or strict mode failed on one leg.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/query":
+    post:
+      operationId: queryNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-hevlayer-client-aliases:
+      - operationId: batchQueryNamespace
+        upstreamKey: POST /v2/namespaces/{namespace}/query?stainless_overload=multiQuery
+        query:
+          stainless_overload: multiQuery
+        requestBodySchema:
+          "$ref": "#/components/schemas/BatchQueryRequest"
+        responseSchema:
+          "$ref": "#/components/schemas/BatchQueryResponse"
+      summary: Query a namespace by vector, document id, or Layer rank expression
+      description: |
+        Query nearest neighbors in a namespace. The caller supplies either a raw `vector` or `nearest_to_id` (an array of document ids; the gateway looks up each document's vector from the Aerospike cache, falling back to the namespace's configured VectorStore on miss with a cache backfill, and averages the resolved vectors component-wise into a single centroid query vector). The gateway forwards the vector search to that store and may inject a consistency watermark filter while the upstream index is updating. Query bypasses the document cache for results; cache-status telemetry is absent for this endpoint.
+        Two Layer-only `rank_by` spellings are intercepted ahead of passthrough. `["field", "HybridText", "input", {options}?]` runs hybrid text fusion: the gateway tokenizes the input (alyze, the `word_v4` tokenizer), expands one BM25 leg plus one fuzzy leg per token, and fuses them with RRF; the response carries a `hybrid` echo block. With `include_leg_breakdown: true`, fused rows also carry `$fused.legs` entries naming the BM25, fuzzy-token, and semantic legs that ranked the row. `["field", "Auto", "input", {route?, vector?}?]` runs the query router: the route (`hybrid_text`, `semantic`, or `fused`) is chosen from the token count alone, and a vectorless request routed `semantic`/`fused` returns a deferral (`routing` block with `executed: false`, empty `rows`) so the application can embed and re-issue with the route forced. All other bodies — including native multi-query + `rerank_by` — pass through unchanged.
+        The `vector` column is never returned in `attributes`; if a caller lists `vector` in `include_attributes`, the gateway strips it and sets `x-layer-warning: vector_attribute_dropped` on the response.
+      tags:
+      - namespaces
+      - query
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: x-hevlayer-search-query
+        in: header
+        required: false
+        schema:
+          type: string
+        description: 'Human query text to record in search history as `raw_query`.
+          Keep search text here rather than encoding it as a tag.
+
+'
+      - name: x-hevlayer-tags
+        in: header
+        required: false
+        schema:
+          type: string
+        description: 'Comma-separated search-history tags. Layer trims, sorts, and
+          dedupes tags before storing them. Up to 32 unique tags are accepted; each
+          tag is at most 128 bytes and may contain ASCII letters, digits, '':'', ''_'',
+          ''-'', ''.'', ''/'', ''='', or ''+''. Commas separate tags and cannot be
+          escaped.
+
+'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/QueryRequest"
+      responses:
+        '200':
+          description: Upstream-shaped query rows; Layer read metadata is returned
+            in headers.
+          headers:
+            traceparent:
+              schema:
+                type: string
+              description: Trace context generated or propagated for search/clickstream
+                correlation.
+            x-layer-stable-as-of:
+              "$ref": "#/components/headers/LayerStableAsOf"
+            x-layer-next-cursor:
+              "$ref": "#/components/headers/LayerNextCursor"
+            x-layer-warning:
+              "$ref": "#/components/headers/LayerWarning"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/QueryResponse"
+        '404':
+          description: "`nearest_to_id` was supplied but one or more of the referenced
+            documents has no vector in Aerospike or the configured VectorStore. The
+            error names the missing ids.\n"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: 'Request validation error. Returned when neither `vector` nor
+            `nearest_to_id` is supplied, both are supplied, or `nearest_to_id` is
+            an empty array. For `HybridText`/`Auto` expressions: the input yields
+            zero tokens under the tokenizer policy, the expression appears inside
+            a `queries` body, an option is out of range, the fused cursor exceeds
+            the bounded depth, or a forced `semantic`/`fused` route lacks a `vector`.
+
+'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: VectorStore query failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/explain_query":
+    post:
+      operationId: explainTurbopufferQuery
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: POST /v2/namespaces/{namespace}/explain_query
+      summary: Explain a Turbopuffer query plan
+      description: Raw Turbopuffer-compatible query-plan explanation passthrough.
+      tags:
+      - turbopuffer
+      - query
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/TurbopufferQueryRequest"
+      responses:
+        '200':
+          description: Query plan explanation
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/TurbopufferExplainQueryResponse"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces":
+    get:
+      operationId: listNamespaces
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List namespaces
+      description: List namespaces with optional prefix filter and cursor pagination.
+      tags:
+      - namespaces
+      parameters:
+      - name: prefix
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Filter namespaces by prefix
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Pagination cursor from a previous response
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+      responses:
+        '200':
+          description: Namespaces listed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NamespaceList"
+        '502':
+          description: Upstream error fetching the namespace list
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/metadata":
+    get:
+      operationId: getNamespaceMetadata
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      x-turbopuffer-key: GET /v2/namespaces/{namespace}/metadata
+      summary: Get namespace metadata
+      description: 'Get metadata for a namespace including schema, row counts, byte
+        sizes, and custom config.
+
+'
+      tags:
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Namespace metadata
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NamespaceMetadata"
+        '404':
+          description: Namespace not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/init":
+    post:
+      operationId: initNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: unsupported
+      summary: Initialize namespace metadata and shard backfill
+      description: 'Persist Layer''s reserved namespace marker row, start or reattach
+        to the embedded shard backfill task, and return the current init status. Scatter/gather
+        remains inactive until `shard_lag_rows` reaches zero.
+
+'
+      tags:
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/InitNamespaceRequest"
+      responses:
+        '200':
+          description: Namespace init accepted or reattached
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/InitNamespaceResponse"
+        '404':
+          description: Namespace not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '409':
+          description: Requested shard_count conflicts with the existing marker
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: Invalid init request
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/license":
+    get:
+      operationId: getLicense
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Read pro license state
+      description: 'Returns the pro gateway''s local license projection. This endpoint
+        is an oracle for dashboard and release-gate tests; it never phones home and
+        derives state from the configured license token plus the gateway''s codified
+        grace cushion.
+
+'
+      tags:
+      - license
+      responses:
+        '200':
+          description: License state
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/LicenseState"
+  "/v2/metrics/query":
+    get:
+      operationId: queryMetrics
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Run an instant PromQL query
+      description: 'Thin gateway passthrough to the configured VictoriaMetrics-compatible
+        `/api/v1/query` endpoint. The response body is returned with the same JSON
+        shape as the upstream Prometheus API.
+
+'
+      tags:
+      - observability
+      parameters:
+      - name: query
+        in: query
+        required: true
+        schema:
+          type: string
+        description: PromQL expression.
+      - name: time
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional evaluation timestamp accepted by Prometheus.
+      - name: timeout
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional query timeout accepted by Prometheus.
+      responses:
+        '200':
+          description: Prometheus API response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/PrometheusResponse"
+        '503':
+          description: Metrics backend not configured
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/metrics/query_range":
+    get:
+      operationId: queryMetricsRange
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Run a ranged PromQL query
+      description: 'Thin gateway passthrough to the configured VictoriaMetrics-compatible
+        `/api/v1/query_range` endpoint. The response body is returned with the same
+        JSON shape as the upstream Prometheus API.
+
+'
+      tags:
+      - observability
+      parameters:
+      - name: query
+        in: query
+        required: true
+        schema:
+          type: string
+        description: PromQL expression.
+      - name: start
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Range start timestamp accepted by Prometheus.
+      - name: end
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Range end timestamp accepted by Prometheus.
+      - name: step
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Query resolution step accepted by Prometheus.
+      - name: timeout
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional query timeout accepted by Prometheus.
+      responses:
+        '200':
+          description: Prometheus API response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/PrometheusResponse"
+        '503':
+          description: Metrics backend not configured
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/metrics/api/v1/query":
+    get:
+      operationId: queryMetricsApiV1
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Run an instant PromQL query (Prometheus-API path)
+      description: 'Prometheus-API-compatible alias of `/v2/metrics/query`; identical
+        handler and response. Thin gateway passthrough to the configured VictoriaMetrics-compatible
+        `/api/v1/query` endpoint. The response body is returned with the same JSON
+        shape as the upstream Prometheus API.
+
+'
+      tags:
+      - observability
+      parameters:
+      - name: query
+        in: query
+        required: true
+        schema:
+          type: string
+        description: PromQL expression.
+      - name: time
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional evaluation timestamp accepted by Prometheus.
+      - name: timeout
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional query timeout accepted by Prometheus.
+      responses:
+        '200':
+          description: Prometheus API response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/PrometheusResponse"
+        '503':
+          description: Metrics backend not configured
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/metrics/api/v1/query_range":
+    get:
+      operationId: queryMetricsRangeApiV1
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Run a ranged PromQL query (Prometheus-API path)
+      description: 'Prometheus-API-compatible alias of `/v2/metrics/query_range`;
+        identical handler and response. Thin gateway passthrough to the configured
+        VictoriaMetrics-compatible `/api/v1/query_range` endpoint. The response body
+        is returned with the same JSON shape as the upstream Prometheus API.
+
+'
+      tags:
+      - observability
+      parameters:
+      - name: query
+        in: query
+        required: true
+        schema:
+          type: string
+        description: PromQL expression.
+      - name: start
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Range start timestamp accepted by Prometheus.
+      - name: end
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Range end timestamp accepted by Prometheus.
+      - name: step
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Query resolution step accepted by Prometheus.
+      - name: timeout
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Optional query timeout accepted by Prometheus.
+      responses:
+        '200':
+          description: Prometheus API response
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/PrometheusResponse"
+        '503':
+          description: Metrics backend not configured
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/metrics/catalog":
+    get:
+      operationId: listMetricsCatalog
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List the gateway's Prometheus metric catalog
+      description: |
+        Returns the documentation for every Prometheus metric the gateway registers. The catalog is compiled into the binary — there is no upstream that can fail and no operational state involved. Entries are sorted by `name` for stable diffs.
+        Long `Cache-Control` and an `ETag` derived from a hash of the catalog body are returned so dashboards and CLIs can revalidate cheaply across requests. The catalog only changes on a gateway deploy.
+        No authentication is required — this endpoint mirrors the posture of `/metrics`, since `MetricDoc` is documentation, not state.
+      tags:
+      - observability
+      security: []
+      parameters:
+      - name: family
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/MetricFamily"
+        description: 'Optional family filter. Computed server-side from the metric''s
+          explicit `family` attribute (not a name-prefix heuristic). Returns 400 with
+          an `invalid_family` error code if the value is not one of the known families.
+
+'
+      responses:
+        '200':
+          description: Catalog returned
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Long-lived cache directive; the catalog only changes on
+                deploy.
+            ETag:
+              schema:
+                type: string
+              description: Quoted hex digest derived from the catalog body.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/MetricCatalog"
+        '400':
+          description: Unknown family value
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/metrics/catalog/{name}":
+    get:
+      operationId: getMetricCatalogEntry
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get a single metric catalog entry
+      description: 'Returns one catalog entry, identified by Prometheus metric name.
+        Convenience surface for `layer explain <metric-name>` — returns the entry
+        without the envelope. 404 when unknown.
+
+'
+      tags:
+      - observability
+      security: []
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Prometheus metric name.
+      responses:
+        '200':
+          description: Catalog entry returned
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/MetricCatalogEntry"
+        '404':
+          description: Metric is not registered in the catalog
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/vectorstores":
+    get:
+      operationId: listVectorstores
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: List VectorStores
+      description: 'List declared VectorStore resources from the configured resource
+        namespace. The response is a credential-safe projection: it includes Secret
+        reference names and keys, but never Secret contents. Requires read scope.
+
+'
+      tags:
+      - vectorstores
+      responses:
+        '200':
+          description: VectorStores listed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/VectorStoreList"
+        '503':
+          description: Kubernetes access is unavailable on this gateway
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/vectorstores/{name}":
+    get:
+      operationId: getVectorstore
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Get a VectorStore
+      description: 'Get one credential-safe VectorStore projection. `turbopufferUrl`
+        is present only when `spec.turbopuffer.orgId` is set. Requires read scope.
+
+'
+      tags:
+      - vectorstores
+      parameters:
+      - "$ref": "#/components/parameters/vectorstoreName"
+      responses:
+        '200':
+          description: VectorStore found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/VectorStore"
+        '404':
+          description: VectorStore not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Kubernetes access is unavailable on this gateway
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+components:
+  parameters:
+    namespace:
+      name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Namespace name
+    job_id:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Ephemeral job ID
+    scan_id:
+      name: scan_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Scan job ID
+    vectorstoreName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+      description: VectorStore resource name
+  headers:
+    LayerStableAsOf:
+      description: Epoch-ms consistency watermark the read was served at.
+      schema:
+        type: integer
+        format: int64
+    LayerNextCursor:
+      description: Opaque pagination cursor for the next single-query page.
+      schema:
+        type: string
+    LayerWarning:
+      description: 'Non-fatal advisory about a request the gateway accepted but had
+        to adjust. Present when the gateway silently dropped a field the caller asked
+        for. Today only `vector_attribute_dropped` is defined: the caller listed `vector`
+        in `include_attributes`, the gateway never returns vectors, so the field was
+        removed from the response.
+
+'
+      schema:
+        type: string
+        enum:
+        - vector_attribute_dropped
+    LayerPartial:
+      description: "`true` when a federated best-effort query returned successful
+        namespace legs and reported one or more failed legs in `errors`.\n"
+      schema:
+        type: string
+        enum:
+        - 'true'
+  schemas:
+    LicenseSurfaceState:
+      type: object
+      required:
+      - state
+      - seconds_to_deadline
+      - grace_seconds_remaining
+      properties:
+        state:
+          type: string
+          enum:
+          - licensed
+          - grace
+          - floor
+        seconds_to_deadline:
+          type: integer
+          format: int64
+        grace_seconds_remaining:
+          type: integer
+          format: int64
+    LicenseState:
+      type: object
+      required:
+      - valid
+      - gateway
+      properties:
+        valid:
+          type: boolean
+        state:
+          type: string
+          enum:
+          - floor
+          description: Present for missing or invalid license tokens.
+        reason:
+          type: string
+          description: Missing/invalid reason when no valid token is configured.
+        sub:
+          type: string
+        tier:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        limits:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        exp:
+          type: string
+          format: date-time
+        gateway:
+          "$ref": "#/components/schemas/LicenseSurfaceState"
+    Document:
+      type: object
+      required:
+      - id
+      - attributes
+      properties:
+        id:
+          type: string
+        attributes:
+          type: object
+          additionalProperties: true
+    FetchDocumentsRequest:
+      type: object
+      required:
+      - ids
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Document IDs to retrieve
+        include_attributes:
+          type: array
+          items:
+            type: string
+          description: Attributes to include. If omitted, all attributes are returned.
+    FetchDocumentsResponse:
+      type: object
+      required:
+      - documents
+      - missing
+      properties:
+        documents:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Document"
+        missing:
+          type: array
+          items:
+            type: string
+          description: IDs that were not found in the cache
+    StatusResponse:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        rows_affected:
+          type: integer
+          format: int64
+        rows_upserted:
+          type: integer
+          format: int64
+        rows_patched:
+          type: integer
+          format: int64
+        rows_deleted:
+          type: integer
+          format: int64
+        billing:
+          type: object
+          additionalProperties: true
+    TurbopufferNamespaceSummary:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    TurbopufferNamespaceList:
+      type: object
+      required:
+      - namespaces
+      properties:
+        namespaces:
+          type: array
+          items:
+            "$ref": "#/components/schemas/TurbopufferNamespaceSummary"
+        next_cursor:
+          type: string
+    TurbopufferSchema:
+      type: object
+      additionalProperties: true
+    TurbopufferMetadataPatch:
+      type: object
+      additionalProperties: true
+      properties:
+        pinning: {}
+    TurbopufferWriteRequest:
+      type: object
+      additionalProperties: true
+      description: Native Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`,
+        filter writes, copy, branch, schema, encryption, etc.).
+    TurbopufferBranchFromRequest:
+      type: object
+      additionalProperties: true
+      properties:
+        branch_from_namespace:
+          type: object
+          additionalProperties: true
+      required:
+      - branch_from_namespace
+    TurbopufferCopyFromRequest:
+      type: object
+      additionalProperties: true
+      properties:
+        copy_from_namespace:
+          oneOf:
+          - type: string
+          - type: object
+            additionalProperties: true
+      required:
+      - copy_from_namespace
+    TurbopufferWriteResponse:
+      type: object
+      required:
+      - status
+      - message
+      - rows_affected
+      - billing
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        rows_affected:
+          type: integer
+          format: int64
+        rows_upserted:
+          type: integer
+          format: int64
+        rows_patched:
+          type: integer
+          format: int64
+        rows_deleted:
+          type: integer
+          format: int64
+        rows_remaining:
+          type: boolean
+        upserted_ids:
+          type: array
+          items: {}
+        patched_ids:
+          type: array
+          items: {}
+        deleted_ids:
+          type: array
+          items: {}
+        billing:
+          type: object
+          additionalProperties: true
+        performance:
+          type: object
+          additionalProperties: true
+    TurbopufferQueryRequest:
+      type: object
+      additionalProperties: true
+      description: Native Turbopuffer query body (`rank_by`, `filters`, `aggregate_by`,
+        `group_by`, `limit`, etc.).
+    TurbopufferQueryResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        aggregations:
+          type: object
+          additionalProperties: true
+        aggregation_groups:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        billing:
+          type: object
+          additionalProperties: true
+        performance:
+          type: object
+          additionalProperties: true
+    BatchQueryRequest:
+      type: object
+      required:
+      - queries
+      properties:
+        queries:
+          type: array
+          items:
+            "$ref": "#/components/schemas/TurbopufferQueryRequest"
+        consistency:
+          type: object
+          additionalProperties: true
+        vector_encoding:
+          type: string
+    BatchQueryResponse:
+      type: object
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            "$ref": "#/components/schemas/TurbopufferQueryResponse"
+        billing:
+          type: object
+          additionalProperties: true
+        performance:
+          type: object
+          additionalProperties: true
+        stable_as_of:
+          type:
+          - integer
+          - 'null'
+          description: SDK field populated from the `x-layer-stable-as-of` response
+            header.
+    TurbopufferExplainQueryResponse:
+      type: object
+      properties:
+        plan_text:
+          type: string
+    TurbopufferRecallRequest:
+      type: object
+      additionalProperties: true
+      properties:
+        num:
+          type: integer
+        top_k:
+          type: integer
+        filters: {}
+        rank_by: {}
+        include_ground_truth:
+          type: boolean
+    TurbopufferRecallResponse:
+      type: object
+      required:
+      - avg_recall
+      - avg_exhaustive_count
+      - avg_ann_count
+      properties:
+        avg_recall:
+          type: number
+        avg_exhaustive_count:
+          type: number
+        avg_ann_count:
+          type: number
+        ground_truth:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    HintCacheWarmResponse:
+      type: object
+      description: 'With warm options supplied, reports per-step warm results (`namespace`,
+        `turbopuffer`, `documents`, `snapshots`, `blobs`). With no query parameters
+        the body is Turbopuffer''s own `hint_cache_warm` response, passed through
+        verbatim — its shape is owned by upstream, so all per-step fields are absent.
+
+'
+      additionalProperties: true
+      properties:
+        namespace:
+          type: string
+        turbopuffer:
+          "$ref": "#/components/schemas/WarmStepResponse"
+        documents:
+          "$ref": "#/components/schemas/WarmDocumentsResponse"
+        snapshots:
+          "$ref": "#/components/schemas/WarmSnapshotsResponse"
+        blobs:
+          "$ref": "#/components/schemas/WarmBlobsResponse"
+    JobStatus:
+      type: string
+      enum:
+      - running
+      - completed
+      - failed
+    SnapshotSource:
+      type: string
+      enum:
+      - auto
+      - stored
+      - cache
+      - origin
+    ScanSource:
+      type: string
+      enum:
+      - auto
+      - cache
+      - origin
+      - snapshot
+      description: "`snapshot` applies to values scans only: the latest snapshot's
+        pre-aggregated facet histogram. ID scans reject it at create time.\n"
+    ScanCountSource:
+      type: string
+      enum:
+      - auto
+      - snapshot
+      - cache
+      - origin
+    ScanMode:
+      type: string
+      enum:
+      - ids
+      - count
+      - values
+      default: ids
+    ScanCountServedBy:
+      type: string
+      enum:
+      - snapshot
+      - cache
+      - origin
+    CreateSnapshotRequest:
+      type: object
+      required:
+      - field
+      properties:
+        field:
+          type: string
+        source:
+          "$ref": "#/components/schemas/SnapshotSource"
+        filters:
+          description: Optional Turbopuffer filter expression. Not supported with
+            source `stored`.
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+    SnapshotPolicy:
+      type: object
+      description: 'Automatic snapshot writer policy. Mirrors `Index.spec.snapshot`
+        so the Kubernetes CR and API entry point use one vocabulary.
+
+'
+      properties:
+        facetFields:
+          type: array
+          items:
+            type: string
+          default: []
+          description: 'Facet fields to histogram. Empty disables the automatic writer
+            for the namespace.
+
+'
+        interval:
+          type: string
+          default: 5m
+          description: 'Minimum spacing between automatic snapshot writes after upstream-stable
+            advances.
+
+'
+        retention:
+          type: string
+          default: never
+          description: 'Retention window for snapshot bodies, or `never` to keep history.
+
+'
+    CreateScanRequest:
+      type: object
+      description: 'Carries at most one ranked selector (`fts`, `hybrid_text`, or
+        `ann`). `filters` is the sole selector when no ranked selector is present,
+        all rows when omitted, or an extra AND constraint on a ranked scan.
+
+'
+      properties:
+        source:
+          "$ref": "#/components/schemas/ScanCountSource"
+        filters:
+          description: 'Optional Turbopuffer filter expression. Standalone filter
+            selector, or an additional AND constraint on a ranked scan.
+
+'
+        as_of:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'Epoch-ms temporal upper bound. Mutually exclusive with `between`.
+            The gateway conjoins `_hevlayer_upserted_at <= as_of` with `filters` before
+            evaluating the scan.
+
+'
+        between:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+            format: int64
+            minimum: 0
+          description: 'Epoch-ms temporal window `[lo, hi]` interpreted as `lo < _hevlayer_upserted_at
+            <= hi`. Mutually exclusive with `as_of` and requires `lo < hi`.
+
+'
+        fts:
+          "$ref": "#/components/schemas/FtsScan"
+        hybrid_text:
+          "$ref": "#/components/schemas/HybridTextScan"
+        ann:
+          "$ref": "#/components/schemas/AnnScan"
+        mode:
+          "$ref": "#/components/schemas/ScanMode"
+        field:
+          type: string
+          description: 'Values mode only: the attribute field to enumerate. Required
+            for `mode: values`, rejected on other modes. Scalar string and integer
+            attributes, plus arrays of strings (each element counts once per containing
+            document).
+
+'
+        exhaustive:
+          type: boolean
+          default: false
+          description: 'Ranked scans only. `false` runs one scatter/gather and lets
+            saturated shards bound the result; `true` recurses saturated BM25 `fts`
+            shards via score-band pagination until short or the deadline. HybridText
+            and ANN scans do not use score-band pagination; saturated pages remain
+            bounded.
+
+'
+        threads:
+          type: integer
+          minimum: 1
+          description: 'Maximum concurrent upstream requests used by this scan''s
+            origin scatter/gather. Omit to use `Index.spec.scan.threads`, then the
+            gateway default. Values above the server cap are clamped and echoed in
+            the response/job; ignored on snapshot and cache reads.
+
+'
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 30
+          description: Count-mode deadline.
+    FtsScan:
+      type: object
+      description: Full-text (BM25) scan selector. Exact; origin scatter/gather.
+      required:
+      - field
+      - query
+      properties:
+        field:
+          type: string
+          description: BM25-indexed field to rank against.
+        query:
+          type: string
+          description: User query string passed to BM25.
+    HybridTextScan:
+      type: object
+      description: 'HybridText scan selector. Counts the de-duplicated union of the
+        BM25 leg, the per-token fuzzy legs, and the per-token surfacing legs (the
+        RFC 0057 fallback). The scan always evaluates all three sets, so its count
+        is a superset of the `hybrid_text` query route''s deduped rows — the route
+        only adds the surfacing legs when its primary legs return nothing. Origin
+        scatter/gather.
+
+'
+      required:
+      - field
+      - query
+      properties:
+        field:
+          type: string
+          description: Full-text field to rank and fuzzy-match against.
+        query:
+          type: string
+          description: User query passed through the HybridText tokenizer policy.
+        fuzziness:
+          description: 'Optional fuzziness policy: `"auto"`, `0`, `1`, or `2`.'
+          oneOf:
+          - type: string
+            enum:
+            - auto
+          - type: integer
+            minimum: 0
+            maximum: 2
+    AnnScan:
+      type: object
+      description: 'Radius (ANN) scan selector — rows within `radius` of `vector`,
+        a distance-ball scan evaluated by approximate nearest-neighbour search. Approximate;
+        origin scatter/gather.
+
+'
+      required:
+      - vector
+      - radius
+      properties:
+        vector:
+          type: array
+          items:
+            type: number
+          description: Query vector.
+        field:
+          type: string
+          default: vector
+          description: Vector field name.
+        radius:
+          type: number
+          description: 'Required, finite upper bound on distance — the radius of the
+            ball the scan counts. The gateway applies the bound to returned `$dist`
+            rows; it is not pushed upstream as a filter.
+
+'
+    WarmStepStatus:
+      type: string
+      enum:
+      - skipped
+      - completed
+      - started
+      - no_snapshot
+    WarmStepResponse:
+      type: object
+      required:
+      - enabled
+      - status
+      properties:
+        enabled:
+          type: boolean
+        status:
+          "$ref": "#/components/schemas/WarmStepStatus"
+    WarmDocumentsResponse:
+      type: object
+      required:
+      - enabled
+      - status
+      properties:
+        enabled:
+          type: boolean
+        status:
+          "$ref": "#/components/schemas/WarmStepStatus"
+        job:
+          "$ref": "#/components/schemas/WarmJob"
+    WarmSnapshotsResponse:
+      type: object
+      required:
+      - enabled
+      - status
+      properties:
+        enabled:
+          type: boolean
+        status:
+          "$ref": "#/components/schemas/WarmStepStatus"
+        key:
+          type: string
+          description: S3 key mirrored into Aerospike.
+        watermark_ms:
+          type: integer
+          description: Snapshot consistency watermark.
+        sha:
+          type: string
+          description: Snapshot content SHA-256.
+    WarmBlobsResponse:
+      type: object
+      required:
+      - enabled
+      - status
+      - documents_scanned
+      - refs_seen
+      - objects
+      - bytes
+      - missing
+      - invalid_refs
+      - budget_exhausted
+      properties:
+        enabled:
+          type: boolean
+        status:
+          "$ref": "#/components/schemas/WarmStepStatus"
+        attributes:
+          type: array
+          description: Declared document attributes scanned for blob references.
+          items:
+            type: string
+        budget_bytes:
+          type: integer
+          description: Per-call blob byte budget.
+        documents_scanned:
+          type: integer
+          description: Origin documents scanned while hydrating blobs.
+        refs_seen:
+          type: integer
+          description: Valid blob references observed before deduplication.
+        objects:
+          type: integer
+          description: Unique blob objects written into Aerospike.
+        bytes:
+          type: integer
+          description: Blob bytes written into Aerospike.
+        missing:
+          type: integer
+          description: Referenced blobs missing from durable S3 storage.
+        invalid_refs:
+          type: integer
+          description: Values in declared attributes that were not valid same-namespace
+            blob refs.
+        budget_exhausted:
+          type: boolean
+          description: True when warm stopped before crossing `budget_bytes`.
+    JobBase:
+      type: object
+      required:
+      - id
+      - namespace
+      - status
+      - progress
+      - documents_scanned
+      - created_at
+      properties:
+        id:
+          type: string
+        namespace:
+          type: string
+        status:
+          "$ref": "#/components/schemas/JobStatus"
+        progress:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        documents_scanned:
+          type: integer
+        stable_as_of:
+          type: integer
+          description: Epoch-ms watermark associated with the job output.
+        created_at:
+          type: string
+        completed_at:
+          type:
+          - string
+          - 'null'
+        error:
+          type:
+          - string
+          - 'null'
+    SnapshotJob:
+      allOf:
+      - "$ref": "#/components/schemas/JobBase"
+      - type: object
+        required:
+        - field
+        - source
+        properties:
+          field:
+            type: string
+          source:
+            "$ref": "#/components/schemas/SnapshotSource"
+          effective_source:
+            "$ref": "#/components/schemas/SnapshotSource"
+          sha:
+            type:
+            - string
+            - 'null'
+    SnapshotJobList:
+      type: object
+      required:
+      - snapshot_jobs
+      properties:
+        snapshot_jobs:
+          type: array
+          items:
+            "$ref": "#/components/schemas/SnapshotJob"
+    WarmJob:
+      allOf:
+      - "$ref": "#/components/schemas/JobBase"
+    WarmJobList:
+      type: object
+      required:
+      - warm_jobs
+      properties:
+        warm_jobs:
+          type: array
+          items:
+            "$ref": "#/components/schemas/WarmJob"
+    ScanJob:
+      allOf:
+      - "$ref": "#/components/schemas/JobBase"
+      - type: object
+        required:
+        - mode
+        - source
+        properties:
+          mode:
+            "$ref": "#/components/schemas/ScanMode"
+          field:
+            type: string
+            description: Values mode — the enumerated attribute field.
+          source:
+            "$ref": "#/components/schemas/ScanSource"
+          effective_source:
+            "$ref": "#/components/schemas/ScanSource"
+          unique_values:
+            type: integer
+            format: int64
+            description: 'Values mode — distinct values held by the completed job.
+
+'
+          truncated:
+            type: boolean
+            description: 'Values mode — the 1,000,000 distinct-value cap was crossed;
+              the listing holds the top values by count, each with an exact count.
+
+'
+          bounded:
+            type: boolean
+            description: 'Ranked values scans — a shard saturated its `top_k` cap
+              or the deadline elapsed, so per-value counts are `>=` lower bounds and
+              the listing may be incomplete.
+
+'
+          approximate:
+            type: boolean
+            description: Ranked `ann` values scans — ANN recall error.
+          snapshot_sha:
+            type: string
+            description: 'Snapshot-served values scans — content SHA of the snapshot
+              body that answered the scan.
+
+'
+          watermark_ms:
+            type: integer
+            format: int64
+            description: 'Snapshot-served values scans — the snapshot''s stable watermark.
+
+'
+          threads:
+            type: integer
+            format: int32
+            description: 'Effective origin fan-out width. Present only when the scan
+              job actually ran origin scatter/gather.
+
+'
+    ScanJobList:
+      type: object
+      required:
+      - scans
+      properties:
+        scans:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ScanJob"
+    ScanValue:
+      type: object
+      description: 'One distinct value of a values scan, in the snapshot body''s `{v,
+        n}` vocabulary — `v` is the value, `n` its document count.
+
+'
+      required:
+      - v
+      - n
+      properties:
+        v:
+          type: string
+        n:
+          type: integer
+          format: int64
+    ScanValuesResponse:
+      type: object
+      required:
+      - values
+      - total
+      - truncated
+      properties:
+        values:
+          type: array
+          description: Ordered by `n` descending, then `v` ascending.
+          items:
+            "$ref": "#/components/schemas/ScanValue"
+        total:
+          type: integer
+          format: int64
+          description: Distinct values held by the job, before `limit`/`offset`.
+        truncated:
+          type: boolean
+    ScanIdsResponse:
+      type: object
+      required:
+      - ids
+      - total
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+        total:
+          type: integer
+    ScanCountResponse:
+      type: object
+      required:
+      - count
+      - served_by
+      - elapsed_ms
+      properties:
+        count:
+          type: integer
+          format: int64
+        served_by:
+          "$ref": "#/components/schemas/ScanCountServedBy"
+        snapshot_sha:
+          type: string
+        watermark_ms:
+          type: integer
+          format: int64
+        bounded:
+          type: boolean
+        timed_out:
+          type: boolean
+        shards_saturated:
+          type: integer
+          format: int64
+        shards_total:
+          type: integer
+          format: int64
+        approximate:
+          type: boolean
+          description: "`true` when the count carries ANN recall error (radius scans):
+            the index's membership of the distance ball is itself fuzzy, independent
+            of saturation. Absent (≡ exact) on filter and FTS scans.\n"
+        threads:
+          type: integer
+          format: int32
+          description: 'Effective origin fan-out width. Present only when the count
+            ran origin scatter/gather; snapshot and cache reads do not fan out.
+
+'
+        elapsed_ms:
+          type: integer
+          format: int64
+    NamespaceList:
+      type: object
+      description: 'Layer-augmented namespace list. Each entry is composed from the
+        upstream Turbopuffer namespace list, per-namespace metadata, and the document
+        cache. The shape is designed so a dashboard or `layer` CLI does not have to
+        fan out across `/metadata` + `/health` for every row.
+
+'
+      required:
+      - namespaces
+      properties:
+        namespaces:
+          type: array
+          items:
+            "$ref": "#/components/schemas/NamespaceListEntry"
+        next_cursor:
+          type:
+          - string
+          - 'null'
+          description: 'Opaque pagination cursor returned by the upstream namespace
+            list. Present iff there are more pages.
+
+'
+    NamespaceListEntry:
+      type: object
+      description: 'Layer-augmented per-namespace row. Freshness fields come from
+        the row''s metadata fetch; cache and shadow fields come from Layer state.
+        When metadata is unavailable or lacks an index signal, `stable_as_of_ms` and
+        `is_stable` are omitted, `cache_state.state` is `"cold"` when no cache demand
+        has been observed, and `warm_inflight` is false.
+
+'
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          description: Namespace identifier as reported by Turbopuffer.
+        row_count:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Approximate row count from upstream `approx_row_count`. `null`
+            when per-namespace metadata could not be fetched.
+
+'
+        size_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Approximate logical byte size from upstream `approx_logical_bytes`.
+            `null` when metadata is unavailable.
+
+'
+        stable_as_of_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Epoch-ms timestamp of this row''s stable metadata observation.
+            Present when the per-row metadata fetch reports `index.status == "up-to-date"`.
+            Null when metadata is unavailable, updating, or has no index signal.
+
+'
+        is_stable:
+          type:
+          - boolean
+          - 'null'
+          description: 'True when the per-row metadata fetch reports `index.status
+            == "up-to-date"`, false when it reports `"updating"`, and null when metadata
+            is unavailable or has no index signal.
+
+'
+        schema_summary:
+          "$ref": "#/components/schemas/NamespaceSchemaSummary"
+        index:
+          "$ref": "#/components/schemas/IndexState"
+        cache_state:
+          "$ref": "#/components/schemas/NamespaceCacheState"
+        last_write_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Epoch-ms timestamp of the most recent observed write. Sourced
+            from upstream `last_write_at`; falls back to `stable_as_of_ms` when the
+            upstream field is absent. Null when neither is available.
+
+'
+        shadow:
+          type: boolean
+          description: 'True when the namespace is a shadow/secondary index. The current
+            convention is a `-shadow` suffix on the namespace name.
+
+'
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'User-set labels associated with the namespace, lifted from
+            upstream metadata. Empty when none are set.
+
+'
+        metadata_error:
+          type: string
+          description: 'Present when the per-namespace metadata fetch failed for this
+            row. The row is still returned (with name only) so the UI can render a
+            "metadata unavailable" badge instead of dropping it.
+
+'
+    NamespaceSchemaSummary:
+      type: object
+      description: 'Minimal schema view for list responses. The full upstream schema
+        is still available via `/v2/namespaces/{namespace}/metadata`.
+
+'
+      properties:
+        vector_dim:
+          type:
+          - integer
+          - 'null'
+          description: 'Dimensions of the vector field, when one is present in the
+            upstream schema. Null for namespaces without a vector column.
+
+'
+        fields:
+          type: array
+          items:
+            type: string
+          description: Top-level attribute names from the upstream schema.
+    IndexState:
+      type: object
+      description: 'Turbopuffer''s `index` metadata object, passed through verbatim.
+        The raw upstream per-fetch signal of how caught up indexing is. Namespace
+        list rows derive `is_stable` and `stable_as_of_ms` from this same metadata
+        fetch. Additional upstream sub-fields ride through unmodified.
+
+'
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum:
+          - updating
+          - up-to-date
+          description: '`"up-to-date"` when the upstream index is fully caught up;
+            `"updating"` while writes are still being indexed.
+
+'
+        unindexed_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Bytes written to the namespace''s write-ahead log but not
+            yet indexed. Present only when `status == "updating"` (Turbopuffer omits
+            it once caught up). Unindexed data is still searched by queries, so a
+            non-zero value means "behind, but serving" — watch it fall to confirm
+            indexing is draining rather than wedged.
+
+'
+    NamespaceCacheState:
+      type: object
+      description: 'Aerospike document-cache state for the namespace. Mirrors the
+        per- namespace entries reported by `/health` so a single list call is enough
+        to power dashboard fullness badges.
+
+'
+      required:
+      - state
+      - warm_inflight
+      properties:
+        state:
+          type: string
+          enum:
+          - cold
+          - warming
+          - warm
+        warmed_through_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Epoch-ms watermark observed at the end of the last completed
+            origin warm job. Null when no warm has completed yet.
+
+'
+        warm_inflight:
+          type: boolean
+          description: True when a background warm is currently running.
+    NamespaceMetadata:
+      type: object
+      required:
+      - id
+      - schema
+      - approx_logical_bytes
+      - approx_row_count
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: string
+        schema:
+          type: object
+          additionalProperties: true
+        approx_logical_bytes:
+          type: integer
+        approx_row_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        last_write_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        config:
+          type: object
+          additionalProperties: true
+        index:
+          "$ref": "#/components/schemas/IndexState"
+        layer:
+          "$ref": "#/components/schemas/NamespaceMetadataLayer"
+    NamespaceMetadataLayer:
+      type: object
+      description: Gateway-computed namespace freshness and readiness signals.
+      properties:
+        stable_as_of:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Epoch-ms watermark from the most recent stable consistency
+            poll. Null before the watcher has observed a stable namespace.
+
+'
+        is_stable:
+          type: boolean
+          description: 'True when the most recent consistency poll observed `index.status
+            == "up-to-date"`; false on cold start or while the upstream index is updating.
+
+'
+        indexed:
+          type:
+          - boolean
+          - 'null'
+          description: 'True when the latest snapshot''s indexed-row count is greater
+            than or equal to the upstream namespace row count. False while vector
+            rows are still missing from the indexed snapshot. Null for namespaces
+            without a vector column, when the latest stored snapshot predates row-count
+            capture, or when the snapshot lookup fails.
+
+'
+        index_lag_rows:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: 'Upstream namespace row count minus latest snapshot row count,
+            clamped at zero. Null when `indexed` is null.
+
+'
+        schema_version:
+          type: integer
+          format: int64
+          description: Layer reserved schema version stamped by namespace init.
+        init_state:
+          type: string
+          enum:
+          - running
+          - ready
+          description: Embedded namespace init drain state.
+        init_lag_rows:
+          type: integer
+          format: int64
+          description: Rows still missing init-owned reserved fields.
+        shard_count:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Persisted namespace shard count, or null for unsharded namespaces.
+        shard_state:
+          type: string
+          enum:
+          - unsharded
+          - backfilling
+          - ready
+          description: Shard backfill readiness state.
+        shard_lag_rows:
+          type: integer
+          format: int64
+          description: Rows still missing `_hevlayer_shard`.
+        scatter_gather_active:
+          type: boolean
+          description: True iff a shard marker exists and `shard_lag_rows` is zero.
+    InitNamespaceRequest:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          format: int64
+          minimum: 1
+          default: 1
+          description: Layer reserved schema version to stamp on the namespace marker.
+        shard_count:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Number of `_hevlayer_shard` buckets to backfill.
+    InitNamespaceResponse:
+      type: object
+      required:
+      - namespace
+      - layer
+      properties:
+        namespace:
+          type: string
+        layer:
+          "$ref": "#/components/schemas/NamespaceMetadataLayer"
+    QueryRequest:
+      type: object
+      description: |
+        Vector query request body. Caller must supply exactly one of `vector` (raw query vector) or `nearest_to_id` (an array of document ids; the gateway resolves each vector via Aerospike, falling back to the namespace's configured VectorStore on miss, and averages them into a centroid query vector). The gateway may add a consistency watermark filter before forwarding to that store.
+        `vector` is never returned in `attributes`. Listing `"vector"` in `include_attributes` causes the gateway to drop the field and set `x-layer-warning: vector_attribute_dropped` on the response.
+      properties:
+        vector:
+          type: array
+          items:
+            type: number
+          minItems: 1
+          description: 'Query vector. Mutually exclusive with `nearest_to_id`; exactly
+            one of the two is required.
+
+'
+        nearest_to_id:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: 'Document ids whose stored vectors are averaged component-wise
+            into the centroid query vector. Mutually exclusive with `vector`; exactly
+            one of the two is required, and the array must be non-empty. The gateway
+            looks each vector up in Aerospike and falls back to the namespace''s configured
+            VectorStore (with a cache backfill) on miss. Returns 404 naming any ids
+            with no vector in either place.
+
+'
+        top_k:
+          type: integer
+          minimum: 1
+          default: 10
+          description: Number of nearest neighbors to return.
+        filters:
+          description: Turbopuffer filter expression.
+        as_of:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'Epoch-ms temporal upper bound. Mutually exclusive with `between`.
+            The gateway conjoins `_hevlayer_upserted_at <= as_of` with the caller
+            filter before querying.
+
+'
+        between:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+            format: int64
+            minimum: 0
+          description: 'Epoch-ms temporal window `[lo, hi]` interpreted as `lo < _hevlayer_upserted_at
+            <= hi`. Mutually exclusive with `as_of` and requires `lo < hi`.
+
+'
+        include_attributes:
+          oneOf:
+          - type: boolean
+          - type: array
+            items:
+              type: string
+          description: 'Attributes to include in each result. `vector` is always stripped
+            from the response; explicitly listing it triggers an `x-layer-warning`
+            header.
+
+'
+        include_leg_breakdown:
+          type: boolean
+          default: false
+          description: 'Opt in to per-row `$fused.legs` provenance on Layer-expanded
+            fused responses (`HybridText`, and executed `Auto` routes that expand
+            hybrid-text legs). Each leg entry names the effective leg (`bm25`, `fuzzy:<token>`,
+            or `semantic`) and reports that row''s 1-based rank plus raw per-leg score/distance;
+            `rank` and `score` are null when the row fell outside that leg''s `per_leg_limit`
+            cut. Default false, so payload and unsharded query fan-out are unchanged
+            for callers that do not ask.
+
+'
+        cursor:
+          type: string
+          description: 'Opaque pagination token returned by a prior response''s `next_cursor`.
+            Resumes the same ranked query at the row that follows. Caller should treat
+            as opaque. Native vector queries decode it into a `($dist > last OR ($dist
+            == last AND id > last_id))` band filter. Layer-fused `HybridText` and
+            executed `Auto` routes decode it into a bounded server-side re-fetch offset
+            capped at 10,000 ranked rows.
+
+'
+        rank_by:
+          type: array
+          items: {}
+          description: 'Rank expression tuple. With `top_k`, Layer handles the portable
+            subset with cache, history, and stable-read behavior; native upstream
+            `rank_by` bodies that omit `top_k` pass through unchanged. For search-store
+            multivector namespaces, spell ANN over a vector bag as `["vectors", "ANN",
+            [[...], [...]]]`. Two Layer-only operator spellings are intercepted: `["field",
+            "HybridText", "input", {fuzziness?, rank_constant?, per_leg_limit?, threads?}?]`
+            (hybrid text fusion, RFC 0022; `threads` is the same scatter/gather fan-out
+            control as scans, defaulting from `Index.spec.scan.threads`) and `["field",
+            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). When `rank_by`
+            is present, `vector` and `nearest_to_id` must be absent.
+
+'
+    FederatedQueryRequest:
+      allOf:
+      - "$ref": "#/components/schemas/QueryRequest"
+      - type: object
+        properties:
+          namespaces:
+            type: array
+            minItems: 1
+            maxItems: 512
+            items:
+              type: string
+              minLength: 1
+            description: 'Explicit namespace set to query. `["*"]`, or omitting this
+              field, expands the authenticated key''s namespace allowlist.
+
+'
+          strict:
+            type: boolean
+            default: false
+            description: 'Fail the whole request on the first namespace leg error.
+              Default false returns successful namespace legs and reports failed legs
+              in `errors`.
+
+'
+          fusion:
+            "$ref": "#/components/schemas/FederatedFusionOptions"
+    FederatedFusionOptions:
+      type: object
+      properties:
+        per_namespace_limit:
+          type: integer
+          minimum: 1
+          description: 'Rows each namespace returns to the cross-namespace merge.
+            Default is `clamp(2 * top_k, 10, 100)`.
+
+'
+        rank_constant:
+          type: integer
+          minimum: 1
+          default: 60
+          description: 'Reserved RRF constant echo. Inert on rank-interleave text
+            routes.
+
+'
+    FederatedQueryResponse:
+      type: object
+      required:
+      - rows
+      - merge
+      - namespaces
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: 'Fused rows. Every row includes `id`, `$namespace`, `$rank`,
+            and route-native `$dist`/`$score` plus requested attributes when present.
+
+'
+        merge:
+          type: object
+          required:
+          - method
+          - route
+          properties:
+            method:
+              type: string
+              enum:
+              - distance
+              - rank-interleave
+              - weighted-rrf
+            route:
+              type: string
+              enum:
+              - fused
+              - dual-score
+            downgraded_reason:
+              type: string
+              enum:
+              - missing_embedding_profile
+              - embedding_profile_mismatch
+              description: 'Present when a vector route could not safely merge by
+                raw distance and fell back to rank-interleave in best-effort mode.
+
+'
+        routing:
+          "$ref": "#/components/schemas/RoutingEcho"
+        hybrid:
+          "$ref": "#/components/schemas/HybridEcho"
+        namespaces:
+          type: array
+          items:
+            "$ref": "#/components/schemas/FederatedNamespaceResult"
+        errors:
+          type: array
+          items:
+            "$ref": "#/components/schemas/FederatedNamespaceError"
+    FederatedNamespaceResult:
+      type: object
+      required:
+      - namespace
+      - matched
+      properties:
+        namespace:
+          type: string
+        stable_as_of:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        matched:
+          type: integer
+          minimum: 0
+    FederatedNamespaceError:
+      type: object
+      required:
+      - namespace
+      - error
+      properties:
+        namespace:
+          type: string
+        error:
+          type: string
+    HybridEcho:
+      type: object
+      required:
+      - tokens
+      - tokens_dropped
+      - fuzziness
+      - rank_constant
+      - legs
+      - per_leg_limit
+      description: 'Effective hybrid-text expansion, echoed so defaults are never
+        invisible. Present on `HybridText` responses and on routed responses whose
+        route expanded hybrid-text legs.
+
+'
+      properties:
+        tokens:
+          type: array
+          items:
+            type: string
+          description: Tokens that produced fuzzy legs, post tokenizer policy.
+        tokens_dropped:
+          type: integer
+          description: 'Tokens removed by the 15-token cap (not by the length or punctuation
+            rules).
+
+'
+        fuzziness:
+          oneOf:
+          - type: string
+            enum:
+            - auto
+          - type: integer
+            enum:
+            - 0
+            - 1
+            - 2
+          description: Effective fuzziness setting.
+        rank_constant:
+          type: integer
+          description: Upstream RRF rank constant, passed through verbatim.
+        legs:
+          type: integer
+          description: 'Total effective subqueries in the fused expansion. On the
+            normal path this is the fuzzy legs + 1 BM25 leg (+ 1 ANN leg on the fused
+            route). On the RFC 0057 surfacing fallback (`surfaced: true`) there is
+            no BM25 leg, so `legs` equals the token count (one fuzzy leg per token).
+
+'
+        per_leg_limit:
+          type: integer
+          description: How deep each leg retrieved before fusion.
+        surfaced:
+          type: boolean
+          description: 'Present and `true` only when the RFC 0057 empty-result fallback
+            fired: the primary expansion fused to zero rows (e.g. a fully-misspelled
+            query), so the gateway re-ran one fuzzy leg per token, ranked each by
+            field/token edit distance, and fused those instead. Absent on the normal
+            path.
+
+'
+        threads:
+          type: integer
+          description: 'Effective scatter/gather fan-out width (the scans `threads`
+            control, clamped to active shards). Present only on sharded namespaces,
+            where the gateway fans each leg out per shard.
+
+'
+    RoutingEcho:
+      type: object
+      required:
+      - route
+      - policy
+      - tokens
+      - executed
+      description: Query-router decision block, present on every `Auto` response.
+      properties:
+        route:
+          type: string
+          enum:
+          - hybrid_text
+          - semantic
+          - fused
+          description: The strategy chosen (or forced).
+        policy:
+          type: string
+          description: 'Routing policy version that made the decision (`v1`), or `forced`
+            when the request supplied `route`.
+
+'
+        tokens:
+          type: integer
+          description: Token count the policy read, post tokenizer policy.
+        executed:
+          type: boolean
+          description: "`false` on a deferral — the route needs a vector the request
+            did not supply. `rows` is empty; embed and re-issue with the route forced.\n"
+    QueryResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - rows
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: Upstream Turbopuffer query rows (`id`, `$dist`/`$score`, and
+            flat attributes).
+        aggregations:
+          type: object
+          additionalProperties: true
+        aggregation_groups:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        billing:
+          type: object
+          additionalProperties: true
+        performance:
+          type: object
+          additionalProperties: true
+        stable_as_of:
+          type:
+          - integer
+          - 'null'
+          description: SDK field populated from the `x-layer-stable-as-of` response
+            header.
+        next_cursor:
+          type:
+          - string
+          - 'null'
+          description: 'Pagination token, always present in the response body and
+            mirrored in the `x-layer-next-cursor` response header. Holds the next
+            page token when the response returned a full `top_k` page (i.e. there
+            *might* be more results), and is `null` on the last page (the header is
+            then omitted). Pass a non-null value back in the next `QueryRequest.cursor`.
+
+'
+        hybrid:
+          "$ref": "#/components/schemas/HybridEcho"
+        routing:
+          "$ref": "#/components/schemas/RoutingEcho"
+    Error:
+      type: object
+      required:
+      - error
+      - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    MetricKind:
+      type: string
+      enum:
+      - counter
+      - gauge
+      - histogram
+      description: Prometheus metric type.
+    MetricFamily:
+      type: string
+      enum:
+      - query
+      - upsert
+      - fetch
+      - cache
+      - pipeline
+      - storage
+      - saturation
+      description: 'Logical grouping used by the dashboard''s observe pane sidebar.
+        Assigned explicitly on every `MetricDoc`, not derived from the name prefix.
+
+'
+    MetricAlert:
+      type: object
+      required:
+      - summary
+      - expr
+      - for
+      properties:
+        summary:
+          type: string
+          description: Short human-readable description of what the alert catches.
+        expr:
+          type: string
+          description: PromQL expression that triggers the alert when true.
+        for:
+          type: string
+          description: Sustained duration before the alert fires (Prometheus duration
+            syntax).
+    MetricCatalogEntry:
+      type: object
+      required:
+      - name
+      - kind
+      - family
+      - labels
+      - description
+      - example_promql
+      properties:
+        name:
+          type: string
+          description: Prometheus metric name.
+        kind:
+          "$ref": "#/components/schemas/MetricKind"
+        family:
+          "$ref": "#/components/schemas/MetricFamily"
+        labels:
+          type: array
+          items:
+            type: string
+          description: Label keys this metric carries.
+        description:
+          type: string
+          description: One-line operator-facing description.
+        example_promql:
+          type: string
+          description: Example PromQL query that exercises this metric.
+        alert:
+          "$ref": "#/components/schemas/MetricAlert"
+    MetricCatalog:
+      type: object
+      required:
+      - version
+      - entries
+      properties:
+        version:
+          type: string
+          description: Catalog schema version; bumps on incompatible JSON shape changes.
+        entries:
+          type: array
+          items:
+            "$ref": "#/components/schemas/MetricCatalogEntry"
+          description: Catalog entries, sorted by `name`.
+    PrometheusResponse:
+      type: object
+      description: Raw Prometheus HTTP API JSON response.
+      additionalProperties: true
+    KubernetesCondition:
+      type: object
+      additionalProperties: true
+      description: Kubernetes-style condition object projected from CRD status.
+    SecretKeyRef:
+      type: object
+      required:
+      - name
+      - key
+      properties:
+        name:
+          type: string
+          description: Secret name in the same namespace as the resource.
+        key:
+          type: string
+          description: Secret data key. The value is never returned.
+    VectorStoreEndpoint:
+      type: object
+      required:
+      - url
+      - region
+      properties:
+        url:
+          type: string
+          description: Upstream vector-store API base URL.
+        region:
+          type: string
+          description: Operator-visible region label for this store.
+    VectorStoreTurbopuffer:
+      type: object
+      required:
+      - orgId
+      properties:
+        orgId:
+          type: string
+          description: 'Turbopuffer organization id used only for dashboard deep links
+            and support orientation. It is not used for auth or routing.
+
+'
+    VectorStoreCredential:
+      type: object
+      required:
+      - secretRef
+      properties:
+        secretRef:
+          "$ref": "#/components/schemas/SecretKeyRef"
+    VectorStoreInboundAuth:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum:
+          - deriveFromStore
+          - keys
+          - open
+    VectorStoreStatus:
+      type: object
+      required:
+      - conditions
+      properties:
+        reachable:
+          type: boolean
+        observedGeneration:
+          type: integer
+          format: int64
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/KubernetesCondition"
+    VectorStore:
+      type: object
+      required:
+      - name
+      - kind
+      - default
+      - endpoint
+      - credential
+      - status
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          description: Store kind; `turbopuffer` is the implemented v1 kind.
+        default:
+          type: boolean
+          description: 'True when this store is the default for indexes that omit
+            `spec.backend.storeRef`.
+
+'
+        endpoint:
+          "$ref": "#/components/schemas/VectorStoreEndpoint"
+        turbopuffer:
+          "$ref": "#/components/schemas/VectorStoreTurbopuffer"
+        credential:
+          "$ref": "#/components/schemas/VectorStoreCredential"
+        inboundAuth:
+          "$ref": "#/components/schemas/VectorStoreInboundAuth"
+        status:
+          "$ref": "#/components/schemas/VectorStoreStatus"
+        turbopufferUrl:
+          type: string
+          description: 'Gateway-computed Turbopuffer dashboard URL. Omitted when `turbopuffer.orgId`
+            is absent.
+
+'
+    VectorStoreList:
+      type: object
+      required:
+      - vectorstores
+      properties:
+        vectorstores:
+          type: array
+          items:
+            "$ref": "#/components/schemas/VectorStore"

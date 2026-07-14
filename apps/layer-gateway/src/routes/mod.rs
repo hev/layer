@@ -1,0 +1,17 @@
+pub mod federated_query;
+pub mod fetch;
+pub mod health;
+pub mod hybrid_text;
+pub mod init;
+pub mod metadata;
+pub mod metrics;
+pub mod metrics_catalog;
+pub mod multi_query;
+pub mod namespaces;
+pub mod query;
+pub mod query_router;
+pub mod scans;
+pub mod snapshot_policy;
+pub mod turbopuffer;
+pub mod upsert;
+pub mod vectorstores;

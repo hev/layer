@@ -1,0 +1,5 @@
+/target/
+/apps/layer-cli/layer
+.env
+.env.*
+!.env.example

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/layer-gateway",
+  "crates/metrics-catalog",
+  "crates/vectorstore-core",
+]
+default-members = ["apps/layer-gateway"]
