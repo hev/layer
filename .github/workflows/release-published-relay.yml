@@ -1,0 +1,30 @@
+name: Relay published release
+
+# This workflow must remain on hev/layer's default branch: GitHub only delivers
+# release events to workflows present there. Publishing the draft release is the
+# sole production trigger for the private RFC 0102 release train.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    name: Dispatch layer-pro release train
+    if: github.repository == 'hev/layer'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Relay immutable release coordinates
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LAYER_PRO_DISPATCH_TOKEN: ${{ secrets.LAYER_PRO_DISPATCH_TOKEN }}
+        run: node scripts/release-published-relay.mjs
