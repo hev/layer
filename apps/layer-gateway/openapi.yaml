@@ -1967,7 +1967,10 @@ components:
       type: object
       additionalProperties: true
       description: Native Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`,
-        filter writes, copy, branch, schema, encryption, etc.).
+        filter writes, copy, branch, schema, encryption, etc.). A schema attribute
+        may declare `embed` (simple string form or extended `{model, dims, ...}` object)
+        — see `docs/kubernetes/index-crd.mdx#schema-attribute-embedding`; the gateway
+        intercepts it and never forwards it upstream.
     TurbopufferBranchFromRequest:
       type: object
       additionalProperties: true
@@ -2033,7 +2036,9 @@ components:
       type: object
       additionalProperties: true
       description: Native Turbopuffer query body (`rank_by`, `filters`, `aggregate_by`,
-        `group_by`, `limit`, etc.).
+        `group_by`, `limit`, etc.). `rank_by` may reference `["Embed", text]` / `["Embed",
+        text, {model}]`, resolved by the gateway to a vector before the request reaches
+        the store — see `docs/api/embed.mdx`.
     TurbopufferQueryResponse:
       type: object
       additionalProperties: true
@@ -3136,8 +3141,10 @@ components:
             "HybridText", "input", {fuzziness?, rank_constant?, per_leg_limit?, threads?}?]`
             (hybrid text fusion, RFC 0022; `threads` is the same scatter/gather fan-out
             control as scans, defaulting from `Index.spec.scan.threads`) and `["field",
-            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). When `rank_by`
-            is present, `vector` and `nearest_to_id` must be absent.
+            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). `["Embed",
+            "text"]` / `["Embed", "text", {model?}]` is also intercepted and resolved
+            to a vector before the store sees the query (tpuf-compatible wire, `docs/api/embed.mdx`).
+            When `rank_by` is present, `vector` and `nearest_to_id` must be absent.
 
             '
     FederatedQueryRequest:
