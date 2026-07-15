@@ -344,10 +344,10 @@ async fn run_upstream_multi_query(
         .await;
     match first {
         Ok(body) => Ok((body, 1)),
-        Err(TurbopufferError::RateLimited(msg)) if !inject_filter => {
+        Err(error) if error.is_rate_limited() && !inject_filter => {
             warn!(
                 namespace = %namespace,
-                %msg,
+                %error,
                 "turbopuffer 429 on unfiltered multi-query; retrying with watermark filter",
             );
             let retry_legs: Vec<Value> = prepared
@@ -366,16 +366,17 @@ async fn run_upstream_multi_query(
                         prepared.len(),
                         2,
                     );
-                    AppError::Upstream(format!("Turbopuffer multi-query failed (retry): {e}"))
+                    AppError::from_turbopuffer(e, "Turbopuffer multi-query failed (retry)")
                 })
         }
         Err(e) => {
             state
                 .metrics
                 .observe_multi_query(namespace, STATUS_TPUF_ERROR, prepared.len(), 1);
-            Err(AppError::Upstream(format!(
-                "Turbopuffer multi-query failed: {e}"
-            )))
+            Err(AppError::from_turbopuffer(
+                e,
+                "Turbopuffer multi-query failed",
+            ))
         }
     }
 }
@@ -438,10 +439,10 @@ async fn run_sharded_leg(
 
     let (mut rows, upstream_calls) = match first {
         Ok(rows) => (rows, shard_count as usize),
-        Err(TurbopufferError::RateLimited(msg)) if !inject_filter => {
+        Err(error) if error.is_rate_limited() && !inject_filter => {
             warn!(
                 namespace = %namespace,
-                %msg,
+                %error,
                 "turbopuffer 429 on unfiltered sharded multi-query leg; retrying with watermark filter",
             );
             let retry_filter =
@@ -468,9 +469,10 @@ async fn run_sharded_leg(
                         leg.base_filter.is_some(),
                         true,
                     );
-                    return Err(AppError::Upstream(format!(
-                        "Turbopuffer multi-query leg failed (retry): {e}"
-                    )));
+                    return Err(AppError::from_turbopuffer(
+                        e,
+                        "Turbopuffer multi-query leg failed (retry)",
+                    ));
                 }
             }
         }
@@ -484,9 +486,10 @@ async fn run_sharded_leg(
                 leg.base_filter.is_some(),
                 true,
             );
-            return Err(AppError::Upstream(format!(
-                "Turbopuffer multi-query leg failed: {e}"
-            )));
+            return Err(AppError::from_turbopuffer(
+                e,
+                "Turbopuffer multi-query leg failed",
+            ));
         }
     };
 

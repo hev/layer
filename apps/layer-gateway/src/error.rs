@@ -1,9 +1,17 @@
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("Upstream HTTP response: {status}")]
+    UpstreamResponse {
+        status: u16,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    },
+
     #[error("Upstream error: {0}")]
     Upstream(String),
 
@@ -81,6 +89,22 @@ struct ErrorBody {
 }
 
 impl AppError {
+    pub fn from_turbopuffer(
+        error: crate::clients::turbopuffer::TurbopufferError,
+        context: impl AsRef<str>,
+    ) -> Self {
+        match error {
+            crate::clients::turbopuffer::TurbopufferError::Response(response) => {
+                Self::UpstreamResponse {
+                    status: response.status,
+                    content_type: response.content_type,
+                    body: response.body,
+                }
+            }
+            error => Self::Upstream(format!("{}: {error}", context.as_ref())),
+        }
+    }
+
     pub fn unsupported_by_store(
         message: impl Into<String>,
         store: Option<String>,
@@ -108,7 +132,28 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::UpstreamResponse {
+            status,
+            content_type,
+            body,
+        } = &self
+        {
+            let mut response = Response::new(Body::from(body.clone()));
+            *response.status_mut() =
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+            if let Some(content_type) = content_type
+                .as_deref()
+                .and_then(|value| HeaderValue::from_str(value).ok())
+            {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, content_type);
+            }
+            return response;
+        }
+
         let (status, error_type, message, store, route, cache_state) = match &self {
+            AppError::UpstreamResponse { .. } => unreachable!("handled above"),
             AppError::Upstream(msg) => (
                 StatusCode::BAD_GATEWAY,
                 "upstream_error",

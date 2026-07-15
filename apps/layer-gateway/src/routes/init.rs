@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::clients::turbopuffer::{PatchColumns, TurbopufferError};
+use crate::clients::turbopuffer::PatchColumns;
 use crate::error::AppError;
 use crate::shards::{
     read_namespace_marker, shard_drain_filter, shard_for_id, write_namespace_marker, SHARD_ATTR,
@@ -74,10 +74,10 @@ pub async fn init_namespace(
         .head_namespace(&namespace)
         .await
         .map_err(|e| match e {
-            TurbopufferError::NotFound(_) => {
+            e if e.is_not_found() => {
                 AppError::NotFound(format!("namespace '{}' not found", namespace))
             }
-            e => AppError::Upstream(format!("turbopuffer metadata: {e}")),
+            e => AppError::from_turbopuffer(e, "turbopuffer metadata"),
         })?;
 
     let existing = read_namespace_marker(state.turbopuffer(), &namespace)

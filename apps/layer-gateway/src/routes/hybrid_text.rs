@@ -778,10 +778,10 @@ async fn run_unsharded_fused(
             .await;
         let rows = match first {
             Ok(outcome) => outcome.rows,
-            Err(TurbopufferError::RateLimited(msg)) if !params.inject_filter => {
+            Err(error) if error.is_rate_limited() && !params.inject_filter => {
                 warn!(
                     namespace = %namespace,
-                    %msg,
+                    %error,
                     "turbopuffer 429 on unfiltered fused leg; retrying with watermark filter",
                 );
                 let retry_filter = compose_read_filter(
@@ -800,7 +800,7 @@ async fn run_unsharded_fused(
                     )
                     .await
                     .map_err(|e| {
-                        AppError::Upstream(format!("Turbopuffer fused leg failed (retry): {e}"))
+                        AppError::from_turbopuffer(e, "Turbopuffer fused leg failed (retry)")
                     })?
                     .rows
             }
@@ -814,9 +814,10 @@ async fn run_unsharded_fused(
                 continue;
             }
             Err(e) => {
-                return Err(AppError::Upstream(format!(
-                    "Turbopuffer fused leg failed: {e}"
-                )));
+                return Err(AppError::from_turbopuffer(
+                    e,
+                    "Turbopuffer fused leg failed",
+                ));
             }
         };
         labels.push(spec.label.clone());
@@ -869,10 +870,10 @@ async fn run_sharded_fused(
         .await;
         let rows = match first {
             Ok(rows) => rows,
-            Err(TurbopufferError::RateLimited(msg)) if !params.inject_filter => {
+            Err(error) if error.is_rate_limited() && !params.inject_filter => {
                 warn!(
                     namespace = %namespace,
-                    %msg,
+                    %error,
                     "turbopuffer 429 on unfiltered sharded fused leg; retrying with watermark filter",
                 );
                 let retry_filter = compose_read_filter(
@@ -891,13 +892,14 @@ async fn run_sharded_fused(
                 )
                 .await
                 .map_err(|e| {
-                    AppError::Upstream(format!("Turbopuffer fused leg failed (retry): {e}"))
+                    AppError::from_turbopuffer(e, "Turbopuffer fused leg failed (retry)")
                 })?
             }
             Err(e) => {
-                return Err(AppError::Upstream(format!(
-                    "Turbopuffer fused leg failed: {e}"
-                )));
+                return Err(AppError::from_turbopuffer(
+                    e,
+                    "Turbopuffer fused leg failed",
+                ));
             }
         };
         leg_results.push(rows);
@@ -946,10 +948,10 @@ async fn run_surfacing_fused(
         .await;
         let rows = match first {
             Ok(rows) => rows,
-            Err(TurbopufferError::RateLimited(msg)) if !params.inject_filter => {
+            Err(error) if error.is_rate_limited() && !params.inject_filter => {
                 warn!(
                     namespace = %namespace,
-                    %msg,
+                    %error,
                     "turbopuffer 429 on unfiltered surfacing leg; retrying with watermark filter",
                 );
                 let retry_filter = compose_read_filter(
@@ -971,13 +973,14 @@ async fn run_surfacing_fused(
                 )
                 .await
                 .map_err(|e| {
-                    AppError::Upstream(format!("Turbopuffer surfacing leg failed (retry): {e}"))
+                    AppError::from_turbopuffer(e, "Turbopuffer surfacing leg failed (retry)")
                 })?
             }
             Err(e) => {
-                return Err(AppError::Upstream(format!(
-                    "Turbopuffer surfacing leg failed: {e}"
-                )));
+                return Err(AppError::from_turbopuffer(
+                    e,
+                    "Turbopuffer surfacing leg failed",
+                ));
             }
         };
         leg_results.push(rows);

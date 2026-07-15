@@ -24,34 +24,62 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurbopufferError {
-    /// HTTP 429. The query path uses this variant to decide whether to retry
-    /// with the consistency watermark filter forced on.
+    /// Synthetic/mock HTTP 429. Real HTTP responses use `Response`; the
+    /// query path recognizes both through `is_rate_limited`.
     #[error("Turbopuffer rate limited: {0}")]
     RateLimited(String),
-    /// HTTP 404. Routes that promise upstream-compatible status codes (e.g.
-    /// namespace metadata) map this back to a gateway 404 instead of 502.
+    /// Synthetic/mock HTTP 404. Real HTTP responses use `Response`; routes
+    /// that special-case absence recognize both through `is_not_found`.
     #[error("Turbopuffer not found: {0}")]
     NotFound(String),
+    /// A completed upstream HTTP response. Keep the wire response separate
+    /// from transport and gateway-originated failures so transparent routes
+    /// can return its status, content type, and body unchanged.
+    #[error("Turbopuffer HTTP response: {0:?}")]
+    Response(TurbopufferPassthroughResponse),
     #[error("Turbopuffer error: {0}")]
     Other(String),
 }
 
 impl TurbopufferError {
-    /// Construct from an HTTP status + body. `429` becomes `RateLimited`,
-    /// `404` becomes `NotFound`; everything else becomes `Other`.
+    /// Construct from an HTTP status + JSON body when only decoded response
+    /// data is available (for example, from a non-Turbopuffer backend).
     pub fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
-        let msg = format!("{}: {}", status, body);
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            Self::RateLimited(msg)
-        } else if status == reqwest::StatusCode::NOT_FOUND {
-            Self::NotFound(msg)
-        } else {
-            Self::Other(msg)
+        Self::Response(TurbopufferPassthroughResponse {
+            status: status.as_u16(),
+            content_type: Some("application/json".to_string()),
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    /// Capture a completed HTTP error response without decoding or rewriting
+    /// its body. Body-read failures remain transport failures and may map to
+    /// a gateway 502.
+    pub async fn from_response(response: reqwest::Response) -> Self {
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        match response.bytes().await {
+            Ok(body) => Self::Response(TurbopufferPassthroughResponse {
+                status,
+                content_type,
+                body: body.to_vec(),
+            }),
+            Err(error) => Self::Other(format!("failed to read Turbopuffer response body: {error}")),
         }
     }
 
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, Self::RateLimited(_))
+            || matches!(self, Self::Response(response) if response.status == 429)
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_))
+            || matches!(self, Self::Response(response) if response.status == 404)
     }
 }
 
@@ -743,9 +771,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
         Ok(())
     }
@@ -787,9 +813,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -827,9 +851,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -863,9 +885,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -893,9 +913,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -934,9 +952,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -978,9 +994,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -1014,9 +1028,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         resp.json()
@@ -1045,9 +1057,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -1106,9 +1116,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -1170,9 +1178,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -1240,9 +1246,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let resp_body: Value = resp
@@ -1299,9 +1303,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(TurbopufferError::from_status(status, &text));
+            return Err(TurbopufferError::from_response(resp).await);
         }
 
         let body: Value = resp
