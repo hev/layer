@@ -7,8 +7,7 @@
 > flow back on the next mirror release.
 
 A transparent, turbopuffer-shaped proxy that makes your existing store better
-without changing client code. It is source-available under BSL 1.1 and free
-to self-host at any scale.
+without changing client code.
 
 ```text
 ╔════════════╗      ╔════════════╗          ╔═══ turbopuffer ════════════════════════╗
@@ -25,8 +24,6 @@ Your application keeps speaking the turbopuffer wire it already speaks. The
 gateway sits in the middle and adds the following retrieval features:
 
 ## Features
-
-Each feature is documented at [hevlayer.com/docs](https://hevlayer.com/docs/):
 
 - **[Automatic query routing](https://hevlayer.com/docs/api/query#query-routing).**
   The `Auto` router reads the *shape* of a query and picks vector, lexical, or
@@ -74,10 +71,7 @@ Each feature is documented at [hevlayer.com/docs](https://hevlayer.com/docs/):
 
 ## Pro features
 
-Everything above runs free, with no signup. A hev layer license key unlocks
-the pro tier on the same gateway —
-[start a trial](https://hevlayer.com/#start-trial) and a signed key arrives
-by email:
+[Start a trial](https://hevlayer.com/#start-trial) to unlock:
 
 - **[Materialized facets and stable queries](https://hevlayer.com/docs/api/scans#precomputed-serving).**
   The same facet rails and reads, served from snapshot-precomputed
@@ -90,9 +84,17 @@ by email:
 - **[Agentic search](https://hevlayer.com/docs/api/agents).** A configured
   reasoning loop over your indices: plan, fan out for recall, score for
   relevance, and return the standard row shape.
+- **[Warehouse-backed indices](https://hevlayer.com/docs/kubernetes/warehouse-crd).**
+  Index data that lives in a warehouse (Iceberg, Snowflake, and more) instead
+  of copying it into the store first.
+- **[Scoped API keys](https://hevlayer.com/docs/api/keys).** Mint keys with
+  per-resource entitlements and scopes — read, write, or admin over a
+  specific store, warehouse, or Layer itself.
+- **TCO calculator.** turbopuffer and AWS spend, read live from the
+  dashboard's cost view — see what the gateway is actually costing you.
 
 See [licensing](https://hevlayer.com/docs/licensing) for how keys are issued,
-installed, and verified (offline — the gateway never phones home).
+installed, and verified.
 
 ## Quick Start
 
@@ -111,23 +113,6 @@ export LAYER_GATEWAY_URL="http://localhost:8080"
 ```sh
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
-  -e LAYER_SECRET_LOCAL_API_KEY="$TURBOPUFFER_API_KEY" \
-  -e LAYER_STORE_JSON='apiVersion: hevlayer.com/v1alpha1
-kind: VectorStore
-metadata:
-  name: local
-spec:
-  kind: turbopuffer
-  default: true
-  endpoint:
-    url: https://api.turbopuffer.com
-    region: aws-us-east-1
-  credential:
-    secretRef:
-      name: local
-      key: api-key
-  inboundAuth:
-    mode: deriveFromStore' \
   hevlayer/layer-gateway
 ```
 
