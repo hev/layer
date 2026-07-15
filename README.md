@@ -1,7 +1,7 @@
 # Layer gateway
 
 > **Generated mirror — do not send PRs here.** Published automatically from
-> the private `hev/layer` monorepo. Edits here are overwritten on the
+> the private `hev/layer-pro` monorepo. Edits here are overwritten on the
 > next release. File bugs and requests as
 > [issues](https://github.com/hev/layer/issues); fixes land upstream and
 > flow back on the next mirror release.
