@@ -65,9 +65,9 @@ gateway sits in the middle and adds the following retrieval features:
   `/v2/metrics`, with a named metrics catalog — query latency, routing, and
   errors are observable out of the box.
 - **[A CLI with an ops TUI](https://hevlayer.com/docs/cli).** `layer init`,
-  namespace listing and deletion, snapshot jobs and snapshot policies, and a
-  read-only terminal dashboard — every command speaks the gateway API with
-  just your API key, no cluster access needed.
+  namespace listing/deletion, on-demand snapshot jobs and automatic snapshot
+  policies, and a read-only terminal dashboard — every command speaks the
+  gateway API with just your API key, no cluster access needed.
 
 ## Pro features
 
