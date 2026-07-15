@@ -1629,6 +1629,19 @@ fn validate_attr_value_input(name: &str, value: &Value) -> Result<(), Turbopuffe
     Ok(())
 }
 
+fn object_schema_attribute(body: &Value) -> Option<&str> {
+    body.get("schema")
+        .and_then(Value::as_object)
+        .and_then(|schema| {
+            schema.iter().find_map(|(attribute, config)| {
+                let attribute_type = config
+                    .as_str()
+                    .or_else(|| config.get("type").and_then(Value::as_str));
+                (attribute_type == Some("object")).then_some(attribute.as_str())
+            })
+        })
+}
+
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
     async fn passthrough(
@@ -1648,6 +1661,22 @@ impl TurbopufferClient for MockTurbopufferClient {
                 .map_err(|e| TurbopufferError::Other(e.to_string()))?;
                 return Ok(TurbopufferPassthroughResponse {
                     status: *status,
+                    content_type: Some("application/json".to_string()),
+                    body: bytes,
+                });
+            }
+        }
+        if let ("POST", ["v2", "namespaces", _]) = (method, parts.as_slice()) {
+            if let Some(attribute) = body.as_ref().and_then(object_schema_attribute) {
+                let bytes = serde_json::to_vec(&serde_json::json!({
+                    "error": format!(
+                        "Failed to deserialize the JSON body into the target type: schema.{attribute}: data did not match any variant of untagged enum AttributeSchemaInput"
+                    ),
+                    "status": "error",
+                }))
+                .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+                return Ok(TurbopufferPassthroughResponse {
+                    status: 422,
                     content_type: Some("application/json".to_string()),
                     body: bytes,
                 });

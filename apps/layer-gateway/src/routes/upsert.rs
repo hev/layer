@@ -95,6 +95,13 @@ pub async fn upsert_or_delete(
     OriginalUri(uri): OriginalUri,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    let object_schema_attributes = object_schema_attributes(&body);
+    if !object_schema_attributes.is_empty() && state.namespace_uses_search_store(&namespace) {
+        return Err(unsupported_object_schema_error(
+            "search",
+            &object_schema_attributes,
+        ));
+    }
     let effective_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
         .await
         .map_err(|e| AppError::Upstream(format!("namespace marker read failed: {e}")))?
@@ -177,6 +184,23 @@ pub async fn upsert_or_delete(
     let mut status = StatusCode::from_u16(upstream.status)
         .map_err(|e| AppError::Upstream(format!("invalid Turbopuffer status: {}", e)))?;
     if !status.is_success()
+        && !object_schema_attributes.is_empty()
+        && upstream_rejected_object_schema(&upstream)
+    {
+        observe_write_metric(
+            &state,
+            &namespace,
+            STATUS_TPUF_ERROR,
+            total_start.elapsed().as_secs_f64(),
+            tpuf_seconds,
+            metric_batch_size,
+        );
+        return Err(unsupported_object_schema_error(
+            "turbopuffer",
+            &object_schema_attributes,
+        ));
+    }
+    if !status.is_success()
         && (!plan.response_driven() || plan.portable_without_affected_ids())
         && String::from_utf8_lossy(&upstream.body).contains("UnsupportedByStore")
     {
@@ -236,6 +260,40 @@ pub async fn upsert_or_delete(
     );
 
     passthrough_response(upstream)
+}
+
+fn object_schema_attributes(body: &Value) -> Vec<String> {
+    let Some(schema) = body.get("schema").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut attributes = schema
+        .iter()
+        .filter_map(|(attribute, config)| {
+            let attribute_type = config
+                .as_str()
+                .or_else(|| config.get("type").and_then(Value::as_str));
+            (attribute_type == Some("object")).then(|| attribute.clone())
+        })
+        .collect::<Vec<_>>();
+    attributes.sort_unstable();
+    attributes
+}
+
+fn upstream_rejected_object_schema(upstream: &TurbopufferPassthroughResponse) -> bool {
+    matches!(upstream.status, 400 | 422)
+        && String::from_utf8_lossy(&upstream.body).contains("AttributeSchemaInput")
+}
+
+fn unsupported_object_schema_error(store: &str, attributes: &[String]) -> AppError {
+    AppError::unsupported_by_store(
+        format!(
+            "schema type `object` is not supported by the {store} store for attributes: {}; use a supported scalar, array, vector, or sparse-vector type",
+            attributes.join(", ")
+        ),
+        Some(store.to_string()),
+        Some("writeNamespace".to_string()),
+    )
 }
 
 /// POST /v2/namespaces/{namespace}/import
