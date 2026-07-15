@@ -1,8 +1,0 @@
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: hevlayer-gateway
-    metrics_path: /metrics
-    static_configs:
-      - targets: [gateway:8080]

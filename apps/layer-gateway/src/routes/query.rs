@@ -262,10 +262,10 @@ pub(crate) async fn run_query_leg(
 
     let results = match first {
         Ok(rows) => rows,
-        Err(TurbopufferError::RateLimited(msg)) if !config.inject_filter => {
+        Err(error) if error.is_rate_limited() && !config.inject_filter => {
             warn!(
                 namespace = %namespace,
-                %msg,
+                %error,
                 "turbopuffer 429 on unfiltered query; retrying with watermark filter",
             );
             let retry_filter = compose_read_filter(
@@ -302,10 +302,10 @@ pub(crate) async fn run_query_leg(
                             Some("queryNamespace".to_string()),
                         ));
                     }
-                    return Err(AppError::Upstream(format!(
-                        "Turbopuffer query failed (retry): {}",
-                        e
-                    )));
+                    return Err(AppError::from_turbopuffer(
+                        e,
+                        "Turbopuffer query failed (retry)",
+                    ));
                 }
             }
         }
@@ -326,10 +326,7 @@ pub(crate) async fn run_query_leg(
                     Some("queryNamespace".to_string()),
                 ));
             }
-            return Err(AppError::Upstream(format!(
-                "Turbopuffer query failed: {}",
-                e
-            )));
+            return Err(AppError::from_turbopuffer(e, "Turbopuffer query failed"));
         }
     };
 

@@ -1,7 +1,6 @@
 # hev layer — community edition
 #
-#   docker compose up                         gateway only
-#   docker compose --profile dashboard up    gateway + read-only dashboard + Prometheus
+#   docker compose up
 name: hevlayer-ce
 
 services:
@@ -14,7 +13,6 @@ services:
       PORT: "8080"
       LAYER_LICENSE: ${HEVLAYER_LICENSE:-}
       LAYER_SECRET_LOCAL_API_KEY: ${TURBOPUFFER_API_KEY:?set your Turbopuffer key}
-      METRICS_BACKEND_URL: http://prometheus:9090
       TPUF_URL: ${TPUF_URL:-https://api.turbopuffer.com}
     healthcheck:
       test:
@@ -25,42 +23,3 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
-  prometheus:
-    image: prom/prometheus:latest
-    profiles: [dashboard]
-    restart: unless-stopped
-    volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-
-  dashboard:
-    image: ${DASHBOARD_IMAGE:-hevlayer/layer-dashboard:latest}
-    platform: ${DASHBOARD_PLATFORM:-linux/amd64}
-    profiles: [dashboard]
-    restart: unless-stopped
-    depends_on:
-      gateway:
-        condition: service_healthy
-      prometheus:
-        condition: service_started
-    ports:
-      - "${DASHBOARD_PORT:-8081}:8081"
-    environment:
-      PORT: "8081"
-      LAYER_GATEWAY_URL: http://gateway:8080
-      LAYER_GATEWAY_API_KEY: ${TURBOPUFFER_API_KEY:?set your Turbopuffer key}
-      LAYER_METRICS_URL: http://gateway:8080/v2/metrics
-      DASHBOARD_BASIC_AUTH_USER: ${DASHBOARD_BASIC_AUTH_USER:-ops}
-      # The dashboard itself refuses to start when this is blank. Keeping the
-      # interpolation optional lets the gateway-only profile remain standalone.
-      DASHBOARD_BASIC_AUTH_PASSWORD: ${DASHBOARD_BASIC_AUTH_PASSWORD:-}
-      LAYER_KUBE_ENABLED: "false"
-
-volumes:
-  prometheus-data:

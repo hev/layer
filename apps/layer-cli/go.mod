@@ -54,4 +54,6 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 )
 
-replace github.com/hev/layer/clients/go => ../../clients/go
+// The Go client lives in its own repo (github.com/hev/layer-go), like all
+// published clients. The monorepo import path is redirected there.
+replace github.com/hev/layer/clients/go => github.com/hev/layer-go v0.0.0-20260714173232-613fd7993455

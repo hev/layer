@@ -6,7 +6,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use tracing::warn;
 
-use crate::clients::turbopuffer::{IndexStatus, TurbopufferError};
+use crate::clients::turbopuffer::IndexStatus;
 use crate::error::AppError;
 use crate::metrics::{DIRECT_PIPELINE_ID, STATUS_OK, STATUS_TPUF_ERROR};
 use crate::routes::init::init_layer_status;
@@ -60,10 +60,10 @@ pub async fn get_namespace_metadata(
             // Preserve upstream's 404 so namespace-existence checks see the
             // status Turbopuffer's own metadata endpoint would return.
             return Err(match e {
-                TurbopufferError::NotFound(_) => {
+                e if e.is_not_found() => {
                     AppError::NotFound(format!("namespace '{}' not found", namespace))
                 }
-                e => AppError::Upstream(format!("turbopuffer metadata: {}", e)),
+                e => AppError::from_turbopuffer(e, "turbopuffer metadata"),
             });
         }
     };
