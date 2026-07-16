@@ -1,0 +1,34 @@
+{{- if and .Values.search.enabled .Values.search.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "layer.fullname" . }}-search
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "layer.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+        - podSelector:
+            matchLabels:
+              {{- include "layer.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: operator
+        - podSelector:
+            matchLabels:
+              {{- include "layer.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: vmsingle
+      ports:
+        - protocol: TCP
+          port: {{ .Values.search.port }}
+{{- end }}

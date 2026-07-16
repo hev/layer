@@ -1,0 +1,24 @@
+{{- if .Values.gateway.queue.embedded }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway-internal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+data:
+  postgresql.conf: |
+    listen_addresses = '127.0.0.1'
+    port = 5432
+    unix_socket_directories = '/var/run/postgresql'
+    shared_buffers = '{{ .Values.gateway.queue.postgres.sharedBuffers }}'
+    max_connections = {{ .Values.gateway.queue.postgres.maxConnections }}
+
+  pg_hba.conf: |
+    local all {{ .Values.gateway.queue.postgres.user }} trust
+    host all {{ .Values.gateway.queue.postgres.user }} 127.0.0.1/32 trust
+    host all {{ .Values.gateway.queue.postgres.user }} ::1/128 trust
+    host all all 0.0.0.0/0 reject
+    host all all ::0/0 reject
+{{- end }}

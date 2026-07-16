@@ -1,0 +1,33 @@
+{{- $saName := include "layer.serviceAccountName" . }}
+# Warehouses are declared in the application namespaces that consume them (next
+# to their pipelines), not in the gateway's release namespace, so the gateway
+# reads them cluster-wide. Read-only: the dashboard owns Warehouse writes via
+# its own (namespaced) credential role. Without this, GET /v2/warehouses 403s
+# and the proxy surfaces a 502.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway-warehouse
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+rules:
+  - apiGroups: ["hevlayer.com"]
+    resources: ["warehouses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway-warehouse
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "layer.fullname" . }}-gateway-warehouse
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}

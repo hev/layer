@@ -1,0 +1,51 @@
+{{- if .Values.documentCache.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "layer.fullname" . }}-document-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+data:
+  aerospike.conf: |
+    service {
+      cluster-name {{ .Values.documentCache.clusterName | default (printf "%s-document-cache" (include "layer.fullname" .)) }}
+    }
+
+    logging {
+      console {
+        context any info
+      }
+    }
+
+    network {
+      service {
+        address any
+        port {{ .Values.documentCache.port }}
+      }
+
+      heartbeat {
+        mode mesh
+        address any
+        port 3002
+        interval 150
+        timeout 10
+      }
+
+      fabric {
+        address any
+        port 3001
+      }
+    }
+
+    namespace {{ .Values.documentCache.namespace }} {
+      replication-factor 1
+
+      storage-engine device {
+        file {{ .Values.documentCache.storage.hostPath }}/{{ .Values.documentCache.namespace }}.dat
+        filesize {{ .Values.documentCache.storage.fileSize }}
+        read-page-cache true
+      }
+    }
+{{- end }}

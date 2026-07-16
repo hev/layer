@@ -1,0 +1,111 @@
+{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "layer.fullname" . }}-vmsingle-scrape
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vmsingle
+data:
+  scrape.yaml: |
+    global:
+      scrape_interval: {{ .Values.metrics.scrapeIntervalSeconds }}s
+      scrape_timeout: 10s
+    scrape_configs:
+      # Pin the gateway's /metrics endpoint directly. Static-config beats
+      # discovery here because the gateway service is fixed and we want
+      # the panel to keep working even if the customer hasn't installed
+      # kube-state-metrics or any RBAC-broad discoverers.
+      - job_name: layer-gateway
+        static_configs:
+          - targets:
+              {{- if .Values.metrics.embedded }}
+              - "127.0.0.1:{{ .Values.gateway.port }}"
+              {{- else }}
+              - "{{ include "layer.fullname" . }}-gateway:{{ .Values.gateway.port }}"
+              {{- end }}
+        metrics_path: /metrics
+
+      {{- if and .Values.documentCache.enabled .Values.documentCache.metrics.enabled }}
+      # Aerospike prometheus exporter sidecar. The keep filter drops anything
+      # outside the allowlist before the rename, and the second rule strips
+      # the upstream `aerospike_` prefix so the cache lives in the same
+      # `layer_*` metric namespace as the gateway.
+      - job_name: layer-document-cache
+        static_configs:
+          - targets:
+              - "{{ include "layer.fullname" . }}-document-cache:{{ .Values.documentCache.metrics.port }}"
+        metrics_path: /metrics
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: "{{ join "|" .Values.documentCache.metrics.allowlist }}"
+          - source_labels: [__name__]
+            regex: "aerospike_(.+)"
+            replacement: "layer_document_cache_$1"
+            target_label: __name__
+      {{- end }}
+
+      # Pods opting into scraping via the standard Prometheus annotation.
+      # Worker pods following the documented layer.hev.dev label convention
+      # can set prometheus.io/scrape=true to surface their metrics; the
+      # __meta_kubernetes labels become Prom labels so PromQL by-pipeline
+      # rollups work out of the box.
+      - job_name: layer-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels:
+              - __address__
+              - __meta_kubernetes_pod_annotation_prometheus_io_port
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_layer_hev_dev_pipeline_id]
+            target_label: pipeline_id
+          - source_labels: [__meta_kubernetes_pod_label_layer_hev_dev_component]
+            target_label: layer_component
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+      # kube-state-metrics if present. The job stays silent (no targets) when
+      # it isn't installed, so this is safe to ship by default.
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+            action: keep
+            regex: kube-state-metrics
+
+      # node-exporter if present. This keeps node-level metrics available
+      # without requiring a full Prometheus/operator install.
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+            action: keep
+            regex: prometheus-node-exporter
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http-metrics
+          - source_labels: [__meta_kubernetes_endpoint_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+{{- end }}

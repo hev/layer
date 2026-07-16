@@ -1,0 +1,134 @@
+{{- if .Values.documentCache.enabled }}
+{{- $documentCacheNodeRole := default "system" .Values.documentCache.nodeRole }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "layer.fullname" . }}-document-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  serviceName: {{ include "layer.fullname" . }}-document-cache
+  replicas: {{ .Values.documentCache.replicas }}
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: document-cache
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: document-cache
+        layer.hev.dev/component: document-cache
+    spec:
+      serviceAccountName: {{ include "layer.serviceAccountName" . }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" $documentCacheNodeRole) | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" $documentCacheNodeRole) | nindent 8 }}
+      initContainers:
+        - name: init-document-cache-data
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p {{ .Values.documentCache.storage.hostPath }}
+              file="{{ .Values.documentCache.storage.hostPath }}/{{ .Values.documentCache.namespace }}.dat"
+              target="{{ .Values.documentCache.storage.fileSize }}"
+              {{- if .Values.documentCache.storage.resetOnStart }}
+              rm -f "$file"
+              {{- end }}
+              num="${target%[KkMmGgTt]}"
+              unit="${target#$num}"
+              case "$unit" in
+                K|k) mult=1024 ;;
+                M|m) mult=1048576 ;;
+                G|g) mult=1073741824 ;;
+                T|t) mult=1099511627776 ;;
+                *) mult=1 ;;
+              esac
+              target_bytes=$((num * mult))
+              current_bytes="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+              if [ "$current_bytes" -lt "$target_bytes" ]; then
+                truncate -s "$target" "$file"
+              fi
+          volumeMounts:
+            - name: document-cache-data
+              mountPath: {{ .Values.documentCache.storage.hostPath | quote }}
+      containers:
+        - name: aerospike
+          image: {{ .Values.documentCache.image | quote }}
+          ports:
+            - containerPort: {{ .Values.documentCache.port }}
+              name: aerospike
+          {{- with .Values.documentCache.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: document-cache-data
+              mountPath: {{ .Values.documentCache.storage.hostPath | quote }}
+            - name: document-cache-config
+              mountPath: /opt/aerospike/etc
+          args:
+            - "--config-file"
+            - "/opt/aerospike/etc/aerospike.conf"
+          readinessProbe:
+            exec:
+              command:
+                - asinfo
+                - -h
+                - "127.0.0.1"
+                - -p
+                - {{ .Values.documentCache.port | quote }}
+                - -v
+                - status
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- if .Values.documentCache.autoRestartOnStopWrites }}
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  stats="$(asinfo -h 127.0.0.1 -p {{ .Values.documentCache.port }} -v namespace/{{ .Values.documentCache.namespace }})"
+                  echo "$stats" | grep -Eq '(^|;)stop_writes=false(;|$)|(^|;)stop-writes=false(;|$)'
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- end }}
+        {{- if .Values.documentCache.metrics.enabled }}
+        - name: aerospike-exporter
+          image: {{ .Values.documentCache.metrics.image | quote }}
+          ports:
+            - containerPort: {{ .Values.documentCache.metrics.port }}
+              name: metrics
+          env:
+            - name: AS_HOST
+              value: "127.0.0.1"
+            - name: AS_PORT
+              value: {{ .Values.documentCache.port | quote }}
+            - name: AGENT_BIND_PORT
+              value: {{ .Values.documentCache.metrics.port | quote }}
+            - name: AGENT_BIND_HOST
+              value: "0.0.0.0"
+          {{- with .Values.documentCache.metrics.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+      volumes:
+        - name: document-cache-data
+          hostPath:
+            path: {{ .Values.documentCache.storage.hostPath | quote }}
+            type: DirectoryOrCreate
+        - name: document-cache-config
+          configMap:
+            name: {{ include "layer.fullname" . }}-document-cache
+{{- end }}

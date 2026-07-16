@@ -1,0 +1,24 @@
+{{- if .Values.documentCache.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "layer.fullname" . }}-document-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "layer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+  ports:
+    - name: aerospike
+      port: {{ .Values.documentCache.port }}
+      targetPort: aerospike
+    {{- if .Values.documentCache.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.documentCache.metrics.port }}
+      targetPort: metrics
+    {{- end }}
+{{- end }}

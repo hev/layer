@@ -1,0 +1,95 @@
+{{- if and .Values.documentCache.enabled .Values.documentCache.karpenter.enabled }}
+{{- if not .Values.documentCache.karpenter.clusterName }}
+{{- fail "documentCache.karpenter.clusterName is required when documentCache.karpenter.enabled=true" }}
+{{- end }}
+{{- if not .Values.documentCache.karpenter.instanceProfile }}
+{{- fail "documentCache.karpenter.instanceProfile is required when documentCache.karpenter.enabled=true" }}
+{{- end }}
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: {{ .Values.documentCache.karpenter.nodeClassName }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  amiFamily: {{ .Values.documentCache.karpenter.amiFamily | quote }}
+  amiSelectorTerms:
+    - ssmParameter: {{ .Values.documentCache.karpenter.amiSsmParameter | quote }}
+  instanceProfile: {{ .Values.documentCache.karpenter.instanceProfile | quote }}
+  instanceStorePolicy: RAID0
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        deleteOnTermination: true
+        encrypted: true
+        iops: {{ .Values.documentCache.karpenter.rootVolume.iops }}
+        throughput: {{ .Values.documentCache.karpenter.rootVolume.throughput }}
+        volumeSize: {{ .Values.documentCache.karpenter.rootVolume.size | quote }}
+        volumeType: {{ .Values.documentCache.karpenter.rootVolume.type | quote }}
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.documentCache.karpenter.clusterName | quote }}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.documentCache.karpenter.clusterName | quote }}
+  tags:
+    Environment: {{ default .Release.Namespace .Values.environment | quote }}
+    ManagedBy: karpenter
+    Project: hevlayer
+    karpenter.sh/discovery: {{ .Values.documentCache.karpenter.clusterName | quote }}
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ .Values.documentCache.karpenter.nodePoolName }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ .Values.documentCache.karpenter.consolidateAfter | quote }}
+    budgets:
+      - nodes: 100%
+  limits:
+    cpu: {{ .Values.documentCache.karpenter.limits.cpu | quote }}
+    memory: {{ .Values.documentCache.karpenter.limits.memory | quote }}
+    nodes: {{ .Values.documentCache.karpenter.limits.nodes | quote }}
+  template:
+    metadata:
+      labels:
+        layer.hev.dev/node-role: document-cache
+    spec:
+      expireAfter: {{ .Values.documentCache.karpenter.expireAfter | quote }}
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: {{ .Values.documentCache.karpenter.nodeClassName }}
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - {{ .Values.documentCache.karpenter.capacityType | quote }}
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - {{ .Values.documentCache.karpenter.instanceType | quote }}
+      taints:
+        - key: layer.hev.dev/node-role
+          value: document-cache
+          effect: NoSchedule
+{{- end }}

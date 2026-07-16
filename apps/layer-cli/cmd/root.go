@@ -35,6 +35,7 @@ Commands:
   index get NAME            Show one index with snapshot history
   index delete NAME...      Delete indexes and their hevlayer state
   index delete --prefix P   Delete every index whose name starts with P
+  install aws               Wizard: provision AWS (Terraform) and install the Helm release
   keys mint NAME            Mint an API key (token prints once on stdout)
   keys ls                   List API keys (metadata only, never tokens)
   keys get KEY_OR_ID        Show one API key's metadata
@@ -174,6 +175,7 @@ func (app App) newRootCommand() *cobra.Command {
 	root.AddCommand(newEnvCommand(app, flags))
 	root.AddCommand(newInitCommand(app, flags))
 	root.AddCommand(newIndexCommand(app, flags))
+	root.AddCommand(newInstallCommand(app, flags))
 	root.AddCommand(newKeysCommand(app, flags))
 	root.AddCommand(newPipelineCommand(app, flags))
 	root.AddCommand(newRunCommand(app, flags))

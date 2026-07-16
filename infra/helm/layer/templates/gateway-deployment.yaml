@@ -1,0 +1,258 @@
+{{- if and .Values.gateway.queue.embedded (gt (int .Values.gateway.replicas) 1) }}
+{{- fail "gateway.queue.embedded requires gateway.replicas=1 until pipeline sharding lands" }}
+{{- end }}
+{{- if and .Values.gateway.queue.embedded (not (or (eq .Values.gateway.queue.persistence.type "hostPath") (eq .Values.gateway.queue.persistence.type "pvc"))) }}
+{{- fail "gateway.queue.persistence.type must be hostPath or pvc" }}
+{{- end }}
+{{- if not .Values.documentCache.enabled }}
+{{- fail "documentCache.enabled=true is required; legacy aerospike modes were removed" }}
+{{- end }}
+{{- $metricsEmbedded := and .Values.metrics.enabled .Values.metrics.embedded (not .Values.metrics.externalEndpoint) -}}
+{{- $indexNamespace := default .Release.Namespace (default .Values.operator.discovery.indexNamespace .Values.gateway.indexNamespace) -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  serviceName: {{ include "layer.fullname" . }}-gateway
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+        layer.hev.dev/component: gateway
+    spec:
+      serviceAccountName: {{ include "layer.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.drain.terminationGracePeriodSeconds }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "gateway") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        {{- if .Values.gateway.queue.embedded }}
+        - name: postgres
+          image: {{ .Values.gateway.queue.postgres.image | quote }}
+          args:
+            - "-c"
+            - "config_file=/etc/layer-postgres/postgresql.conf"
+            - "-c"
+            - "hba_file=/etc/layer-postgres/pg_hba.conf"
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.gateway.queue.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.gateway.queue.postgres.database | quote }}
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: trust
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: gateway-internal-config
+              mountPath: /etc/layer-postgres/postgresql.conf
+              subPath: postgresql.conf
+            - name: gateway-internal-config
+              mountPath: /etc/layer-postgres/pg_hba.conf
+              subPath: pg_hba.conf
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+              {{- if eq .Values.gateway.queue.persistence.type "hostPath" }}
+              subPathExpr: $(POD_NAME)
+              {{- end }}
+            - name: dshm
+              mountPath: /dev/shm
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -h
+                - "127.0.0.1"
+                - -U
+                - {{ .Values.gateway.queue.postgres.user | quote }}
+                - -d
+                - {{ .Values.gateway.queue.postgres.database | quote }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+        {{- end }}
+        {{- if $metricsEmbedded }}
+        - name: vmsingle
+          image: victoriametrics/victoria-metrics:v1.106.1
+          args:
+            - "-storageDataPath=/vm-data"
+            - "-retentionPeriod={{ .Values.metrics.retentionPeriod }}"
+            - "-httpListenAddr=127.0.0.1:8429"
+            - "-promscrape.config=/etc/vmsingle/scrape.yaml"
+            - "-promscrape.configCheckInterval=30s"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: vm-data
+              mountPath: /vm-data
+              subPathExpr: $(POD_NAME)
+            - name: scrape-config
+              mountPath: /etc/vmsingle
+        {{- end }}
+        - name: gateway
+          image: {{ .Values.gateway.image }}
+          imagePullPolicy: {{ default "Always" .Values.gateway.imagePullPolicy | quote }}
+          ports:
+            - containerPort: {{ .Values.gateway.port }}
+              name: http
+          env:
+            - name: PORT
+              value: {{ .Values.gateway.port | quote }}
+            - name: LAYER_DRAIN_MARKER_PATH
+              value: {{ .Values.gateway.drain.markerPath | quote }}
+            - name: AEROSPIKE_HOSTS
+              value: "{{ include "layer.fullname" . }}-document-cache:{{ .Values.documentCache.port }}"
+            - name: AEROSPIKE_NAMESPACE
+              value: {{ .Values.documentCache.namespace | quote }}
+            - name: AEROSPIKE_SET_PREFIX
+              value: {{ .Values.documentCache.setPrefix | quote }}
+            {{- if and .Values.documentCache.enabled .Values.documentCache.clusterName }}
+            - name: AEROSPIKE_CLUSTER_NAME
+              value: {{ .Values.documentCache.clusterName | quote }}
+            {{- end }}
+            - name: LAYER_SHARD_COUNT
+              value: {{ .Values.gateway.shardCount | quote }}
+            - name: LAYER_FEDERATED_QUERY_MAX_NAMESPACES
+              value: {{ .Values.gateway.federatedQuery.maxNamespaces | quote }}
+            - name: LAYER_FEDERATED_QUERY_NAMESPACE_THREADS
+              value: {{ .Values.gateway.federatedQuery.namespaceThreads | quote }}
+            - name: CONSISTENCY_STABLE_POLL_INTERVAL_MS
+              value: {{ .Values.gateway.consistency.stablePollIntervalMs | quote }}
+            - name: PIPELINE_SEGMENT_SIZE
+              value: {{ .Values.gateway.queue.segmentSize | quote }}
+            - name: LAYER_INDEX_GC_ENABLED
+              value: {{ .Values.gateway.indexGc.enabled | quote }}
+            - name: LAYER_INDEX_CONFIG_ENABLED
+              value: {{ .Values.gateway.indexConfig.enabled | quote }}
+            - name: LAYER_INDEX_NAMESPACE
+              value: {{ $indexNamespace | quote }}
+            - name: LAYER_VECTORSTORE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: LAYER_AWS_COST_EXPLORER_ENABLED
+              value: {{ .Values.gateway.cost.costExplorerEnabled | quote }}
+            - name: LAYER_AWS_COST_REGION
+              value: {{ .Values.gateway.cost.region | quote }}
+            - name: LAYER_AWS_COST_TAG_KEY
+              value: {{ .Values.gateway.cost.tagKey | quote }}
+            - name: LAYER_AWS_COST_TAG_VALUE
+              value: {{ .Values.gateway.cost.tagValue | quote }}
+            - name: LAYER_AWS_COST_SITE
+              value: {{ .Values.gateway.cost.site | quote }}
+            - name: LAYER_AWS_COST_CACHE_TTL_SECONDS
+              value: {{ .Values.gateway.cost.cacheTtlSeconds | quote }}
+            - name: LAYER_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "layer.fullname" . }}-keys
+                  key: pepper
+            - name: LAYER_LICENSE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default "hevlayer-license" .Values.license.existingSecret | quote }}
+                  key: {{ .Values.license.secretKey | default "license" | quote }}
+                  optional: true
+            {{- if .Values.license.grace.gatewaySeconds }}
+            - name: LAYER_GRACE_GATEWAY
+              value: {{ .Values.license.grace.gatewaySeconds | quote }}
+            {{- end }}
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            {{- if .Values.s3.endpoint }}
+            - name: S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.gateway.queue.embedded }}
+            - name: DATABASE_URL
+              value: "postgres://{{ .Values.gateway.queue.postgres.user }}@127.0.0.1:5432/{{ .Values.gateway.queue.postgres.database }}"
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_BACKEND_URL
+              {{- if .Values.metrics.externalEndpoint }}
+              value: {{ .Values.metrics.externalEndpoint | quote }}
+              {{- else if .Values.metrics.embedded }}
+              value: "http://127.0.0.1:8429"
+              {{- else }}
+              value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
+              {{- end }}
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "touch {{ .Values.gateway.drain.markerPath }} && sleep {{ .Values.gateway.drain.preStopSleepSeconds }}"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        {{- if .Values.gateway.queue.embedded }}
+        - name: gateway-internal-config
+          configMap:
+            name: {{ include "layer.fullname" . }}-gateway-internal
+        {{- end }}
+        {{- if and .Values.gateway.queue.embedded (eq .Values.gateway.queue.persistence.type "hostPath") }}
+        - name: pg-data
+          hostPath:
+            path: {{ .Values.gateway.queue.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.gateway.queue.embedded }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.gateway.queue.postgres.shmSize | quote }}
+        {{- end }}
+        {{- if $metricsEmbedded }}
+        - name: vm-data
+          hostPath:
+            path: {{ .Values.metrics.storage.hostPath | quote }}
+            type: DirectoryOrCreate
+        - name: scrape-config
+          configMap:
+            name: {{ include "layer.fullname" . }}-vmsingle-scrape
+        {{- end }}
+  {{- if and .Values.gateway.queue.embedded (eq .Values.gateway.queue.persistence.type "pvc") }}
+  volumeClaimTemplates:
+    - metadata:
+        name: pg-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.gateway.queue.persistence.storageClassName }}
+        storageClassName: {{ .Values.gateway.queue.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.gateway.queue.persistence.size | quote }}
+  {{- end }}
