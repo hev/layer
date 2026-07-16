@@ -64,7 +64,12 @@ pub async fn read_namespace_marker(
     tpuf: &dyn TurbopufferClient,
     namespace: &str,
 ) -> Result<Option<u64>, TurbopufferError> {
-    let Some(doc) = tpuf.fetch(namespace, NAMESPACE_META_ID).await? else {
+    let doc = match tpuf.fetch(namespace, NAMESPACE_META_ID).await {
+        Ok(doc) => doc,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(doc) = doc else {
         return Ok(None);
     };
     Ok(doc
