@@ -1,0 +1,110 @@
+{{- if .Values.workerKarpenter.enabled }}
+{{- if not .Values.workerKarpenter.clusterName }}
+{{- fail "workerKarpenter.clusterName is required when workerKarpenter.enabled=true" }}
+{{- end }}
+{{- if not .Values.workerKarpenter.instanceProfile }}
+{{- fail "workerKarpenter.instanceProfile is required when workerKarpenter.enabled=true" }}
+{{- end }}
+{{- $root := . -}}
+{{- range $class := list (dict "key" "cpu" "role" "worker-cpu" "compute" "cpu" "values" .Values.workerKarpenter.cpu) (dict "key" "gpu" "role" "worker-gpu" "compute" "gpu" "values" .Values.workerKarpenter.gpu) }}
+{{- $values := $class.values }}
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: {{ $values.nodeClassName }}
+  labels:
+    {{- include "layer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    layer.hev.dev/node-role: {{ $class.role | quote }}
+spec:
+  amiFamily: {{ $root.Values.workerKarpenter.amiFamily | quote }}
+  amiSelectorTerms:
+    - ssmParameter: {{ default $root.Values.workerKarpenter.amiSsmParameter $values.amiSsmParameter | quote }}
+  instanceProfile: {{ $root.Values.workerKarpenter.instanceProfile | quote }}
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        deleteOnTermination: true
+        encrypted: true
+        iops: {{ $values.rootVolume.iops }}
+        throughput: {{ $values.rootVolume.throughput }}
+        volumeSize: {{ $values.rootVolume.size | quote }}
+        volumeType: {{ $values.rootVolume.type | quote }}
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ $root.Values.workerKarpenter.clusterName | quote }}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ $root.Values.workerKarpenter.clusterName | quote }}
+  tags:
+    Environment: {{ default $root.Release.Namespace $root.Values.environment | quote }}
+    ManagedBy: karpenter
+    Project: hevlayer
+    karpenter.sh/discovery: {{ $root.Values.workerKarpenter.clusterName | quote }}
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ $values.nodePoolName }}
+  labels:
+    {{- include "layer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    layer.hev.dev/node-role: {{ $class.role | quote }}
+spec:
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ $root.Values.workerKarpenter.consolidateAfter | quote }}
+    budgets:
+      - nodes: 100%
+  limits:
+    cpu: {{ $values.limits.cpu | quote }}
+    memory: {{ $values.limits.memory | quote }}
+    nodes: {{ $values.limits.nodes | quote }}
+  template:
+    metadata:
+      labels:
+        layer.hev.dev/node-role: {{ $class.role | quote }}
+        layer.hev.dev/compute: {{ $class.compute | quote }}
+    spec:
+      expireAfter: {{ $root.Values.workerKarpenter.expireAfter | quote }}
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: {{ $values.nodeClassName }}
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - {{ $root.Values.workerKarpenter.capacityType | quote }}
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            {{- range $values.instanceTypes }}
+            - {{ . | quote }}
+            {{- end }}
+      taints:
+        - key: layer.hev.dev/node-role
+          value: {{ $class.role | quote }}
+          effect: NoSchedule
+{{- if eq $class.compute "gpu" }}
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+{{- end }}
+{{- if ne $class.key "gpu" }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

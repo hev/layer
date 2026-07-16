@@ -1,0 +1,1604 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: infrarules.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: InfraRules
+    plural: infrarules
+    shortNames: []
+    singular: infrarules
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.poolCount
+      name: Pools
+      type: integer
+    - jsonPath: .status.documentCache.nodes
+      name: CacheNodes
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for InfraRulesSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              computePools:
+                default: []
+                items:
+                  properties:
+                    gpuType:
+                      nullable: true
+                      type: string
+                    kind:
+                      type: string
+                    maxReplicasPerWorkload:
+                      format: int32
+                      type: integer
+                    name:
+                      type: string
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      type: object
+                    resources:
+                      x-kubernetes-preserve-unknown-fields: true
+                    tolerations:
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      type: array
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                  - kind
+                  - maxReplicasPerWorkload
+                  - name
+                  type: object
+                type: array
+              documentCache:
+                nullable: true
+                properties:
+                  capGiB:
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  replicationFactor:
+                    format: int32
+                    type: integer
+                  scaling:
+                    properties:
+                      mode:
+                        default: autoscale
+                        enum:
+                        - autoscale
+                        - fixed
+                        type: string
+                      nodes:
+                        properties:
+                          max:
+                            format: int32
+                            type: integer
+                          min:
+                            format: int32
+                            type: integer
+                        required:
+                        - max
+                        - min
+                        type: object
+                    required:
+                    - nodes
+                    type: object
+                required:
+                - capGiB
+                - replicationFactor
+                - scaling
+                type: object
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              documentCache:
+                nullable: true
+                properties:
+                  nodes:
+                    nullable: true
+                    type: string
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              poolCount:
+                default: 0
+                format: uint
+                minimum: 0.0
+                type: integer
+            type: object
+        required:
+        - spec
+        title: InfraRules
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vectorstores.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: VectorStore
+    plural: vectorstores
+    shortNames: []
+    singular: vectorstore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.default
+      name: Default
+      type: boolean
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.endpoint.region
+      name: Region
+      type: string
+    - jsonPath: .status.reachable
+      name: Reachable
+      type: boolean
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for VectorStoreSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              credential:
+                nullable: true
+                properties:
+                  secretRef:
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - secretRef
+                type: object
+              default:
+                default: false
+                type: boolean
+              endpoint:
+                properties:
+                  region:
+                    type: string
+                  url:
+                    type: string
+                required:
+                - region
+                - url
+                type: object
+              inboundAuth:
+                nullable: true
+                properties:
+                  keys:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        scopes:
+                          items:
+                            enum:
+                            - read
+                            - write
+                            - admin
+                            type: string
+                          type: array
+                        secretRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - scopes
+                      - secretRef
+                      type: object
+                    type: array
+                  mode:
+                    default: deriveFromStore
+                    enum:
+                    - deriveFromStore
+                    - keys
+                    - open
+                    type: string
+                type: object
+              kind:
+                enum:
+                - turbopuffer
+                - pinecone
+                - search
+                type: string
+              search:
+                nullable: true
+                properties:
+                  adminCredential:
+                    description: Admin bearer for the hev search control plane. Data requests use `spec.credential`; the admin credential stays operator-only.
+                    nullable: true
+                    properties:
+                      secretRef:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - secretRef
+                    type: object
+                type: object
+              turbopuffer:
+                nullable: true
+                properties:
+                  orgId:
+                    description: Turbopuffer organization id. Used only to deep-link into the Turbopuffer dashboard and orient support; not used for auth.
+                    type: string
+                required:
+                - orgId
+                type: object
+            required:
+            - endpoint
+            - kind
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              reachable:
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: VectorStore
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: apikeys.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: ApiKey
+    plural: apikeys
+    shortNames: []
+    singular: apikey
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.owner
+      name: Owner
+      type: string
+    - jsonPath: .status.expiresAt
+      name: Expires
+      type: string
+    - jsonPath: .status.lastSeenAt
+      name: LastSeen
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for ApiKeySpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              description:
+                nullable: true
+                type: string
+              entitlements:
+                additionalProperties:
+                  properties:
+                    claims:
+                      description: Opaque claim strings. Layer stores and echoes them, never interprets them.
+                      items:
+                        type: string
+                      type: array
+                    namespaces:
+                      description: Upstream-namespace globs constraining a vectorstore grant.
+                      items:
+                        type: string
+                      type: array
+                    scopes:
+                      description: Layer-enforced scopes against the entitlement's target.
+                      items:
+                        enum:
+                        - read
+                        - write
+                        - admin
+                        type: string
+                      type: array
+                  type: object
+                description: 'Map keyed by target resource: `vectorstore.<name>`, `warehouse.<name>`, `agent.<name>`, or `layer`. Unknown prefixes are rejected at admission; a missing target is an `EntitlementTargetMissing` status condition, not an error.'
+                type: object
+                x-kubernetes-validations:
+                - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', or 'agent.<name>'
+                  rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6))
+              expiresAfter:
+                default: 365d
+                description: Duration (`365d`, `12h`) or `never`. `status.expiresAt` is computed at mint.
+                type: string
+              owner:
+                description: Free-form owner label, echoed in list and authenticate responses.
+                nullable: true
+                type: string
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              createdAt:
+                nullable: true
+                type: string
+              expiresAt:
+                nullable: true
+                type: string
+              keyId:
+                description: Stable UUID assigned at mint; the external actor id.
+                nullable: true
+                type: string
+              lastSeenAt:
+                description: Advances at most once per five minutes per key.
+                nullable: true
+                type: string
+              lookupHash:
+                description: Indexed token fingerprint, `sha256:<hex>`. One-way.
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: Pending
+                description: Phases keep Kubernetes' PascalCase convention (`Active`, not `active`) — they surface verbatim in REST responses and kubectl printcolumns.
+                enum:
+                - Pending
+                - Active
+                - Revoked
+                - Expired
+                type: string
+              revokedAt:
+                nullable: true
+                type: string
+              secretRef:
+                description: Token-delivery Secret, set only for CRD-authored keys.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              tokenHash:
+                description: argon2id+pepper verifier as a PHC string. One-way.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ApiKey
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: warehouses.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: Warehouse
+    plural: warehouses
+    shortNames: []
+    singular: warehouse
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.verifiedAt
+      name: Verified
+      type: string
+    - jsonPath: .status.consumers.pipelines
+      name: Pipelines
+      type: integer
+    - jsonPath: .status.consumers.apiKeys
+      name: Keys
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for WarehouseSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              huggingface:
+                nullable: true
+                properties:
+                  endpoint:
+                    default: https://huggingface.co
+                    description: Hub endpoint. Defaults to the public Hugging Face Hub; override for Enterprise Hub or a mirror.
+                    type: string
+                  tokenSecretRef:
+                    description: Optional Secret in the same namespace holding `token` for gated or private datasets. Public datasets do not require a Secret.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              kind:
+                description: Warehouse source kind. `databricks` and `iceberg` remain reserved; `snowflake`, `huggingface`, `rss`, `youtube`, and `rest` are admitted and reconciled.
+                enum:
+                - snowflake
+                - huggingface
+                - rss
+                - youtube
+                - rest
+                - databricks
+                - iceberg
+                type: string
+                x-kubernetes-validations:
+                - message: spec.kind is reserved but not implemented; v1 supports snowflake, huggingface, rss, youtube, and rest
+                  rule: self in ['snowflake', 'huggingface', 'rss', 'youtube', 'rest']
+              rest:
+                nullable: true
+                properties:
+                  auth:
+                    description: Optional static credential applied to every probe and source request.
+                    nullable: true
+                    properties:
+                      in:
+                        enum:
+                        - query
+                        - header
+                        type: string
+                      name:
+                        type: string
+                      secretRef:
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - in
+                    - name
+                    - secretRef
+                    type: object
+                  baseUrl:
+                    description: JSON API origin, for example `https://api.fda.gov`.
+                    type: string
+                  rateLimit:
+                    description: Politeness cap enforced by source workers.
+                    nullable: true
+                    properties:
+                      requestsPerSecond:
+                        format: double
+                        type: number
+                    required:
+                    - requestsPerSecond
+                    type: object
+                  verify:
+                    description: Cheap reachability endpoint probed by the operator.
+                    properties:
+                      path:
+                        type: string
+                      query:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    required:
+                    - path
+                    type: object
+                required:
+                - baseUrl
+                - verify
+                type: object
+              rss:
+                nullable: true
+                properties:
+                  userAgent:
+                    default: hevlayer/rss-source (+https://hevlayer.com)
+                    description: User-Agent sent by stock RSS source workers when fetching public feeds.
+                    type: string
+                type: object
+              snowflake:
+                nullable: true
+                properties:
+                  account:
+                    description: Snowflake account identifier.
+                    type: string
+                  keyPairSecretRef:
+                    description: Secret in the same namespace holding `private-key.pem` and optional `passphrase`. The credential is never stored in the CRD.
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  pool:
+                    nullable: true
+                    properties:
+                      size:
+                        default: 5
+                        format: int32
+                        type: integer
+                      timeout:
+                        default: 30s
+                        type: string
+                    type: object
+                  role:
+                    description: Optional role assumed on connect.
+                    nullable: true
+                    type: string
+                  user:
+                    description: Service user the key pair authenticates.
+                    type: string
+                  warehouse:
+                    description: Snowflake compute warehouse extraction queries run on.
+                    type: string
+                required:
+                - account
+                - keyPairSecretRef
+                - user
+                - warehouse
+                type: object
+              verifyInterval:
+                default: 1h
+                description: Probe cadence. The operator also probes on apply and whenever the referenced Secret's content changes.
+                type: string
+              youtube:
+                nullable: true
+                properties:
+                  apiKeySecretRef:
+                    description: Optional Secret in the same namespace holding `api-key` for quota-backed YouTube Data API access. Public channel RSS and captions do not require a key.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+            required:
+            - kind
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              consumers:
+                default:
+                  apiKeys: 0
+                  pipelines: 0
+                properties:
+                  apiKeys:
+                    default: 0
+                    format: int64
+                    type: integer
+                  pipelines:
+                    default: 0
+                    format: int64
+                    type: integer
+                type: object
+              credentialRevision:
+                description: sha256 over the referenced Secret's key material at the last probe. A different live revision means the Secret rotated and the operator re-verifies.
+                nullable: true
+                type: string
+              failureReason:
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: Pending
+                description: PascalCase like every Kubernetes phase.
+                enum:
+                - Pending
+                - Verified
+                - Failed
+                type: string
+              sourceRevisions:
+                additionalProperties:
+                  type: string
+                description: For source kinds whose revision is part of replayability, this maps declared source keys to the latest resolved upstream revision.
+                type: object
+              verifiedAt:
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Warehouse
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agents.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: Agent
+    plural: agents
+    shortNames: []
+    singular: agent
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.model.name
+      name: MODEL
+      type: string
+    - jsonPath: .status.indexCount
+      name: INDICES
+      type: integer
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for AgentSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              budget:
+                default:
+                  deadlineMs: 60000
+                  onDeadline: bestEffort
+                properties:
+                  deadlineMs:
+                    default: 60000
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  onDeadline:
+                    default: bestEffort
+                    enum:
+                    - bestEffort
+                    - error
+                    type: string
+                type: object
+              dataKeySecretRef:
+                nullable: true
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              indices:
+                default: []
+                items:
+                  type: string
+                type: array
+              model:
+                properties:
+                  apiKeySecretRef:
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  fallback:
+                    nullable: true
+                    type: string
+                  name:
+                    type: string
+                  provider:
+                    enum:
+                    - openrouter
+                    type: string
+                required:
+                - apiKeySecretRef
+                - name
+                - provider
+                type: object
+              output:
+                default:
+                  provenance: false
+                  trace: false
+                properties:
+                  provenance:
+                    default: false
+                    type: boolean
+                  trace:
+                    default: false
+                    type: boolean
+                type: object
+              retrieval:
+                default:
+                  fanout: 8
+                  rankBy: auto
+                  recallDepth: 50
+                  relevanceWeight: 0.6
+                properties:
+                  fanout:
+                    default: 8
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  rankBy:
+                    default: auto
+                    enum:
+                    - auto
+                    - hybridText
+                    - semantic
+                    type: string
+                  recallDepth:
+                    default: 50
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  relevanceWeight:
+                    default: 0.6
+                    format: double
+                    type: number
+                type: object
+            required:
+            - model
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              indexCount:
+                default: 0
+                format: uint
+                minimum: 0.0
+                type: integer
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: Ready
+                enum:
+                - Ready
+                - Degraded
+                - Invalid
+                type: string
+            type: object
+        required:
+        - spec
+        title: Agent
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: indexes.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: Index
+    plural: indexes
+    shortNames: []
+    singular: index
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.backend.storeRef
+      name: Store
+      type: string
+    - jsonPath: .spec.backend.distanceMetric
+      name: Metric
+      type: string
+    - jsonPath: .spec.cache.mode
+      name: Cache
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IndexSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              backend:
+                properties:
+                  distanceMetric:
+                    default: cosine_distance
+                    type: string
+                  namespace:
+                    nullable: true
+                    type: string
+                  storeRef:
+                    nullable: true
+                    type: string
+                type: object
+              blobs:
+                nullable: true
+                properties:
+                  referenceAttributes:
+                    default: []
+                    items:
+                      type: string
+                    type: array
+                type: object
+              cache:
+                nullable: true
+                properties:
+                  capGiB:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  mode:
+                    default: standard
+                    enum:
+                    - standard
+                    - staging
+                    type: string
+                  ttl:
+                    type: string
+                required:
+                - ttl
+                type: object
+              consistency:
+                default: eventual
+                enum:
+                - eventual
+                - strong
+                type: string
+              embedding:
+                nullable: true
+                properties:
+                  model:
+                    type: string
+                  normalization:
+                    type: string
+                  outputDim:
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - model
+                - normalization
+                - outputDim
+                type: object
+              metadata:
+                default:
+                  annotations: {}
+                  labels: {}
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    type: object
+                  tags:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              scan:
+                nullable: true
+                properties:
+                  threads:
+                    default: 8
+                    format: int32
+                    type: integer
+                type: object
+              search:
+                nullable: true
+                properties:
+                  fullText:
+                    default: false
+                    type: boolean
+                type: object
+              snapshot:
+                nullable: true
+                properties:
+                  facetFields:
+                    default: []
+                    items:
+                      type: string
+                    type: array
+                  interval:
+                    default: 5m
+                    type: string
+                  retention:
+                    default: never
+                    type: string
+                type: object
+            required:
+            - backend
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              metadata:
+                nullable: true
+                properties:
+                  lastSyncedRevision:
+                    nullable: true
+                    type: string
+                  synced:
+                    type: boolean
+                required:
+                - synced
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              snapshot:
+                nullable: true
+                properties:
+                  lastRun:
+                    nullable: true
+                    type: string
+                  lastSuccess:
+                    nullable: true
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        title: Index
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: pipelines.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: Pipeline
+    plural: pipelines
+    shortNames: []
+    singular: pipeline
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.namespace
+      name: Target
+      type: string
+    - jsonPath: .spec.scaling.pool
+      name: Pool
+      type: string
+    - jsonPath: .spec.worker.image
+      name: Image
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for PipelineSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              paused:
+                default: false
+                type: boolean
+              pipelineId:
+                description: Gateway pipeline (queue) id this worker stages into and scales on. Defaults to the resource name. Set it when multiple worker resources share one queue.
+                nullable: true
+                type: string
+              scaling:
+                properties:
+                  mode:
+                    default: autoscale
+                    enum:
+                    - autoscale
+                    - fixed
+                    - disabled
+                    type: string
+                  pool:
+                    type: string
+                  replicas:
+                    properties:
+                      max:
+                        format: int32
+                        type: integer
+                      min:
+                        default: 0
+                        format: int32
+                        type: integer
+                    required:
+                    - max
+                    type: object
+                  warmWindowSeconds:
+                    format: int32
+                    nullable: true
+                    type: integer
+                required:
+                - replicas
+                type: object
+              schedule:
+                description: Optional cron window for source-refresh Pipelines. When set, the operator wakes the worker on this schedule instead of scaling it on pending queue depth.
+                nullable: true
+                properties:
+                  cron:
+                    description: 'Cron expression (5-field, UTC) for `schedule`-triggered workloads: when the worker wakes to run. For Functions, this is ignored for discovery/write triggers. Defaults to hourly (`0 * * * *`) when a schedule trigger is active. The minute field must be a single integer; the operator scales the worker from zero across a short window sized by `leaseSeconds`.'
+                    nullable: true
+                    type: string
+                  discoveryIntervalSeconds:
+                    default: 60
+                    format: int32
+                    type: integer
+                  leaseSeconds:
+                    default: 120
+                    format: int32
+                    type: integer
+                  maxConcurrentScans:
+                    default: 4
+                    format: int32
+                    type: integer
+                  maxInFlightBatches:
+                    default: 8
+                    format: int32
+                    type: integer
+                type: object
+              sourceRef:
+                x-kubernetes-preserve-unknown-fields: true
+              target:
+                properties:
+                  namespace:
+                    type: string
+                required:
+                - namespace
+                type: object
+              worker:
+                properties:
+                  batchSize:
+                    default: 32
+                    format: int32
+                    type: integer
+                  computeClass:
+                    default: cpu
+                    enum:
+                    - cpu
+                    - gpu
+                    type: string
+                  dispatch:
+                    default: pull
+                    enum:
+                    - pull
+                    - push
+                    type: string
+                  image:
+                    type: string
+                  podSpec:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  port:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  timeoutSeconds:
+                    default: 30
+                    format: int32
+                    type: integer
+                  url:
+                    nullable: true
+                    type: string
+                required:
+                - image
+                type: object
+            required:
+            - scaling
+            - target
+            - worker
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              managedObjects:
+                default: []
+                items:
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: Pipeline
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: functions.hevlayer.com
+spec:
+  group: hevlayer.com
+  names:
+    categories: []
+    kind: Function
+    plural: functions
+    shortNames: []
+    singular: function
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    - jsonPath: .spec.scaling.pool
+      name: Pool
+      type: string
+    - jsonPath: .spec.worker.image
+      name: Image
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for FunctionSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              filter:
+                x-kubernetes-preserve-unknown-fields: true
+              indexSelector:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              inputs:
+                default: []
+                items:
+                  type: string
+                type: array
+              invalidates:
+                default: []
+                items:
+                  type: string
+                type: array
+              paused:
+                default: false
+                type: boolean
+              retry:
+                default:
+                  initialBackoffSeconds: 5
+                  maxAttempts: 8
+                  maxBackoffSeconds: 300
+                properties:
+                  initialBackoffSeconds:
+                    default: 5
+                    format: int32
+                    type: integer
+                  maxAttempts:
+                    default: 8
+                    format: int32
+                    type: integer
+                  maxBackoffSeconds:
+                    default: 300
+                    format: int32
+                    type: integer
+                type: object
+              scaling:
+                properties:
+                  mode:
+                    default: autoscale
+                    enum:
+                    - autoscale
+                    - fixed
+                    - disabled
+                    type: string
+                  pool:
+                    type: string
+                  replicas:
+                    properties:
+                      max:
+                        format: int32
+                        type: integer
+                      min:
+                        default: 0
+                        format: int32
+                        type: integer
+                    required:
+                    - max
+                    type: object
+                  warmWindowSeconds:
+                    format: int32
+                    nullable: true
+                    type: integer
+                required:
+                - replicas
+                type: object
+              schedule:
+                default:
+                  discoveryIntervalSeconds: 60
+                  leaseSeconds: 120
+                  maxConcurrentScans: 4
+                  maxInFlightBatches: 8
+                properties:
+                  cron:
+                    description: 'Cron expression (5-field, UTC) for `schedule`-triggered workloads: when the worker wakes to run. For Functions, this is ignored for discovery/write triggers. Defaults to hourly (`0 * * * *`) when a schedule trigger is active. The minute field must be a single integer; the operator scales the worker from zero across a short window sized by `leaseSeconds`.'
+                    nullable: true
+                    type: string
+                  discoveryIntervalSeconds:
+                    default: 60
+                    format: int32
+                    type: integer
+                  leaseSeconds:
+                    default: 120
+                    format: int32
+                    type: integer
+                  maxConcurrentScans:
+                    default: 4
+                    format: int32
+                    type: integer
+                  maxInFlightBatches:
+                    default: 8
+                    format: int32
+                    type: integer
+                type: object
+              targetNamespaces:
+                default: []
+                items:
+                  type: string
+                type: array
+              triggers:
+                default:
+                - discovery
+                items:
+                  enum:
+                  - discovery
+                  - write
+                  - schedule
+                  type: string
+                type: array
+              version:
+                default: v1
+                type: string
+              worker:
+                properties:
+                  batchSize:
+                    default: 32
+                    format: int32
+                    type: integer
+                  computeClass:
+                    default: cpu
+                    enum:
+                    - cpu
+                    - gpu
+                    type: string
+                  dispatch:
+                    default: pull
+                    enum:
+                    - pull
+                    - push
+                    type: string
+                  image:
+                    type: string
+                  podSpec:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  port:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  timeoutSeconds:
+                    default: 30
+                    format: int32
+                    type: integer
+                  url:
+                    nullable: true
+                    type: string
+                required:
+                - image
+                type: object
+            required:
+            - scaling
+            - worker
+            type: object
+          status:
+            nullable: true
+            properties:
+              activeNamespaces:
+                default: []
+                items:
+                  type: string
+                type: array
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              managedObjects:
+                default: []
+                items:
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              queueDepth:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: Function
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

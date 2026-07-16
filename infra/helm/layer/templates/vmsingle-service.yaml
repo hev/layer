@@ -1,0 +1,19 @@
+{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) (not .Values.metrics.embedded) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "layer.fullname" . }}-vmsingle
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vmsingle
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "layer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: vmsingle
+  ports:
+    - name: http
+      port: 8429
+      targetPort: http
+{{- end }}

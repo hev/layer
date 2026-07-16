@@ -1,0 +1,25 @@
+{{- if .Values.priorityClasses.create }}
+# Keeps platform pods ahead of colocated tenant workloads under node disk or
+# memory pressure (GH #92). The gateway is the single write path and outranks
+# everything; the document cache is ephemeral and sits at the lower platform
+# tier with the operator, dashboard, and metrics.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClasses.gateway.name }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+value: {{ .Values.priorityClasses.gateway.value | int }}
+globalDefault: false
+description: "Layer gateway — the single write path. Outranks all colocated tenant and platform pods under node pressure."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClasses.platform.name }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+value: {{ .Values.priorityClasses.platform.value | int }}
+globalDefault: false
+description: "Layer platform pods (ephemeral document cache, operator, dashboard, metrics). Above tenant default, below the gateway."
+{{- end }}

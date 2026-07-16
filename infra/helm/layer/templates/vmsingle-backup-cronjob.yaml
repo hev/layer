@@ -1,0 +1,55 @@
+{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) (not .Values.metrics.embedded) .Values.metrics.backup.enabled .Values.s3.bucket }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "layer.fullname" . }}-vmbackup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vmbackup
+spec:
+  schedule: {{ printf "0 */%v * * *" .Values.metrics.backup.intervalHours | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "layer.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: vmbackup
+            layer.hev.dev/component: metrics
+        spec:
+          serviceAccountName: {{ include "layer.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          nodeSelector:
+            {{- include "layer.nodeSelector" (dict "role" "system") | nindent 12 }}
+          tolerations:
+            {{- include "layer.roleToleration" (dict "role" "system") | nindent 12 }}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      {{- include "layer.selectorLabels" . | nindent 22 }}
+                      app.kubernetes.io/component: vmsingle
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: vmbackup
+              image: victoriametrics/vmbackup:v1.106.1
+              args:
+                - "-storageDataPath=/vm-data"
+                - "-snapshot.createURL=http://{{ include "layer.fullname" . }}-vmsingle:8429/snapshot/create"
+                - "-snapshot.deleteURL=http://{{ include "layer.fullname" . }}-vmsingle:8429/snapshot/delete"
+                - "-dst=s3://{{ .Values.s3.bucket }}/{{ .Values.metrics.backup.s3Prefix }}/latest"
+              volumeMounts:
+                - name: data
+                  mountPath: /vm-data
+                  readOnly: true
+          volumes:
+            - name: data
+              hostPath:
+                path: /mnt/nvme/layer-vmsingle
+                type: DirectoryOrCreate
+{{- end }}

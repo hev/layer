@@ -1,0 +1,528 @@
+# PriorityClasses that keep platform pods ahead of colocated tenant workloads
+# when the shared system node hits disk/memory pressure (GH #92). The gateway is
+# the single write path and must outrank everything; the document cache is
+# ephemeral, so it sits at the lower platform tier with the operator, dashboard,
+# and metrics. Tenant app pods carry no priorityClass (default 0) and are
+# evicted first. Set create: false to opt out and leave all pods at default.
+priorityClasses:
+  create: true
+  gateway:
+    name: layer-gateway-critical
+    value: 1000000
+  platform:
+    name: layer-platform
+    value: 100000
+
+gateway:
+  image: ""  # required — customer pull path: hevlayer/layer-gateway-pro:<version>
+  port: 8080
+  replicas: 1
+  drain:
+    markerPath: /tmp/layer-gateway-draining
+    preStopSleepSeconds: 20
+    terminationGracePeriodSeconds: 75
+  nodeRole: infra
+  queue:
+    segmentSize: 10000
+    # RFC 0001: postgres is gateway-internal scratch state, not a product
+    # surface. When enabled, postgres runs as a loopback-only sidecar and no
+    # layer-postgres Service is rendered.
+    embedded: true
+    persistence:
+      type: hostPath # hostPath or pvc
+      hostPath: /mnt/nvme/layer-gateway-pg
+      storageClassName: ""
+      size: 5Gi
+    postgres:
+      image: postgres:16
+      user: gateway
+      database: gateway
+      sharedBuffers: 256MB
+      maxConnections: 50
+      shmSize: 1Gi
+  # Number of deterministic `_hevlayer_shard` partitions stamped on writes and
+  # used for scatter/gather after a namespace shard migration completes.
+  shardCount: 16
+  federatedQuery:
+    # Maximum namespaces accepted by one POST /v2/query request.
+    maxNamespaces: 512
+    # Maximum namespace legs run concurrently by one POST /v2/query request.
+    namespaceThreads: 16
+  consistency:
+    # Stable namespaces use this slower watcher cadence; updating and cold
+    # namespaces keep the gateway's fast default interval.
+    stablePollIntervalMs: 60000
+  # Namespace containing Index CRs. Blank follows operator.discovery.indexNamespace,
+  # then the Helm release namespace.
+  indexNamespace: ""
+  # Read Index CR routing and policy such as spec.backend.storeRef,
+  # spec.snapshot.facetFields, and spec.scan.threads.
+  indexConfig:
+    enabled: true
+  # Delete the operator-discovered Index CR when a namespace is hard-deleted.
+  indexGc:
+    enabled: true
+  cost:
+    # Enables AWS Cost Explorer reads in the gateway cost API.
+    costExplorerEnabled: true
+    # Cost Explorer is filtered by this activated cost-allocation tag so AWS
+    # invoice lines match the Layer stack instead of the whole account.
+    tagKey: Project
+    tagValue: hevlayer
+    site: main
+    cacheTtlSeconds: 86400
+    region: us-east-1
+  # Gateway access to Pipeline/Function CRs (RFC 0008). When enabled, renders a
+  # ClusterRole granting the gateway service account read access to
+  # hevlayer.com/pipelines and functions so it can serve CRD-backed list/get/status
+  # routes. Set `mutate: true` once gateway create/delete routes are CRD-backed
+  # and an admin API key is required for those routes.
+  computeSpecAccess:
+    enabled: false
+    mutate: false
+
+operator:
+  enabled: false
+  image: ""  # required when enabled — customer pull path: hevlayer/layer-operator:<version>
+  imagePullPolicy: Always
+  replicas: 1
+  watchNamespace: "" # blank watches all namespaces
+  maxReplicasCeiling: 100
+  # Injected as HEVLAYER_BASE_URL on every operator-rendered Function worker pod so
+  # the Python SDK's claim/poll loop reaches the in-cluster gateway. Blank
+  # defaults to http://<release>-gateway.<namespace>.svc.cluster.local:<port>.
+  gatewayBaseUrl: ""
+  discovery:
+    # When the operator is enabled, discover Turbopuffer namespaces and
+    # materialize one Index CR per namespace in indexNamespace.
+    enabled: true
+    intervalSeconds: 60
+    pageSize: 1000
+    prefix: ""
+    indexNamespace: "" # blank defaults to the Helm release namespace
+  # Cluster-scoped InfraRules/default rendered for the operator. Workloads with
+  # spec.scaling.pool refuse to reconcile until this singleton exists.
+  infraRules:
+    create: true
+    computePools:
+      - name: cpu
+        kind: cpu
+        nodeSelector:
+          layer.hev.dev/node-role: worker-cpu
+          layer.hev.dev/compute: cpu
+        tolerations:
+          - key: layer.hev.dev/node-role
+            operator: Equal
+            value: worker-cpu
+            effect: NoSchedule
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        maxReplicasPerWorkload: 32
+      # CPU pool with local-disk headroom for workers that cache large
+      # source datasets per pod (e.g. hev-shop extract-chunk).
+      - name: cpu-large
+        kind: cpu
+        nodeSelector:
+          layer.hev.dev/node-role: worker-cpu
+          layer.hev.dev/compute: cpu
+        tolerations:
+          - key: layer.hev.dev/node-role
+            operator: Equal
+            value: worker-cpu
+            effect: NoSchedule
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 35Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
+            ephemeral-storage: 40Gi
+        maxReplicasPerWorkload: 8
+      # GPU pool for embedding workers. Placement is gated by the GPU
+      # resource request plus the standard NVIDIA toleration.
+      - name: gpu
+        kind: gpu
+        nodeSelector:
+          layer.hev.dev/node-role: worker-gpu
+          layer.hev.dev/compute: gpu
+        tolerations:
+          - key: layer.hev.dev/node-role
+            operator: Equal
+            value: worker-gpu
+            effect: NoSchedule
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        resources:
+          requests:
+            cpu: 250m
+            memory: 4Gi
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "2"
+            memory: 10Gi
+            nvidia.com/gpu: "1"
+        maxReplicasPerWorkload: 4
+    documentCache:
+      capGiB: 64
+      replicationFactor: 1
+      scaling:
+        mode: autoscale
+  serviceAccount:
+    create: true
+    name: layer-operator
+    roleArn: ""
+
+# Dynamic volumes on the system node's i4i instance-store NVMe. The
+# provisioner uses WaitForFirstConsumer plus an allowed topology so claims bind
+# to the system node that physically owns their data. These volumes are erased
+# when that node is replaced; use them only for caches and rebuildable state.
+localStorage:
+  enabled: true
+  storageClassName: local-path
+  defaultClass: true
+  provisionerImage: rancher/local-path-provisioner:v0.0.36
+  rootPath: /mnt/k8s-disks/0/local-path-provisioner
+
+documentCache:
+  enabled: true
+  image: aerospike/aerospike-server:latest
+  replicas: 0
+  # Baseline design-partner topology: the always-on system node is an i4i
+  # instance with local NVMe, so the cache can wake there without adding a
+  # standing cache node. Set this to document-cache when using the optional
+  # dedicated document-cache Karpenter pool.
+  nodeRole: system
+  port: 3000
+  namespace: hevlayer
+  setPrefix: tpuf_
+  clusterName: layer-document-cache
+  autoRestartOnStopWrites: true
+  storage:
+    # The system node's nodeadm localStorage.strategy=RAID0 mounts the i4i
+    # instance store here (node-groups.tf); containerd and the kubelet are
+    # symlinked onto the same NVMe, so this cache file shares the local disk
+    # rather than the small EBS root.
+    hostPath: /mnt/k8s-disks/0/document-cache
+    fileSize: 64G
+    # Aerospike is an ephemeral cache. Clearing the backing file on pod start
+    # makes a restart a valid stop-writes recovery action.
+    resetOnStart: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 10Gi
+    limits:
+      memory: 2Gi
+  # Aerospike prometheus exporter sidecar. Renames `aerospike_*` series to
+  # `layer_document_cache_*` and drops anything not on the allowlist at
+  # scrape time (see vmsingle-scrape-configmap.yaml). The allowlist entries
+  # are regex fragments OR'd together; keep them anchored to the upstream
+  # `aerospike_` prefix so the rename rule is the only place that knows
+  # about the new namespace.
+  metrics:
+    enabled: true
+    image: aerospike/aerospike-prometheus-exporter:latest
+    port: 9145
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+    # Open allowlist — captures every series the exporter emits (~520
+    # unique names per node × set/namespace cardinality). Trim this back
+    # to a curated list once the dashboard's observe-tab catalog
+    # stabilises. The dashboard's `MetricsClient::aerospike_storage`
+    # queries are the lower bound any curated list must preserve.
+    allowlist:
+      - aerospike_.*
+  keda:
+    enabled: true
+    pollingInterval: 10
+    cooldownPeriod: 120
+    # Topology change (2026-06-25): the document cache is pinned and never scales
+    # to zero. resetOnStart wipes the NVMe cache on every restart, so scale-to-zero
+    # defeated cache warming — warmed blobs/documents were evicted on each 1->0->1
+    # cycle, and warms/reads racing the cold-start returned 503s and put_raw I/O
+    # errors. min=max=1 keeps it always-on; the prometheus trigger is now inert.
+    minReplicaCount: 1
+    maxReplicaCount: 1
+    demandWindow: 2m
+    threshold: "1"
+    activationThreshold: "0"
+    # Blank means use the bundled/selected metrics backend.
+    serverAddress: ""
+  karpenter:
+    # Optional larger-install profile. The default baseline keeps document
+    # cache on the i4i system node and uses Karpenter only for indexing workers.
+    enabled: false
+    nodePoolName: layer-document-cache
+    nodeClassName: layer-document-cache
+    clusterName: ""
+    instanceProfile: ""
+    amiFamily: AL2023
+    amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id
+    instanceType: i4i.large
+    capacityType: on-demand
+    consolidateAfter: 2m
+    expireAfter: 24h
+    limits:
+      cpu: "8"
+      memory: 32Gi
+      nodes: "1"
+    rootVolume:
+      size: 40Gi
+      type: gp3
+      iops: 3000
+      throughput: 125
+
+workerKarpenter:
+  enabled: false
+  clusterName: ""
+  instanceProfile: ""
+  amiFamily: AL2023
+  amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id
+  capacityType: on-demand
+  consolidateAfter: 2m
+  expireAfter: 24h
+  cpu:
+    nodePoolName: worker-cpu
+    nodeClassName: worker-cpu
+    amiSsmParameter: ""
+    instanceTypes:
+      - m6a.large
+      - m6a.xlarge
+    limits:
+      cpu: "64"
+      memory: 256Gi
+      nodes: "8"
+    rootVolume:
+      size: 60Gi
+      type: gp3
+      iops: 3000
+      throughput: 125
+  gpu:
+    nodePoolName: worker-gpu
+    nodeClassName: worker-gpu
+    amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/nvidia/recommended/image_id
+    instanceTypes:
+      - g5.xlarge
+    limits:
+      cpu: "32"
+      memory: 256Gi
+      nodes: "4"
+    rootVolume:
+      size: 100Gi
+      type: gp3
+      iops: 3000
+      throughput: 125
+
+vectorStore:
+  name: turbopuffer-default
+  kind: turbopuffer
+  default: true
+  endpoint:
+    # When search.enabled=true and this is blank, vectorstore.yaml points at
+    # the in-chart hev search Service.
+    url: "https://aws-us-east-1.turbopuffer.com"
+    region: aws-us-east-1
+  turbopuffer:
+    # Optional dashboard metadata only. It is not used for auth or routing.
+    orgId: ""
+  credential:
+    # Upstream data credential. In the default deriveFromStore auth mode,
+    # clients also send this value as the gateway bearer token. For kind=search,
+    # use keys/open inbound auth so this engine bearer stays upstream-only.
+    apiKey: ""
+    secretKey: turbopuffer-api-key
+  inboundAuth:
+    # deriveFromStore | keys | open.
+    mode: deriveFromStore
+    # In keys mode, operator workers, KEDA, and the dashboard use this
+    # gateway-only key instead of the upstream store credential. Blank defaults
+    # to the release Secret and key "layer-inbound-worker-api-key".
+    workerSecretName: ""
+    workerSecretKey: ""
+    # Each entry becomes VectorStore.spec.inboundAuth.keys[]. If apiKey is set,
+    # the chart writes it into the release Secret; otherwise secretRef must point
+    # at a pre-created Secret in the release namespace.
+    keys: []
+      # - name: worker
+      #   scopes: [read, write, admin]
+      #   apiKey: ""
+      #   secretRef:
+      #     name: ""
+      #     key: ""
+
+keys:
+  # argon2id pepper for minted API keys (RFC 0045). Identical for gateway
+  # and operator; losing it invalidates every minted key. Blank generates
+  # a random pepper on first install and re-reads it from the live Secret
+  # on upgrades.
+  pepper: ""
+
+license:
+  # Signed PASETO v4.public hevlayer license token. When set, the chart writes
+  # it to a hevlayer-license Secret and surfaces it as LAYER_LICENSE.
+  token: ""
+  # Existing Secret containing the license token. Defaults to hevlayer-license.
+  existingSecret: ""
+  secretKey: license
+  grace:
+    # Each surface owns a 30d default. Overrides may only shorten grace.
+    gatewaySeconds: ""
+    operatorSeconds: ""
+    uiSeconds: ""
+
+search:
+  enabled: false
+  image: ""  # required when enabled; use mesh-account ECR, never ghcr.io/hev/*
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  port: 3000
+  storage:
+    # Defaults to s3://<s3.bucket>/<s3Prefix>. Override only for a different
+    # object-storage root.
+    uri: ""
+    s3Prefix: "search"
+  objectCache:
+    enabled: true
+    hostPath: /mnt/nvme/layer-search-cache
+    bytes: "10737418240"
+    maxEntryBytes: "268435456"
+  keda:
+    enabled: true
+    pollingInterval: 30
+    cooldownPeriod: 300
+    minReplicaCount: 0
+    maxReplicaCount: 3
+    serverAddress: ""
+    # Scale from observed gateway requests routed to a search-backed store.
+    queryWindow: "5m"
+    threshold: "1"
+    activationThreshold: "0"
+  networkPolicy:
+    enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 10Gi
+    limits:
+      memory: 2Gi
+      ephemeral-storage: 40Gi
+
+rbac:
+  # Bindings for the hevlayer-key-admin / hevlayer-key-viewer ClusterRoles.
+  # The roles always render; binding them is the cluster operator's
+  # explicit act. Each entry: {kind: User|Group|ServiceAccount, name: ...,
+  # namespace: ...} (namespace only for ServiceAccount subjects).
+  keyRoleBindings:
+    admin: []
+    viewer: []
+
+s3:
+  bucket: ""  # set from terraform output: layer_s3_bucket_name
+  region: us-east-1
+  endpoint: ""
+
+serviceAccount:
+  create: true
+  name: layer
+  roleArn: ""  # gateway IRSA for S3 and Cost Explorer access
+
+ingress:
+  enabled: false
+  host: aws-us-east-1.hevlayer.com
+  groupName: hev-public
+  tags: "hev=public"
+  # Order within the shared ALB IngressGroup. hev-shop web/api occupy 10/11/20.
+  groupOrder: 30
+
+dashboard:
+  enabled: true
+  image: ""  # required when enabled — customer pull path: hevlayer/layer-dashboard:<version>
+  port: 8081
+  replicas: 1
+  # HTTP Basic auth gate in front of every dashboard route (#9). Required —
+  # the dashboard refuses to start without it, so the chart render fails if
+  # either field is blank while dashboard.enabled is true.
+  basicAuth:
+    user: ""
+    password: ""
+  serviceAccount:
+    create: true
+    name: layer-dashboard  # set from terraform output: layer_dashboard_service_account_name
+    roleArn: ""  # set from terraform output: layer_dashboard_role_arn
+  # When blank, defaults to the in-cluster gateway service.
+  # Override only if pointing at an external gateway.
+  gatewayUrl: ""
+  # Grants the dashboard SA read-only access to nodes / pods / HPAs /
+  # ScaledObjects so the Cluster and Scaling tabs can populate. Safe to leave
+  # on — when disabled, the dashboard still functions but those tabs show a
+  # "kube access not configured" banner.
+  kubeAccess:
+    enabled: true
+  # Grants the dashboard narrowly-scoped write access for operator controls:
+  # Index spec patches in the release namespace and Karpenter NodePool
+  # disruption patches at cluster scope. Set false for read-only installs.
+  writeAccess:
+    enabled: true
+  ingress:
+    enabled: false
+    host: dashboard.hevlayer.com
+    groupName: hev-public
+    tags: "hev=public"
+    # Sits one slot after the gateway in the shared ALB IngressGroup.
+    groupOrder: 31
+
+# Bundled VictoriaMetrics. Customers running their own Prometheus can set
+# externalEndpoint instead and the chart skips installing vmsingle.
+#
+# Storage lives on NVMe via the `local-path` storageClass — fast, ephemeral.
+# vmbackup pushes snapshots to S3 hourly so node loss costs ~1h of metrics,
+# not a full reset. Long-term durable storage is not the goal — these are
+# ops dashboards, not a system of record.
+metrics:
+  enabled: true
+  # RFC 0002: vmsingle runs beside the gateway and the gateway exposes the
+  # Prometheus-compatible /v2/metrics/api/v1/* proxy.
+  embedded: true
+  # Hot/queryable retention inside VictoriaMetrics. Backups are sent to S3;
+  # backup lifecycle/garbage collection is intentionally deferred.
+  retentionPeriod: "7d"
+  scrapeIntervalSeconds: 30
+  storage:
+    storageClassName: "local-path"
+    size: "10Gi"
+    hostPath: /mnt/nvme/layer-gateway-vm
+  backup:
+    enabled: true
+    # vmbackup writes latest to s3://<s3.bucket>/<prefix>/latest; bucket is the
+    # same bucket used by the gateway, so no extra IRSA wiring beyond the
+    # existing SA.
+    s3Prefix: "vm-backups"
+    intervalHours: 1
+  # When set, the chart does NOT install vmsingle; dashboard points here.
+  # Example: "http://prometheus.monitoring.svc.cluster.local:9090"
+  externalEndpoint: ""
+
+# Worker label convention. We don't deploy workers — customers do — but the
+# dashboard's per-pipeline worker rollup groups pods by this label. The
+# generated KEDA ScaledObject template the dashboard hands out applies it
+# automatically. If you write your own worker manifest, set:
+#   metadata.labels."layer.hev.dev/pipeline-id": "<your-pipeline-id>"
+#   metadata.labels."layer.hev.dev/component":  "worker"
+workerLabels:
+  pipelineIdKey: "layer.hev.dev/pipeline-id"
+  componentKey: "layer.hev.dev/component"
+  componentValue: "worker"

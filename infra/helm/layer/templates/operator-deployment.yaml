@@ -1,0 +1,106 @@
+{{- if and .Values.operator.enabled (not .Values.operator.image) }}
+{{- fail "operator.image is required when operator.enabled=true" }}
+{{- end }}
+{{- if .Values.operator.enabled }}
+{{- $saName := default (printf "%s-operator" (include "layer.fullname" .)) .Values.operator.serviceAccount.name }}
+{{- $indexNamespace := default .Release.Namespace .Values.operator.discovery.indexNamespace }}
+{{- $gatewayBaseURL := default (printf "http://%s-gateway.%s.svc.cluster.local:%d" (include "layer.fullname" .) .Release.Namespace (int .Values.gateway.port)) .Values.operator.gatewayBaseUrl -}}
+{{- $metricsURL := "" -}}
+{{- if .Values.metrics.externalEndpoint -}}
+{{- $metricsURL = .Values.metrics.externalEndpoint -}}
+{{- else if .Values.metrics.embedded -}}
+{{- $metricsURL = printf "http://%s-gateway.%s.svc.cluster.local:%d/v2/metrics" (include "layer.fullname" .) .Release.Namespace (int .Values.gateway.port) -}}
+{{- else -}}
+{{- $metricsURL = printf "http://%s-vmsingle.%s.svc.cluster.local:8429" (include "layer.fullname" .) .Release.Namespace -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "layer.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+        layer.hev.dev/component: operator
+    spec:
+      serviceAccountName: {{ $saName }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: operator
+          image: {{ .Values.operator.image | quote }}
+          imagePullPolicy: {{ .Values.operator.imagePullPolicy | quote }}
+          ports:
+            - name: http
+              containerPort: 8082
+          env:
+            - name: HEALTH_PORT
+              value: "8082"
+            - name: MAX_REPLICAS_CEILING
+              value: {{ .Values.operator.maxReplicasCeiling | quote }}
+            - name: DEFAULT_METRICS_SERVER
+              value: {{ $metricsURL | quote }}
+            - name: GATEWAY_API_SECRET_NAME
+              value: {{ include "layer.gatewayApiSecretName" . | quote }}
+            - name: GATEWAY_API_SECRET_KEY
+              value: {{ include "layer.gatewayApiSecretKey" . | quote }}
+            - name: GATEWAY_BASE_URL
+              value: {{ $gatewayBaseURL | quote }}
+            - name: LAYER_LICENSE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default "hevlayer-license" .Values.license.existingSecret | quote }}
+                  key: {{ .Values.license.secretKey | default "license" | quote }}
+                  optional: true
+            {{- if .Values.license.grace.operatorSeconds }}
+            - name: LAYER_GRACE_OPERATOR
+              value: {{ .Values.license.grace.operatorSeconds | quote }}
+            {{- end }}
+            - name: LAYER_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "layer.fullname" . }}-keys
+                  key: pepper
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NAMESPACE_DISCOVERY_ENABLED
+              value: {{ .Values.operator.discovery.enabled | quote }}
+            - name: NAMESPACE_DISCOVERY_INTERVAL_SECONDS
+              value: {{ .Values.operator.discovery.intervalSeconds | quote }}
+            - name: NAMESPACE_DISCOVERY_PAGE_SIZE
+              value: {{ .Values.operator.discovery.pageSize | quote }}
+            {{- if .Values.operator.discovery.prefix }}
+            - name: NAMESPACE_DISCOVERY_PREFIX
+              value: {{ .Values.operator.discovery.prefix | quote }}
+            {{- end }}
+            - name: INDEX_NAMESPACE
+              value: {{ $indexNamespace | quote }}
+            {{- if .Values.operator.watchNamespace }}
+            - name: WATCH_NAMESPACE
+              value: {{ .Values.operator.watchNamespace | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+{{- end }}

@@ -1,0 +1,72 @@
+{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) (not .Values.metrics.embedded) }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "layer.fullname" . }}-vmsingle
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vmsingle
+spec:
+  serviceName: {{ include "layer.fullname" . }}-vmsingle
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vmsingle
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vmsingle
+        layer.hev.dev/component: metrics
+    spec:
+      # Co-located on infra nodes alongside gateway/dashboard/postgres so the
+      # NVMe hostPath is local to vmsingle.
+      serviceAccountName: {{ include "layer.serviceAccountName" . }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: vmsingle
+          image: victoriametrics/victoria-metrics:v1.106.1
+          args:
+            - "-storageDataPath=/vm-data"
+            - "-retentionPeriod={{ .Values.metrics.retentionPeriod }}"
+            - "-httpListenAddr=:8429"
+            - "-promscrape.config=/etc/vmsingle/scrape.yaml"
+            # vmsingle reloads the scrape config when the file mtime changes,
+            # so kubelet's ConfigMap projection picks up edits without a
+            # pod restart.
+            - "-promscrape.configCheckInterval=30s"
+          ports:
+            - containerPort: 8429
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /vm-data
+            - name: scrape-config
+              mountPath: /etc/vmsingle
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: data
+          hostPath:
+            path: /mnt/nvme/layer-vmsingle
+            type: DirectoryOrCreate
+        - name: scrape-config
+          configMap:
+            name: {{ include "layer.fullname" . }}-vmsingle-scrape
+{{- end }}

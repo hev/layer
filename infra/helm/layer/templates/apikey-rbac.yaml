@@ -1,0 +1,92 @@
+{{- /*
+User-facing key-administration roles (RFC 0045). Neither aggregates into
+the built-in view/edit/admin ClusterRoles — namespace viewer never
+silently means key viewer. Bindings are the cluster operator's explicit
+act; rbac.keyRoleBindings renders them for the single-team case.
+
+RBAC cannot select Secrets by label, so key-admin's Secret read is
+bounded by binding it per-namespace (RoleBinding), not cluster-wide.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hevlayer-key-admin
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keys
+rules:
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys/status"]
+    verbs: ["get"]
+  # Delivered token Secrets — this is what makes key-admin credential
+  # access rather than audit. Bind with a RoleBinding to keep the grant
+  # inside the keys namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hevlayer-key-viewer
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keys
+rules:
+  # No Secret access: status hashes are one-way over a ≥32-byte random
+  # token, so viewing is audit, not credential access.
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys/status"]
+    verbs: ["get"]
+{{- range .Values.rbac.keyRoleBindings.admin }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hevlayer-key-admin-{{ .name | lower | replace ":" "-" | replace "@" "-" | trunc 40 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "layer.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: keys
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hevlayer-key-admin
+subjects:
+  - kind: {{ .kind | default "User" }}
+    name: {{ .name }}
+    {{- if eq (.kind | default "User") "ServiceAccount" }}
+    namespace: {{ .namespace | default $.Release.Namespace }}
+    {{- else }}
+    apiGroup: rbac.authorization.k8s.io
+    {{- end }}
+{{- end }}
+{{- range .Values.rbac.keyRoleBindings.viewer }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hevlayer-key-viewer-{{ .name | lower | replace ":" "-" | replace "@" "-" | trunc 40 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "layer.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: keys
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hevlayer-key-viewer
+subjects:
+  - kind: {{ .kind | default "User" }}
+    name: {{ .name }}
+    {{- if eq (.kind | default "User") "ServiceAccount" }}
+    namespace: {{ .namespace | default $.Release.Namespace }}
+    {{- else }}
+    apiGroup: rbac.authorization.k8s.io
+    {{- end }}
+{{- end }}

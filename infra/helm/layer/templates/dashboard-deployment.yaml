@@ -1,0 +1,83 @@
+{{- if .Values.dashboard.enabled }}
+{{- $gatewayUrl := default (printf "http://%s-gateway:%d" (include "layer.fullname" .) (int .Values.gateway.port)) .Values.dashboard.gatewayUrl -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.replicas }}
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+        layer.hev.dev/component: dashboard
+    spec:
+      serviceAccountName: {{ include "layer.dashboardServiceAccountName" . }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: {{ .Values.dashboard.image }}
+          imagePullPolicy: {{ default "Always" .Values.dashboard.imagePullPolicy | quote }}
+          ports:
+            - containerPort: {{ .Values.dashboard.port }}
+              name: http
+          env:
+            - name: PORT
+              value: {{ .Values.dashboard.port | quote }}
+            - name: LAYER_GATEWAY_URL
+              value: {{ $gatewayUrl | quote }}
+            - name: LAYER_GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "layer.gatewayApiSecretName" . | quote }}
+                  key: {{ include "layer.gatewayApiSecretKey" . | quote }}
+            {{- if .Values.license.grace.uiSeconds }}
+            - name: LAYER_GRACE_UI
+              value: {{ .Values.license.grace.uiSeconds | quote }}
+            {{- end }}
+            - name: LAYER_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            {{- if .Values.dashboard.kubeAccess.enabled }}
+            - name: LAYER_KUBE_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: LAYER_METRICS_URL
+              value: {{ printf "%s/v2/metrics" (trimSuffix "/" $gatewayUrl) | quote }}
+            {{- end }}
+            - name: DASHBOARD_BASIC_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "layer.fullname" . }}
+                  key: dashboard-basic-auth-user
+            - name: DASHBOARD_BASIC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "layer.fullname" . }}
+                  key: dashboard-basic-auth-password
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+{{- end }}

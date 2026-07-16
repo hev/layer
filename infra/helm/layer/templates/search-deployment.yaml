@@ -1,0 +1,96 @@
+{{- if .Values.search.enabled }}
+{{- if not (.Values.search.image | default "" | trim) }}
+{{- fail "search.image is required when search.enabled=true; use the mesh-account ECR image, never ghcr.io/hev/*." }}
+{{- end }}
+{{- if contains "ghcr.io/hev/" (.Values.search.image | default "") }}
+{{- fail "search.image must use mesh-account ECR, not ghcr.io/hev/*." }}
+{{- end }}
+{{- $storageUri := .Values.search.storage.uri | default "" | trim -}}
+{{- if not $storageUri }}
+{{- if not (.Values.s3.bucket | default "" | trim) }}
+{{- fail "search.storage.uri or s3.bucket is required when search.enabled=true." }}
+{{- end }}
+{{- $storageUri = printf "s3://%s/%s" .Values.s3.bucket (.Values.search.storage.s3Prefix | default "search" | trim) -}}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "layer.fullname" . }}-search
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search
+spec:
+  replicas: {{ .Values.search.replicas }}
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.search.port | quote }}
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: search
+        layer.hev.dev/component: search
+    spec:
+      serviceAccountName: {{ include "layer.serviceAccountName" . }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: search
+          image: {{ .Values.search.image | quote }}
+          imagePullPolicy: {{ .Values.search.imagePullPolicy | quote }}
+          ports:
+            - containerPort: {{ .Values.search.port }}
+              name: http
+          env:
+            - name: HEVSEARCH_BIND
+              value: "0.0.0.0:{{ .Values.search.port }}"
+            - name: HEVSEARCH_STORAGE_URI
+              value: {{ $storageUri | quote }}
+            - name: HEVSEARCH_S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            {{- if .Values.s3.endpoint }}
+            - name: HEVSEARCH_S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            {{- end }}
+            - name: HEVSEARCH_OBJECT_CACHE_ENABLED
+              value: {{ ternary "true" "false" .Values.search.objectCache.enabled | quote }}
+            - name: HEVSEARCH_OBJECT_CACHE_DIR
+              value: "/var/lib/hevsearch/cache"
+            - name: HEVSEARCH_OBJECT_CACHE_BYTES
+              value: {{ .Values.search.objectCache.bytes | quote }}
+            - name: HEVSEARCH_OBJECT_CACHE_MAX_ENTRY_BYTES
+              value: {{ .Values.search.objectCache.maxEntryBytes | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          {{- with .Values.search.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: object-cache
+              mountPath: /var/lib/hevsearch/cache
+      volumes:
+        - name: object-cache
+          hostPath:
+            path: {{ .Values.search.objectCache.hostPath | quote }}
+            type: DirectoryOrCreate
+{{- end }}

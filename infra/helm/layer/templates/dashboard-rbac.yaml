@@ -1,0 +1,160 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.kubeAccess.enabled }}
+# Cluster-scoped read for objects the dashboard summarizes across namespaces
+# or from cluster-scoped CRDs. Namespace-local release objects stay below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-nodes
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["hevlayer.com"]
+    resources: ["infrarules", "pipelines"]
+    verbs: ["get", "list"]
+  # Pipeline queues are gateway-global while their CRs and managed workers
+  # can live in workload namespaces. The overview joins these read-only.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-nodes
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "layer.fullname" . }}-dashboard-nodes
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "layer.dashboardServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Namespace-scoped read for everything the dashboard surfaces about workers,
+# deployments, and autoscaling configs in the layer release namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events", "secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "layer.fullname" . }}-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "layer.dashboardServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if and .Values.dashboard.enabled .Values.dashboard.kubeAccess.enabled .Values.dashboard.writeAccess.enabled }}
+---
+# Narrow write role for dashboard apply rows. Read-only dashboard RBAC stays
+# separate above so reviewers can inspect the write surface in isolation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-writer
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+rules:
+  - apiGroups: ["hevlayer.com"]
+    resources: ["indexes"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["hevlayer.com"]
+    resources: ["vectorstores", "warehouses"]
+    verbs: ["get", "create", "patch", "update"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-writer
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "layer.fullname" . }}-dashboard-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "layer.dashboardServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Namespace-scoped credential provisioning for VectorStore and Warehouse apply
+# flows. Keep this separate from the cluster writer role so installations that
+# do not want dashboard Secret writes can disable dashboard.writeAccess.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-secret-writer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard-secret-writer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "layer.fullname" . }}-dashboard-secret-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "layer.dashboardServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

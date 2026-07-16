@@ -1,0 +1,71 @@
+{{- if not (.Values.vectorStore.name | default "" | trim) }}
+{{- fail "vectorStore.name is required." }}
+{{- end }}
+{{- if not (.Values.vectorStore.kind | default "" | trim) }}
+{{- fail "vectorStore.kind is required." }}
+{{- end }}
+{{- $searchServiceUrl := printf "http://%s-search.%s.svc.cluster.local:%d" (include "layer.fullname" .) .Release.Namespace (int .Values.search.port) -}}
+{{- $endpointUrl := .Values.vectorStore.endpoint.url | default "" | trim -}}
+{{- $storeApiKey := .Values.vectorStore.credential.apiKey | default "" | trim -}}
+{{- if and .Values.search.enabled (eq (.Values.vectorStore.kind | default "" | trim) "search") (not $endpointUrl) -}}
+{{- $endpointUrl = $searchServiceUrl -}}
+{{- end -}}
+{{- if not $endpointUrl }}
+{{- fail "vectorStore.endpoint.url is required." }}
+{{- end }}
+{{- if not (.Values.vectorStore.endpoint.region | default "" | trim) }}
+{{- fail "vectorStore.endpoint.region is required." }}
+{{- end }}
+{{- $inboundMode := .Values.vectorStore.inboundAuth.mode | default "" | trim -}}
+{{- if eq $inboundMode "keys" }}
+{{- if not .Values.vectorStore.inboundAuth.keys }}
+{{- fail "vectorStore.inboundAuth.keys must contain at least one key when mode=keys." }}
+{{- end }}
+{{- range .Values.vectorStore.inboundAuth.keys }}
+{{- if not (.name | default "" | trim) }}
+{{- fail "vectorStore.inboundAuth.keys[].name is required." }}
+{{- end }}
+{{- if not .scopes }}
+{{- fail (printf "vectorStore.inboundAuth.keys[%s].scopes must contain at least one scope." .name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: hevlayer.com/v1alpha1
+kind: VectorStore
+metadata:
+  name: {{ .Values.vectorStore.name | quote }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+spec:
+  kind: {{ .Values.vectorStore.kind | quote }}
+  default: {{ .Values.vectorStore.default }}
+  endpoint:
+    url: {{ $endpointUrl | quote }}
+    region: {{ .Values.vectorStore.endpoint.region | quote }}
+  {{- with .Values.vectorStore.turbopuffer }}
+  {{- if .orgId }}
+  turbopuffer:
+    orgId: {{ .orgId | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $storeApiKey }}
+  credential:
+    secretRef:
+      name: {{ include "layer.fullname" . | quote }}
+      key: {{ .Values.vectorStore.credential.secretKey | default "turbopuffer-api-key" | quote }}
+  {{- end }}
+  inboundAuth:
+    mode: {{ .Values.vectorStore.inboundAuth.mode | quote }}
+    {{- if eq $inboundMode "keys" }}
+    keys:
+      {{ range .Values.vectorStore.inboundAuth.keys }}
+      {{- $name := .name | trim -}}
+      - name: {{ $name | quote }}
+        scopes:
+          {{- toYaml .scopes | nindent 10 }}
+        secretRef:
+          name: {{ default (include "layer.fullname" $) (dig "secretRef" "name" "" .) | quote }}
+          key: {{ default (printf "layer-inbound-%s-api-key" $name) (dig "secretRef" "key" "" .) | quote }}
+      {{- end }}
+    {{- end }}

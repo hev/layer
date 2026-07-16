@@ -1,0 +1,35 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "layer.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+  annotations:
+    alb.ingress.kubernetes.io/group.name: {{ .Values.dashboard.ingress.groupName | quote }}
+    alb.ingress.kubernetes.io/group.order: {{ .Values.dashboard.ingress.groupOrder | quote }}
+    {{- if .Values.dashboard.ingress.tags }}
+    alb.ingress.kubernetes.io/tags: {{ .Values.dashboard.ingress.tags | quote }}
+    {{- end }}
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ .Values.dashboard.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "layer.fullname" . }}-dashboard
+                port:
+                  number: {{ .Values.dashboard.port }}
+{{- end }}

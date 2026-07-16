@@ -1,0 +1,38 @@
+{{- /*
+Gateway component role for minted keys (RFC 0045): the watch feeds the
+in-memory verify cache; create/delete + status patch back the /v2/keys
+management routes and the throttled lastSeenAt bump.
+*/ -}}
+{{- $saName := include "layer.serviceAccountName" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway-keys
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+rules:
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["hevlayer.com"]
+    resources: ["apikeys/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "layer.fullname" . }}-gateway-keys
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "layer.fullname" . }}-gateway-keys
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}

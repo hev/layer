@@ -1,0 +1,60 @@
+{{- if and .Values.search.enabled .Values.search.keda.enabled }}
+{{- $metricsURL := "" -}}
+{{- $pointsAtGateway := false -}}
+{{- if .Values.search.keda.serverAddress -}}
+{{- $metricsURL = .Values.search.keda.serverAddress -}}
+{{- else if .Values.metrics.externalEndpoint -}}
+{{- $metricsURL = .Values.metrics.externalEndpoint -}}
+{{- else if .Values.metrics.embedded -}}
+{{- $metricsURL = printf "http://%s-gateway.%s.svc.cluster.local:%d/v2/metrics" (include "layer.fullname" .) .Release.Namespace (int .Values.gateway.port) -}}
+{{- $pointsAtGateway = true -}}
+{{- else -}}
+{{- $metricsURL = printf "http://%s-vmsingle.%s.svc.cluster.local:8429" (include "layer.fullname" .) .Release.Namespace -}}
+{{- end -}}
+{{- if $pointsAtGateway }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "layer.fullname" . }}-search-gateway-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search
+spec:
+  secretTargetRef:
+    - parameter: bearerToken
+      name: {{ include "layer.gatewayApiSecretName" . | quote }}
+      key: {{ include "layer.gatewayApiSecretKey" . | quote }}
+---
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "layer.fullname" . }}-search
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "layer.fullname" . }}-search
+  pollingInterval: {{ .Values.search.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.search.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.search.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.search.keda.maxReplicaCount }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $metricsURL | quote }}
+        metricName: layer_search_requests
+        query: {{ printf "sum(increase(hevlayer_scan_total{store_kind=\"search\"}[%s])) + sum(increase(hevlayer_hybrid_text_queries_total{store_kind=\"search\"}[%s])) + sum(increase(hevlayer_multi_query_total{store_kind=\"search\"}[%s])) or vector(0)" .Values.search.keda.queryWindow .Values.search.keda.queryWindow .Values.search.keda.queryWindow | quote }}
+        threshold: {{ .Values.search.keda.threshold | quote }}
+        activationThreshold: {{ .Values.search.keda.activationThreshold | quote }}
+        {{- if $pointsAtGateway }}
+        authModes: "bearer"
+      authenticationRef:
+        name: {{ include "layer.fullname" . }}-search-gateway-auth
+        {{- end }}
+{{- end }}
