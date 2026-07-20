@@ -2636,11 +2636,11 @@ components:
         '
       required:
       - v
-      - n
+      - "n"
       properties:
         v:
           type: string
-        n:
+        "n":
           type: integer
           format: int64
     ScanValuesResponse:
