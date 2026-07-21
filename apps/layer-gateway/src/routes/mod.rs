@@ -1,3 +1,4 @@
+pub mod embed_wire;
 pub mod federated_query;
 pub mod fetch;
 pub mod health;

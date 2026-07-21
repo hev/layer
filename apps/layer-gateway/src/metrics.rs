@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use metrics_catalog::{metric, MetricDoc, MetricKind};
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    CounterVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde_json::Value;
 
@@ -141,6 +141,8 @@ pub struct LayerMetrics {
     agent_query_duration: HistogramVec,
     agent_turns: HistogramVec,
     agent_tokens_total: IntCounterVec,
+    embed_tokens_total: IntCounterVec,
+    embed_compute_seconds_total: CounterVec,
     tpuf_billable_bytes_written_total: IntCounterVec,
     tpuf_billable_bytes_queried_total: IntCounterVec,
     tpuf_billable_bytes_returned_total: IntCounterVec,
@@ -343,6 +345,18 @@ impl LayerMetrics {
             "hevlayer_agent_tokens_total",
             "Model tokens reported by the inference provider for agentic search.",
             &["agent", "turn", "token_type"],
+        );
+        let embed_tokens_total = counter(
+            &registry,
+            "hevlayer_embed_tokens_total",
+            "Embedding tokens echoed by the serving provider.",
+            &["namespace", "store_kind", "model", "serving"],
+        );
+        let embed_compute_seconds_total = float_counter(
+            &registry,
+            "hevlayer_embed_compute_seconds_total",
+            "Embedding latency echoed by the serving provider, in seconds.",
+            &["namespace", "store_kind", "model", "serving"],
         );
         let tpuf_billable_bytes_written_total = counter(
             &registry,
@@ -617,6 +631,8 @@ impl LayerMetrics {
             agent_query_duration,
             agent_turns,
             agent_tokens_total,
+            embed_tokens_total,
+            embed_compute_seconds_total,
             tpuf_billable_bytes_written_total,
             tpuf_billable_bytes_queried_total,
             tpuf_billable_bytes_returned_total,
@@ -847,6 +863,32 @@ impl LayerMetrics {
         self.agent_tokens_total
             .with_label_values(&[agent, turn, "total"])
             .inc_by(total);
+    }
+
+    pub fn observe_embed_performance(
+        &self,
+        namespace: &str,
+        model: &str,
+        serving: &str,
+        performance: &Value,
+    ) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        let labels = [&namespace, &store_kind, model, serving];
+        if let Some(tokens) = billing_u64(performance, "embedding_tokens") {
+            self.embed_tokens_total
+                .with_label_values(&labels)
+                .inc_by(tokens);
+        }
+        if let Some(milliseconds) = performance
+            .get("embedding_ms")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        {
+            self.embed_compute_seconds_total
+                .with_label_values(&labels)
+                .inc_by(milliseconds / 1_000.0);
+        }
     }
 
     pub fn observe_tpuf_billing(&self, namespace: &str, billing: &Value) {
@@ -1295,6 +1337,16 @@ fn counter(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> IntC
     metric
 }
 
+fn float_counter(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> CounterVec {
+    let doc = catalog_doc(name, MetricKind::Counter, labels, help);
+    let metric = CounterVec::new(Opts::new(doc.name, doc.description), labels)
+        .unwrap_or_else(|e| panic!("register metric {name}: {e}"));
+    registry
+        .register(Box::new(metric.clone()))
+        .unwrap_or_else(|e| panic!("register metric {name}: {e}"));
+    metric
+}
+
 fn counter_no_labels(registry: &Registry, name: &str, help: &str) -> IntCounter {
     let doc = catalog_doc(name, MetricKind::Counter, &[], help);
     let metric = IntCounter::new(doc.name, doc.description)
@@ -1457,6 +1509,7 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         query: Option<&str>,
         body: Option<Value>,
     ) -> Result<crate::clients::turbopuffer::TurbopufferPassthroughResponse, TurbopufferError> {
+        let embedding_model = body.as_ref().and_then(native_embedding_model);
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.passthrough(method, path, query, body).await;
         self.metrics.dec_tpuf_inflight();
@@ -1466,6 +1519,16 @@ impl TurbopufferClient for MetricsTurbopufferClient {
                     if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
                         if let Some(billing) = body.get("billing") {
                             self.metrics.observe_tpuf_billing(namespace, billing);
+                        }
+                        if let (Some(model), Some(performance)) =
+                            (embedding_model.as_deref(), body.get("performance"))
+                        {
+                            self.metrics.observe_embed_performance(
+                                namespace,
+                                model,
+                                "native",
+                                performance,
+                            );
                         }
                         if let Some(bytes) =
                             body.get("approx_logical_bytes").and_then(Value::as_u64)
@@ -1691,6 +1754,42 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         }
         result
     }
+}
+
+fn native_embedding_model(body: &Value) -> Option<String> {
+    let schema_models = body
+        .get("schema")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|schema| schema.values())
+        .filter_map(|attribute| attribute.get("embed"))
+        .filter_map(|embed| {
+            embed
+                .as_str()
+                .or_else(|| embed.get("model").and_then(Value::as_str))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if schema_models.len() == 1 {
+        return schema_models.first().map(|model| (*model).to_string());
+    }
+    if schema_models.len() > 1 {
+        return Some("multiple".to_string());
+    }
+
+    let embed = body
+        .get("rank_by")
+        .and_then(Value::as_array)
+        .and_then(|rank_by| rank_by.get(2))
+        .and_then(Value::as_array)
+        .filter(|embed| embed.first().and_then(Value::as_str) == Some("Embed"))?;
+    Some(
+        embed
+            .get(2)
+            .and_then(|options| options.get("model"))
+            .and_then(Value::as_str)
+            .unwrap_or("schema-inferred")
+            .to_string(),
+    )
 }
 
 struct MetricsAerospikeClient {

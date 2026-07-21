@@ -95,8 +95,22 @@ pub async fn upsert_or_delete(
     OriginalUri(uri): OriginalUri,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    let search_store = state.namespace_uses_search_store(&namespace);
+    let has_embed = crate::routes::embed_wire::prepare_write(&mut body, search_store)?;
+    if crate::routes::embed_wire::write_needs_distance_metric(&body, has_embed) {
+        let has_existing_embed_schema = match state.turbopuffer().head_namespace(&namespace).await {
+            Ok(metadata) => crate::routes::embed_wire::metadata_has_embed_schema(&metadata.raw),
+            Err(error) if error.is_not_found() => false,
+            Err(error) => return Err(AppError::from_turbopuffer(error, "turbopuffer metadata")),
+        };
+        if !has_existing_embed_schema {
+            return Err(AppError::Validation(
+                "`distance_metric` is required on the first write to a namespace with an `embed` schema attribute".to_string(),
+            ));
+        }
+    }
     let object_schema_attributes = object_schema_attributes(&body);
-    if !object_schema_attributes.is_empty() && state.namespace_uses_search_store(&namespace) {
+    if !object_schema_attributes.is_empty() && search_store {
         return Err(unsupported_object_schema_error(
             "search",
             &object_schema_attributes,

@@ -1966,11 +1966,15 @@ components:
     TurbopufferWriteRequest:
       type: object
       additionalProperties: true
-      description: Native Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`,
+      description: 'Native Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`,
         filter writes, copy, branch, schema, encryption, etc.). A schema attribute
-        may declare `embed` (simple string form or extended `{model, dims, ...}` object)
-        — see `docs/kubernetes/index-crd.mdx#schema-attribute-embedding`; the gateway
-        intercepts it and never forwards it upstream.
+        may declare `embed` as a provider-namespaced model string or extended `{model,
+        dims, attribute, serving}` object. The first row write establishing an embedded
+        schema requires `distance_metric`. `serving.prefer: native` is consumed by
+        Layer and the tpuf-compatible fields are forwarded to Turbopuffer; `autoscaler`
+        returns 503 until a production gateway inference provider is configured.
+
+        '
     TurbopufferBranchFromRequest:
       type: object
       additionalProperties: true
@@ -2032,13 +2036,26 @@ components:
         performance:
           type: object
           additionalProperties: true
+          properties:
+            embedding_tokens:
+              type: integer
+              minimum: 0
+              description: Tokens embedded by the native write.
+            embedding_ms:
+              type: integer
+              minimum: 0
+              description: Native embedding latency in milliseconds.
     TurbopufferQueryRequest:
       type: object
       additionalProperties: true
-      description: Native Turbopuffer query body (`rank_by`, `filters`, `aggregate_by`,
+      description: 'Native Turbopuffer query body (`rank_by`, `filters`, `aggregate_by`,
         `group_by`, `limit`, etc.). `rank_by` may reference `["Embed", text]` / `["Embed",
-        text, {model}]`, resolved by the gateway to a vector before the request reaches
-        the store — see `docs/api/embed.mdx`.
+        text, {model}]`. A source attribute infers its schema model; a derived `embed_<attr>`
+        target requires the explicit model or returns `a model name must be provided`.
+        Native requests are forwarded transparently so tpuf''s `performance` echo
+        is preserved — see `docs/api/embed.mdx`.
+
+        '
     TurbopufferQueryResponse:
       type: object
       additionalProperties: true
@@ -2062,6 +2079,17 @@ components:
         performance:
           type: object
           additionalProperties: true
+          properties:
+            embedding_tokens:
+              type: integer
+              minimum: 0
+              description: Present only when the native query embedding missed its
+                cache.
+            embedding_ms:
+              type: integer
+              minimum: 0
+              description: Native embedding latency in milliseconds; present on embedded
+                queries.
     BatchQueryRequest:
       type: object
       required:
@@ -3142,9 +3170,11 @@ components:
             (hybrid text fusion, RFC 0022; `threads` is the same scatter/gather fan-out
             control as scans, defaulting from `Index.spec.scan.threads`) and `["field",
             "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). `["Embed",
-            "text"]` / `["Embed", "text", {model?}]` is also intercepted and resolved
-            to a vector before the store sees the query (tpuf-compatible wire, `docs/api/embed.mdx`).
-            When `rank_by` is present, `vector` and `nearest_to_id` must be absent.
+            "text"]` / `["Embed", "text", {model}]` is validated and transparently
+            forwarded on the native Turbopuffer leg (tpuf-compatible wire, `docs/api/embed.mdx`).
+            Source attributes infer their schema model; derived `embed_<attr>` targets
+            require the explicit model. When `rank_by` is present, `vector` and `nearest_to_id`
+            must be absent.
 
             '
     FederatedQueryRequest:

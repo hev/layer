@@ -84,6 +84,20 @@ pub async fn query(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
+    if crate::routes::embed_wire::prepare_query(
+        &body,
+        state.namespace_uses_search_store(&namespace),
+    )? {
+        return crate::routes::turbopuffer::passthrough(
+            state,
+            "POST",
+            uri.path(),
+            uri.query(),
+            Some(body),
+        )
+        .await;
+    }
+
     // Layer-only rank expressions are intercepted ahead of passthrough:
     // `HybridText` (RFC 0022) and `Auto` (RFC 0044) are gateway-expanded
     // spellings inside the upstream `rank_by` vocabulary. Everything else —

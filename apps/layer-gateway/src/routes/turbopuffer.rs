@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{OriginalUri, State};
+use axum::extract::{OriginalUri, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -27,9 +27,11 @@ pub async fn passthrough_post(
 
 pub async fn passthrough_query_post(
     State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
+    crate::routes::embed_wire::prepare_query(&body, state.namespace_uses_search_store(&namespace))?;
     let upstream_path = uri.path().replacen("/v1/namespaces/", "/v2/namespaces/", 1);
     passthrough(state, "POST", &upstream_path, uri.query(), Some(body)).await
 }
