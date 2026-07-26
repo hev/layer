@@ -10,7 +10,7 @@ default = []
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("kube"))'] }
 [dependencies]
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-config = { version = "1.10.1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

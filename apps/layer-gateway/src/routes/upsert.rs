@@ -96,8 +96,15 @@ pub async fn upsert_or_delete(
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
     let search_store = state.namespace_uses_search_store(&namespace);
-    let has_embed = crate::routes::embed_wire::prepare_write(&mut body, search_store)?;
-    if crate::routes::embed_wire::write_needs_distance_metric(&body, has_embed) {
+    let embed = crate::routes::embed_wire::prepare_write(
+        state.as_ref(),
+        &namespace,
+        &mut body,
+        search_store,
+    )
+    .await?;
+    if crate::routes::embed_wire::write_needs_distance_metric(&body, embed.requires_distance_check)
+    {
         let has_existing_embed_schema = match state.turbopuffer().head_namespace(&namespace).await {
             Ok(metadata) => crate::routes::embed_wire::metadata_has_embed_schema(&metadata.raw),
             Err(error) if error.is_not_found() => false,
@@ -120,16 +127,24 @@ pub async fn upsert_or_delete(
         .await
         .map_err(|e| AppError::Upstream(format!("namespace marker read failed: {e}")))?
         .unwrap_or(state.shard_count);
-    let mut plan = native_write_plan(&mut body, effective_shard_count)?;
+    let mut plan = native_write_plan(
+        &mut body,
+        effective_shard_count,
+        embed.generated_chunk_attributes,
+    )?;
     if !plan.is_managed() {
-        return crate::routes::turbopuffer::passthrough(
-            state,
+        let response = crate::routes::turbopuffer::passthrough(
+            Arc::clone(&state),
             "POST",
             uri.path(),
             uri.query(),
             Some(body),
         )
-        .await;
+        .await?;
+        if response.status().is_success() {
+            crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
+        }
+        return Ok(response);
     }
 
     let total_start = Instant::now();
@@ -256,6 +271,9 @@ pub async fn upsert_or_delete(
         );
         return passthrough_response(upstream);
     }
+
+    crate::routes::embed_wire::merge_response_performance(&mut upstream.body, &embed.performance);
+    crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
 
     if plan.response_driven() && !plan.portable_without_affected_ids() {
         let affected = affected_ids_from_response(&upstream.body);
@@ -414,7 +432,11 @@ fn is_unsupported_by_store(error: &crate::clients::turbopuffer::TurbopufferError
     AppError::is_store_support_error(error)
 }
 
-fn native_write_plan(body: &mut Value, shard_count: u64) -> Result<NativeWritePlan, AppError> {
+fn native_write_plan(
+    body: &mut Value,
+    shard_count: u64,
+    allow_chunk_attributes: bool,
+) -> Result<NativeWritePlan, AppError> {
     let Some(obj) = body.as_object_mut() else {
         return Ok(NativeWritePlan::default());
     };
@@ -434,7 +456,13 @@ fn native_write_plan(body: &mut Value, shard_count: u64) -> Result<NativeWritePl
     };
 
     if let Some(rows) = obj.get_mut("upsert_rows") {
-        enrich_upsert_rows(rows, &stamp_value, shard_count, &mut plan)?;
+        enrich_upsert_rows(
+            rows,
+            &stamp_value,
+            shard_count,
+            allow_chunk_attributes,
+            &mut plan,
+        )?;
     }
     if let Some(columns) = obj.get_mut("upsert_columns") {
         enrich_upsert_columns(columns, &stamp_value, shard_count, &mut plan)?;
@@ -479,6 +507,7 @@ fn enrich_upsert_rows(
     rows: &mut Value,
     stamp_value: &Value,
     shard_count: u64,
+    allow_chunk_attributes: bool,
     plan: &mut NativeWritePlan,
 ) -> Result<(), AppError> {
     let rows = rows.as_array_mut().ok_or_else(|| {
@@ -489,7 +518,13 @@ fn enrich_upsert_rows(
             AppError::Validation("upsert_rows entries must be objects".to_string())
         })?;
         reject_removed_blob_write(row)?;
-        reject_reserved_attribute_names(row.keys())?;
+        reject_reserved_attribute_names(row.keys().filter(|name| {
+            !allow_chunk_attributes
+                || !matches!(
+                    name.as_str(),
+                    "_hevlayer_parent_id" | "_hevlayer_chunk_index"
+                )
+        }))?;
         let id = row_id(row, "upsert_rows")?;
         stamp_row(row, &id, stamp_value, shard_count);
         let vector = optional_vector(row.get("vector"), "upsert_rows vector")?;

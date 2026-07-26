@@ -4,6 +4,7 @@ pub mod clients;
 pub mod config;
 pub mod consistency;
 pub mod cost;
+pub mod embedding;
 pub mod error;
 pub mod history;
 pub mod index_config;
@@ -69,6 +70,11 @@ pub struct AppState {
     pub metrics: Arc<LayerMetrics>,
     pub telemetry: Arc<TelemetryCounters>,
     pub turbopuffer: Option<Arc<dyn TurbopufferClient>>,
+    pub embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
+    pub embedding_cache: Arc<embedding::EmbeddingCache>,
+    pub embedding_cache_ttl: std::time::Duration,
+    pub wire_embedding_profiles:
+        Arc<DashMap<String, Vec<crate::routes::embed_wire::EmbeddingProfile>>>,
     pub aerospike: Arc<dyn AerospikeClient>,
     pub aerospike_runtime: Arc<AerospikeRuntime>,
     pub s3: Arc<dyn S3Client>,

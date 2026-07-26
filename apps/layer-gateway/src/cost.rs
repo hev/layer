@@ -23,6 +23,22 @@ const TPUF_WRITES_RATE: f64 = 2.00;
 const TPUF_QUERIES_SCANNED_RATE: f64 = 0.001;
 const TPUF_QUERIES_RETURNED_RATE: f64 = 0.05;
 const TPUF_STORAGE_RATE: f64 = 0.0004517083;
+const MILLION_TOKENS: f64 = 1_000_000.0;
+
+const TPUF_EMBEDDING_RATES: &[(&str, f64)] = &[
+    ("baai/bge-m3", 0.01),
+    ("cohere/embed-english-v3.0", 0.10),
+    ("cohere/embed-v4.0", 0.12),
+    ("google/gemini-embedding-001", 0.15),
+    ("google/gemini-embedding-2", 0.20),
+    ("qwen/qwen3-embedding-0p6b", 0.01),
+    ("qwen/qwen3-embedding-4b", 0.02),
+    ("qwen/qwen3-embedding-8b", 0.05),
+    ("voyage/voyage-4", 0.06),
+    ("voyage/voyage-4-large", 0.12),
+    ("voyage/voyage-4-lite", 0.02),
+    ("voyage/voyage-code-3", 0.18),
+];
 
 const AWS_COST_SOURCE: &str = "cost_explorer";
 const AWS_ESTIMATOR_REFRESHED_AT_MS: u64 = 1_781_568_000_000; // 2026-06-16T00:00:00Z
@@ -356,10 +372,10 @@ const AWS_INSTANCE_PRICE_TABLE: &[AwsInstancePriceStatic] = &[
 /// Code-resident Turbopuffer rate card. Bump `version` and `verified_at`
 /// whenever rates are re-checked against a real invoice.
 pub const TURBOPUFFER_RATE_CARD: TurbopufferRateCardStatic = TurbopufferRateCardStatic {
-    version: "2026-06",
+    version: "2026-07",
     verified_by: "hev",
-    verified_at: "2026-06-16",
-    source: "invoice",
+    verified_at: "2026-07-25",
+    source: "invoice+published_embedding_prices",
     lines: &[
         TurbopufferRateLineStatic {
             service: "tpuf_writes",
@@ -380,6 +396,66 @@ pub const TURBOPUFFER_RATE_CARD: TurbopufferRateCardStatic = TurbopufferRateCard
             service: "tpuf_storage",
             unit: "logical_gb_hour",
             usd: TPUF_STORAGE_RATE,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:baai/bge-m3",
+            unit: "million_tokens",
+            usd: 0.01,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:cohere/embed-english-v3.0",
+            unit: "million_tokens",
+            usd: 0.10,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:cohere/embed-v4.0",
+            unit: "million_tokens",
+            usd: 0.12,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:google/gemini-embedding-001",
+            unit: "million_tokens",
+            usd: 0.15,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:google/gemini-embedding-2",
+            unit: "million_tokens",
+            usd: 0.20,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:qwen/qwen3-embedding-0p6b",
+            unit: "million_tokens",
+            usd: 0.01,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:qwen/qwen3-embedding-4b",
+            unit: "million_tokens",
+            usd: 0.02,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:qwen/qwen3-embedding-8b",
+            unit: "million_tokens",
+            usd: 0.05,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:voyage/voyage-4",
+            unit: "million_tokens",
+            usd: 0.06,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:voyage/voyage-4-large",
+            unit: "million_tokens",
+            usd: 0.12,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:voyage/voyage-4-lite",
+            unit: "million_tokens",
+            usd: 0.02,
+        },
+        TurbopufferRateLineStatic {
+            service: "tpuf_embeddings:voyage/voyage-code-3",
+            unit: "million_tokens",
+            usd: 0.18,
         },
     ],
 };
@@ -927,6 +1003,42 @@ async fn read_tpuf_lines(
         )),
     }
 
+    match query_instant_labeled(
+        base_url,
+        &format!("sum by (model) (increase(hevlayer_embed_tokens_total[{range}]))"),
+    )
+    .await
+    {
+        Ok(rows) => {
+            for (labels, tokens) in rows {
+                let Some(model) = labels.get("model") else {
+                    continue;
+                };
+                let Some((_, rate)) = TPUF_EMBEDDING_RATES
+                    .iter()
+                    .find(|(candidate, _)| candidate == model)
+                else {
+                    caveats.push(format!(
+                        "Turbopuffer embedding price unavailable for model {model}"
+                    ));
+                    continue;
+                };
+                let mut line = tpuf_line(
+                    "tpuf_embeddings",
+                    "million_tokens",
+                    tokens / MILLION_TOKENS,
+                    *rate,
+                    None,
+                );
+                line.service_detail = Some(model.clone());
+                lines.push(line);
+            }
+        }
+        Err(error) => caveats.push(format!(
+            "Turbopuffer embedding token metric unavailable: {error}"
+        )),
+    }
+
     (lines, query_count)
 }
 
@@ -1021,32 +1133,47 @@ pub async fn current_timeseries(
     let mut series = Vec::new();
     let mut total = BTreeMap::<i64, f64>::new();
 
-    let specs = [
+    let mut specs = vec![
         (
             "tpuf_writes",
+            None,
             format!(
                 "sum(rate(hevlayer_tpuf_billable_bytes_written_total[{rate_window}])) * 3600 / {DECIMAL_GB} * {TPUF_WRITES_RATE}"
             ),
         ),
         (
             "tpuf_queries_scanned",
+            None,
             format!(
                 "sum(rate(hevlayer_tpuf_billable_bytes_queried_total[{rate_window}])) * 3600 / {DECIMAL_TB} * {TPUF_QUERIES_SCANNED_RATE}"
             ),
         ),
         (
             "tpuf_queries_returned",
+            None,
             format!(
                 "sum(rate(hevlayer_tpuf_billable_bytes_returned_total[{rate_window}])) * 3600 / {DECIMAL_GB} * {TPUF_QUERIES_RETURNED_RATE}"
             ),
         ),
         (
             "tpuf_storage",
+            None,
             format!("sum(hevlayer_tpuf_logical_bytes) / {DECIMAL_GB} * {TPUF_STORAGE_RATE}"),
         ),
     ];
 
-    for (service, expr) in specs {
+    specs.extend(TPUF_EMBEDDING_RATES.iter().map(|(model, rate)| {
+        (
+            "tpuf_embeddings",
+            Some((*model).to_string()),
+            format!(
+                "sum(rate(hevlayer_embed_tokens_total{{model=\"{}\"}}[{rate_window}])) * 3600 / {MILLION_TOKENS} * {rate}",
+                prometheus_label_value(model)
+            ),
+        )
+    }));
+
+    for (service, service_detail, expr) in specs {
         match query_range(base_url, &expr, start, end, step.seconds()).await {
             Ok(samples) => {
                 for sample in &samples {
@@ -1056,7 +1183,7 @@ pub async fn current_timeseries(
                     provider: Some("turbopuffer".to_string()),
                     service: Some(service.to_string()),
                     basis: Some(CostBasis::Metered),
-                    service_detail: None,
+                    service_detail,
                     region: None,
                     site: None,
                     rate_card_version: Some(TURBOPUFFER_RATE_CARD.version.to_string()),
@@ -1211,6 +1338,25 @@ async fn query_scalar(base_url: &str, expr: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("empty Prometheus result for `{expr}`"))
 }
 
+async fn query_instant_labeled(
+    base_url: &str,
+    expr: &str,
+) -> Result<Vec<(BTreeMap<String, String>, f64)>, String> {
+    let url = format!("{}/api/v1/query", base_url.trim_end_matches('/'));
+    let response: Value = reqwest::Client::new()
+        .get(url)
+        .query(&[("query", expr)])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(prometheus_instant_labeled_values(&response))
+}
+
 async fn query_range(
     base_url: &str,
     expr: &str,
@@ -1280,6 +1426,32 @@ fn prometheus_instant_value(response: &Value) -> Option<f64> {
         .as_str()?
         .parse()
         .ok()
+}
+
+fn prometheus_instant_labeled_values(response: &Value) -> Vec<(BTreeMap<String, String>, f64)> {
+    response
+        .get("data")
+        .and_then(|data| data.get("result"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            let labels = result
+                .get("metric")
+                .and_then(Value::as_object)?
+                .iter()
+                .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+                .collect();
+            let value = result
+                .get("value")?
+                .as_array()?
+                .get(1)?
+                .as_str()?
+                .parse()
+                .ok()?;
+            Some((labels, value))
+        })
+        .collect()
 }
 
 fn prometheus_range_values(response: &Value) -> Vec<(i64, f64)> {
@@ -1471,23 +1643,21 @@ mod tests {
                 && item.memory_gib == 32.0
                 && item.nvme_gib == 474.0
         }));
-        assert_eq!(card.turbopuffer.version, "2026-06");
-        assert_eq!(card.turbopuffer.lines.len(), 4);
+        assert_eq!(card.turbopuffer.version, "2026-07");
+        assert!(card.turbopuffer.lines.len() > 4);
         let services: Vec<&str> = card
             .turbopuffer
             .lines
             .iter()
             .map(|l| l.service.as_str())
             .collect();
-        assert_eq!(
-            services,
-            [
-                "tpuf_writes",
-                "tpuf_queries_scanned",
-                "tpuf_queries_returned",
-                "tpuf_storage"
-            ]
-        );
+        assert!(services.starts_with(&[
+            "tpuf_writes",
+            "tpuf_queries_scanned",
+            "tpuf_queries_returned",
+            "tpuf_storage"
+        ]));
+        assert!(services.contains(&"tpuf_embeddings:baai/bge-m3"));
     }
 
     #[test]

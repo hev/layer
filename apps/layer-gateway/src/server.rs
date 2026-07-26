@@ -134,12 +134,21 @@ pub async fn run_with_options(options: ServerOptions) {
 
     let namespace_store_refs = Arc::new(RwLock::new(HashMap::new()));
     let mut upstream_clients = HashMap::new();
-    for store in resolved_stores.stores.values() {
+    let mut stores = resolved_stores.stores.values().collect::<Vec<_>>();
+    stores.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut embedding_provider_client = None;
+    for store in stores {
         let inner: Arc<dyn TurbopufferClient> = match store.kind {
-            ResolvedVectorStoreKind::Turbopuffer => Arc::new(HttpTurbopufferClient::new(
-                store.upstream_api_key.as_deref().unwrap_or_default(),
-                &store.endpoint_url,
-            )),
+            ResolvedVectorStoreKind::Turbopuffer => {
+                let client: Arc<dyn TurbopufferClient> = Arc::new(HttpTurbopufferClient::new(
+                    store.upstream_api_key.as_deref().unwrap_or_default(),
+                    &store.endpoint_url,
+                ));
+                if embedding_provider_client.is_none() {
+                    embedding_provider_client = Some(Arc::clone(&client));
+                }
+                client
+            }
             ResolvedVectorStoreKind::Search => Arc::new(HttpSearchClient::new(
                 store.upstream_api_key.as_deref(),
                 &store.endpoint_url,
@@ -160,6 +169,10 @@ pub async fn run_with_options(options: ServerOptions) {
     ));
     let turbopuffer: Option<Arc<dyn TurbopufferClient>> =
         Some(metrics.instrument_turbopuffer(routed));
+    let embedding_provider = embedding_provider_client.map(|client| {
+        Arc::new(crate::embedding::TurbopufferEmbeddingProvider::new(client))
+            as Arc<dyn crate::embedding::EmbeddingProvider>
+    });
 
     let aerospike_runtime = Arc::new(AerospikeRuntime::new(None));
     metrics.set_aerospike_connection_state(false);
@@ -214,6 +227,10 @@ pub async fn run_with_options(options: ServerOptions) {
         metrics: Arc::clone(&metrics),
         telemetry: Arc::clone(&telemetry_counters),
         turbopuffer: turbopuffer.clone(),
+        embedding_provider,
+        embedding_cache: Arc::new(DashMap::new()),
+        embedding_cache_ttl: std::time::Duration::from_millis(config.embedding_cache_ttl_ms),
+        wire_embedding_profiles: Arc::new(DashMap::new()),
         aerospike,
         aerospike_runtime,
         s3,

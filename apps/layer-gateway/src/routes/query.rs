@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Body;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -82,12 +83,16 @@ pub async fn query(
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
-    if crate::routes::embed_wire::prepare_query(
-        &body,
+    let embed = crate::routes::embed_wire::prepare_query(
+        state.as_ref(),
+        &namespace,
+        &mut body,
         state.namespace_uses_search_store(&namespace),
-    )? {
+    )
+    .await?;
+    if embed.found && embed.passthrough {
         return crate::routes::turbopuffer::passthrough(
             state,
             "POST",
@@ -97,7 +102,22 @@ pub async fn query(
         )
         .await;
     }
+    if embed.found {
+        normalize_autoscaler_query(&mut body);
+    }
+    let passthrough_uri =
+        (!embed.found).then(|| (uri.path().to_string(), uri.query().map(str::to_string)));
+    let response = query_prepared(state, namespace, headers, body, passthrough_uri).await?;
+    merge_embedding_performance(response, &embed.performance).await
+}
 
+pub(crate) async fn query_prepared(
+    state: Arc<AppState>,
+    namespace: String,
+    headers: HeaderMap,
+    body: Value,
+    passthrough_uri: Option<(String, Option<String>)>,
+) -> Result<Response, AppError> {
     // Layer-only rank expressions are intercepted ahead of passthrough:
     // `HybridText` (RFC 0022) and `Auto` (RFC 0044) are gateway-expanded
     // spellings inside the upstream `rank_by` vocabulary. Everything else —
@@ -129,11 +149,17 @@ pub async fn query(
     }
 
     if should_passthrough_query(&body) {
+        let (path, query) = passthrough_uri.ok_or_else(|| {
+            AppError::Validation(
+                "gateway-resolved `Embed` request contains unsupported native query fields"
+                    .to_string(),
+            )
+        })?;
         return crate::routes::turbopuffer::passthrough(
             state,
             "POST",
-            uri.path(),
-            uri.query(),
+            &path,
+            query.as_deref(),
             Some(body),
         )
         .await;
@@ -142,6 +168,32 @@ pub async fn query(
     let request: QueryRequest = serde_json::from_value(body)
         .map_err(|e| AppError::Validation(format!("invalid query request: {}", e)))?;
     query_hevlayer(state, namespace, headers, request).await
+}
+
+pub(crate) fn normalize_autoscaler_query(body: &mut Value) {
+    let Some(body) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(limit) = body.remove("limit") {
+        body.entry("top_k").or_insert(limit);
+    }
+    body.remove("consistency");
+}
+
+pub(crate) async fn merge_embedding_performance(
+    response: Response,
+    embedding: &Value,
+) -> Result<Response, AppError> {
+    if embedding.as_object().is_none_or(serde_json::Map::is_empty) {
+        return Ok(response);
+    }
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|error| AppError::Upstream(format!("read query response body: {error}")))?;
+    let mut bytes = bytes.to_vec();
+    crate::routes::embed_wire::merge_response_performance(&mut bytes, embedding);
+    Ok(Response::from_parts(parts, Body::from(bytes)))
 }
 
 fn is_multi_query_request(body: &Value) -> bool {

@@ -88,6 +88,8 @@ pub struct Config {
     /// polling without fanning out a per-namespace metadata call per row
     /// per refresh.
     pub namespace_list_cache_ttl_ms: u64,
+    /// TTL for gateway-resolved query embeddings. Defaults to 60 seconds.
+    pub embedding_cache_ttl_ms: u64,
     /// Static Agent specs for local/dev use. Production Kubernetes
     /// resolution populates the same in-memory registry.
     pub agents_json: Option<String>,
@@ -259,6 +261,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10_000),
+            embedding_cache_ttl_ms: env::var("LAYER_EMBED_CACHE_TTL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60_000),
             agents_json: env::var("LAYER_AGENTS_JSON")
                 .ok()
                 .and_then(trimmed_non_empty),

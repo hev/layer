@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{OriginalUri, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
@@ -29,9 +29,23 @@ pub async fn passthrough_query_post(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
-    crate::routes::embed_wire::prepare_query(&body, state.namespace_uses_search_store(&namespace))?;
+    let embed = crate::routes::embed_wire::prepare_query(
+        state.as_ref(),
+        &namespace,
+        &mut body,
+        state.namespace_uses_search_store(&namespace),
+    )
+    .await?;
+    if embed.found && !embed.passthrough {
+        crate::routes::query::normalize_autoscaler_query(&mut body);
+        let response =
+            crate::routes::query::query_prepared(state, namespace, HeaderMap::new(), body, None)
+                .await?;
+        return crate::routes::query::merge_embedding_performance(response, &embed.performance)
+            .await;
+    }
     let upstream_path = uri.path().replacen("/v1/namespaces/", "/v2/namespaces/", 1);
     passthrough(state, "POST", &upstream_path, uri.query(), Some(body)).await
 }
