@@ -195,10 +195,8 @@ documentCache:
   enabled: true
   image: aerospike/aerospike-server:latest
   replicas: 0
-  # Baseline design-partner topology: the always-on system node is an i4i
-  # instance with local NVMe, so the cache can wake there without adding a
-  # standing cache node. Set this to document-cache when using the optional
-  # dedicated document-cache Karpenter pool.
+  # The demo profile runs on the system pool. Set this to document-cache when
+  # using the optional dedicated document-cache Karpenter pool.
   nodeRole: system
   port: 3000
   namespace: hevlayer
@@ -206,11 +204,14 @@ documentCache:
   clusterName: layer-document-cache
   autoRestartOnStopWrites: true
   storage:
-    # The system node's nodeadm localStorage.strategy=RAID0 mounts the i4i
-    # instance store here (node-groups.tf); containerd and the kubelet are
-    # symlinked onto the same NVMe, so this cache file shares the local disk
-    # rather than the small EBS root.
+    # Path inside the Aerospike and init containers. hostPath is only used
+    # when pvc.enabled=false.
+    mountPath: /opt/aerospike/data
     hostPath: /mnt/k8s-disks/0/document-cache
+    pvc:
+      enabled: false
+      size: 80Gi
+      storageClass: gp3
     fileSize: 64G
     # Aerospike is an ephemeral cache. Clearing the backing file on pod start
     # makes a restart a valid stop-writes recovery action.
@@ -262,16 +263,19 @@ documentCache:
     # Blank means use the bundled/selected metrics backend.
     serverAddress: ""
   karpenter:
-    # Optional larger-install profile. The default baseline keeps document
-    # cache on the i4i system node and uses Karpenter only for indexing workers.
+    # Optional indexing-profile pool. The demo profile keeps the document
+    # cache on the system pool and uses a gp3 PVC.
     enabled: false
     nodePoolName: layer-document-cache
     nodeClassName: layer-document-cache
     clusterName: ""
     instanceProfile: ""
     amiFamily: AL2023
-    amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id
-    instanceType: i4i.large
+    # Override arch, amiSsmParameter, and instanceType together for an
+    # x86-only document-cache pool.
+    amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/arm64/standard/recommended/image_id
+    arch: arm64
+    instanceType: i4g.large
     capacityType: on-demand
     consolidateAfter: 2m
     expireAfter: 24h

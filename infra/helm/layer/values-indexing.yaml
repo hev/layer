@@ -1,0 +1,10 @@
+# Design-partner indexing footprint: provision a dedicated arm64
+# instance-store node for the document cache.
+documentCache:
+  nodeRole: document-cache
+  storage:
+    pvc:
+      enabled: false
+  karpenter:
+    enabled: true
+    instanceType: i4g.large

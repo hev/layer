@@ -36,8 +36,8 @@ spec:
             - -c
             - |
               set -eu
-              mkdir -p {{ .Values.documentCache.storage.hostPath }}
-              file="{{ .Values.documentCache.storage.hostPath }}/{{ .Values.documentCache.namespace }}.dat"
+              mkdir -p {{ .Values.documentCache.storage.mountPath }}
+              file="{{ .Values.documentCache.storage.mountPath }}/{{ .Values.documentCache.namespace }}.dat"
               target="{{ .Values.documentCache.storage.fileSize }}"
               {{- if .Values.documentCache.storage.resetOnStart }}
               rm -f "$file"
@@ -58,7 +58,7 @@ spec:
               fi
           volumeMounts:
             - name: document-cache-data
-              mountPath: {{ .Values.documentCache.storage.hostPath | quote }}
+              mountPath: {{ .Values.documentCache.storage.mountPath | quote }}
       containers:
         - name: aerospike
           image: {{ .Values.documentCache.image | quote }}
@@ -71,7 +71,7 @@ spec:
           {{- end }}
           volumeMounts:
             - name: document-cache-data
-              mountPath: {{ .Values.documentCache.storage.hostPath | quote }}
+              mountPath: {{ .Values.documentCache.storage.mountPath | quote }}
             - name: document-cache-config
               mountPath: /opt/aerospike/etc
           args:
@@ -124,11 +124,27 @@ spec:
           {{- end }}
         {{- end }}
       volumes:
+        {{- if not .Values.documentCache.storage.pvc.enabled }}
         - name: document-cache-data
           hostPath:
             path: {{ .Values.documentCache.storage.hostPath | quote }}
             type: DirectoryOrCreate
+        {{- end }}
         - name: document-cache-config
           configMap:
             name: {{ include "layer.fullname" . }}-document-cache
+  {{- if .Values.documentCache.storage.pvc.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: document-cache-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.documentCache.storage.pvc.storageClass }}
+        storageClassName: {{ .Values.documentCache.storage.pvc.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.documentCache.storage.pvc.size | quote }}
+  {{- end }}
 {{- end }}

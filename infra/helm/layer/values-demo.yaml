@@ -1,0 +1,11 @@
+# Default lean install: run the document cache on the system pool with gp3
+# storage instead of provisioning a dedicated instance-store node.
+documentCache:
+  nodeRole: system
+  storage:
+    pvc:
+      enabled: true
+      size: 80Gi
+      storageClass: gp3
+  karpenter:
+    enabled: false

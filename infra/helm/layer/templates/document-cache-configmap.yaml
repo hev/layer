@@ -43,7 +43,7 @@ data:
       replication-factor 1
 
       storage-engine device {
-        file {{ .Values.documentCache.storage.hostPath }}/{{ .Values.documentCache.namespace }}.dat
+        file {{ .Values.documentCache.storage.mountPath }}/{{ .Values.documentCache.namespace }}.dat
         filesize {{ .Values.documentCache.storage.fileSize }}
         read-page-cache true
       }
