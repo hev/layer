@@ -35,7 +35,7 @@ flate2 = "1"
 prometheus = "0.14"
 metrics-catalog = { path = "../../crates/metrics-catalog" }
 vectorstore-core = { path = "../../crates/vectorstore-core" }
-base64 = "0.22"
+base64 = "0.23"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
