@@ -35,12 +35,14 @@ Commands:
   index get NAME            Show one index with snapshot history
   index delete NAME...      Delete indexes and their hevlayer state
   index delete --prefix P   Delete every index whose name starts with P
-  install aws               Wizard: provision AWS (Terraform) and install the Helm release
+  install                   Provision AWS and install Layer (default profile: demo)
+  install status            Report the installed release and workload health
+  install uninstall         Remove Layer and its provisioned AWS footprint
   keys mint NAME            Mint an API key (token prints once on stdout)
   keys ls                   List API keys (metadata only, never tokens)
   keys get KEY_OR_ID        Show one API key's metadata
   keys revoke KEY_OR_ID     Revoke an API key, keeping the record
-  keys rm KEY_OR_ID         Hard-delete an API key record
+  keys rm KEY_OR_ID         Hard-delete a revoked API key record
   pipeline list             List pipelines with live queue status
   pipeline get ID           Show one pipeline with live queue status
   run -f FUNCTION.yaml      Apply a Function CR and run it to drained
@@ -157,12 +159,21 @@ func (app App) newRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&flags.apiKey, "api-key", "", "API key")
 	root.PersistentFlags().StringVar(&flags.envName, "env", "", "Named environment")
 	root.PersistentFlags().StringVarP(&flags.output, "output", "o", output.Table, "Output format: table, json, names")
+	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		fmt.Fprint(cmd.OutOrStdout(), usageText)
+		if cmd == root {
+			fmt.Fprint(cmd.OutOrStdout(), usageText)
+			return
+		}
+		defaultHelp(cmd, args)
 	})
+	defaultUsage := root.UsageFunc()
 	root.SetUsageFunc(func(cmd *cobra.Command) error {
-		fmt.Fprint(cmd.ErrOrStderr(), usageText)
-		return nil
+		if cmd == root {
+			fmt.Fprint(cmd.ErrOrStderr(), usageText)
+			return nil
+		}
+		return defaultUsage(cmd)
 	})
 	root.SetVersionTemplate(versionString(app.opts.Version) + "\n")
 	root.Version = strings.TrimPrefix(versionString(app.opts.Version), "layer ")

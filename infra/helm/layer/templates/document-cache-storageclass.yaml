@@ -1,0 +1,21 @@
+{{- if and .Values.documentCache.enabled .Values.documentCache.storage.pvc.enabled (eq .Values.documentCache.storage.pvc.storageClass "gp3") }}
+{{- if not (lookup "storage.k8s.io/v1" "StorageClass" "" "gp3") }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    # A cluster-level storage class may be shared by later releases. Keep it
+    # when this release is upgraded or removed.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+{{- end }}
+{{- end }}
