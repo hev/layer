@@ -156,27 +156,29 @@ docker compose up
 ## Install on AWS
 
 For a full environment on AWS — VPC, EKS, IAM/IRSA, S3, ECR via Terraform,
-then the Helm release — run the CLI install wizard from this checkout:
+then the Helm release — run `layer install` from this checkout:
 
 ```sh
 go build -o layer ./apps/layer-cli
-./layer install aws
+./layer install
 ```
 
-The wizard asks for your AWS profile, region, and base node instance type
-(default `i4i.large`), confirms the plan, and runs both stages in one shot.
+It prompts for anything missing, confirms the plan, and runs both stages
+in one shot. `--profile demo` (the default) installs the lean footprint;
+`--profile indexing` adds a dedicated document-cache node pool. `layer
+install status` and `layer install uninstall` round out the lifecycle.
 The reference for everything it sets is
 [hevlayer.com/docs/install](https://hevlayer.com/docs/install/).
 
 ## Layout
 
 - `apps/layer-gateway` — the open standalone gateway binary and library.
-- `apps/layer-cli` — the `layer` CLI, including the `install aws` wizard.
+- `apps/layer-cli` — the `layer` CLI, including the `install` lifecycle.
 - `crates/vectorstore-core` — open vector-store clients, routing, and wire types.
 - `crates/metrics-catalog` — public metric catalog metadata.
-- `infra/terraform`, `infra/helm/layer` — the AWS footprint and Helm chart the
-  install wizard drives.
-- `scripts/` — `install-layer.sh` and the cluster-component deploy scripts.
+- `infra/terraform`, `infra/helm/layer` — the AWS footprint and Helm chart
+  `layer install` drives.
+- `scripts/` — the cluster-component deploy scripts.
 
 ## Beyond the gateway
 
