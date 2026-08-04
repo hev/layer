@@ -1,0 +1,11 @@
+{{- if .Release.IsUpgrade }}
+InfraRules upgrade note:
+  The chart no longer creates InfraRules/default. When this release found the
+  legacy Helm-owned object, its pre-upgrade hook detached and retained the
+  current policy. Verify it with:
+
+    kubectl get infrarules default -o yaml
+
+  On Team and above, edit the retained object directly. Delete it to return
+  Pipelines and Functions to the operator's built-in compute pools.
+{{- end }}

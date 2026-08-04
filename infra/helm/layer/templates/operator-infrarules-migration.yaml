@@ -1,0 +1,46 @@
+{{- /* Helm evaluates this lookup against the live cluster during upgrade. */ -}}
+{{- $legacy := lookup "hevlayer.com/v1alpha1" "InfraRules" "" "default" }}
+{{- if $legacy }}
+{{- $annotations := default (dict) $legacy.metadata.annotations }}
+{{- $ownedByRelease := and (eq (get $annotations "meta.helm.sh/release-name") .Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- if and .Release.IsUpgrade .Values.operator.image $ownedByRelease }}
+{{- $saName := default (printf "%s-operator" (include "layer.fullname" .)) .Values.operator.serviceAccount.name }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "layer.fullname" . }}-detach-infrarules
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator-migration
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator-migration
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $saName }}
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: detach-infrarules
+          image: {{ .Values.operator.image | quote }}
+          imagePullPolicy: {{ .Values.operator.imagePullPolicy | quote }}
+          args: ["--detach-legacy-infrarules"]
+          env:
+            - name: HELM_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: HELM_RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+{{- end }}
+{{- end }}
