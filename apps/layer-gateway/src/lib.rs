@@ -211,6 +211,10 @@ pub struct AppState {
     /// Resolved Agent resources keyed by name. The request path reads this
     /// in-memory map instead of calling the Kubernetes API.
     pub agents: Arc<AgentRegistry>,
+    /// Whether this gateway composition mounts the agentic-search route.
+    /// Kept separate from the resolved registry so a tier-blocked install can
+    /// return a license error without resolving Agent Secrets or stores.
+    pub agentic_enabled: bool,
     pub agent_provider: Arc<dyn AgentInferenceProvider>,
     /// Names of VectorStores resolved as `kind: search`. Store kinds are
     /// fixed at startup resolution; the request path consults this to apply
@@ -664,7 +668,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     #[cfg(feature = "pro")]
-    if !state.agents.is_empty() {
+    if state.agentic_enabled {
         router = router.route("/v2/agents/{name}/query", post(routes::agents::query_agent));
     }
 

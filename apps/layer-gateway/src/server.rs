@@ -300,6 +300,7 @@ pub async fn run_with_options(options: ServerOptions) {
             config.namespace_list_cache_ttl_ms,
         ),
         agents,
+        agentic_enabled: false,
         agent_provider,
         search_kind_stores: resolved_stores
             .stores
