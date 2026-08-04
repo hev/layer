@@ -67,6 +67,7 @@ pub async fn read_namespace_marker(
     let doc = match tpuf.fetch(namespace, NAMESPACE_META_ID).await {
         Ok(doc) => doc,
         Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) if is_marker_id_type_mismatch(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let Some(doc) = doc else {
@@ -77,6 +78,17 @@ pub async fn read_namespace_marker(
         .get(SHARD_COUNT_ATTR)
         .and_then(Value::as_u64)
         .filter(|count| *count > 0))
+}
+
+fn is_marker_id_type_mismatch(error: &TurbopufferError) -> bool {
+    let TurbopufferError::Response(response) = error else {
+        return false;
+    };
+    if response.status != 400 {
+        return false;
+    }
+    let body = String::from_utf8_lossy(&response.body);
+    body.contains("filter error in key `id`") && body.contains("type mismatch")
 }
 
 pub async fn write_namespace_marker(

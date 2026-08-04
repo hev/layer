@@ -7,6 +7,8 @@ use axum::extract::{OriginalUri, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -771,11 +773,25 @@ fn reject_vector_patch(values: &Map<String, Value>, shape: &str) -> Result<(), A
 }
 
 fn vector_from_value(value: &Value) -> Option<Vec<f64>> {
-    value
-        .as_array()?
-        .iter()
-        .map(Value::as_f64)
-        .collect::<Option<Vec<_>>>()
+    match value {
+        Value::Array(values) => values.iter().map(Value::as_f64).collect::<Option<Vec<_>>>(),
+        Value::String(encoded) => vector_from_base64(encoded),
+        _ => None,
+    }
+}
+
+fn vector_from_base64(encoded: &str) -> Option<Vec<f64>> {
+    let bytes = BASE64_STANDARD.decode(encoded).ok()?;
+    if bytes.is_empty() || bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return None;
+    }
+    bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| {
+            let value = f32::from_le_bytes(chunk.try_into().expect("f32-sized chunk"));
+            value.is_finite().then_some(value as f64)
+        })
+        .collect()
 }
 
 fn vectors_from_value(value: &Value) -> Option<Vec<Vec<f64>>> {
@@ -793,7 +809,7 @@ fn optional_vector(value: Option<&Value>, field: &str) -> Result<Option<Vec<f64>
     };
     let Some(vector) = vector_from_value(value) else {
         return Err(AppError::Validation(format!(
-            "{field} must be an array of numbers"
+            "{field} must be an array of numbers or a base64-encoded f32 vector"
         )));
     };
     if vector.is_empty() {
