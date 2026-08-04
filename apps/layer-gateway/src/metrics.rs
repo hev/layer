@@ -143,6 +143,7 @@ pub struct LayerMetrics {
     agent_tokens_total: IntCounterVec,
     embed_tokens_total: IntCounterVec,
     embed_compute_seconds_total: CounterVec,
+    embed_model_hints: DashMap<String, String>,
     tpuf_billable_bytes_written_total: IntCounterVec,
     tpuf_billable_bytes_queried_total: IntCounterVec,
     tpuf_billable_bytes_returned_total: IntCounterVec,
@@ -633,6 +634,7 @@ impl LayerMetrics {
             agent_tokens_total,
             embed_tokens_total,
             embed_compute_seconds_total,
+            embed_model_hints: DashMap::new(),
             tpuf_billable_bytes_written_total,
             tpuf_billable_bytes_queried_total,
             tpuf_billable_bytes_returned_total,
@@ -889,6 +891,25 @@ impl LayerMetrics {
                 .with_label_values(&labels)
                 .inc_by(milliseconds / 1_000.0);
         }
+    }
+
+    pub(crate) fn remember_embed_model(
+        &self,
+        namespace: &str,
+        source: &str,
+        target: &str,
+        model: &str,
+    ) {
+        for attribute in [source, target] {
+            self.embed_model_hints
+                .insert(format!("{namespace}\u{1f}{attribute}"), model.to_string());
+        }
+    }
+
+    pub(crate) fn embed_model_hint(&self, namespace: &str, attribute: &str) -> Option<String> {
+        self.embed_model_hints
+            .get(&format!("{namespace}\u{1f}{attribute}"))
+            .map(|model| model.clone())
     }
 
     pub fn observe_tpuf_billing(&self, namespace: &str, billing: &Value) {
@@ -1509,13 +1530,17 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         query: Option<&str>,
         body: Option<Value>,
     ) -> Result<crate::clients::turbopuffer::TurbopufferPassthroughResponse, TurbopufferError> {
-        let embedding_model = body.as_ref().and_then(native_embedding_model);
+        let namespace = namespace_from_tpuf_path(path);
+        let embedding_model = namespace.and_then(|namespace| {
+            body.as_ref()
+                .and_then(|body| native_embedding_model(&self.metrics, namespace, body))
+        });
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.passthrough(method, path, query, body).await;
         self.metrics.dec_tpuf_inflight();
         if let Ok(response) = &result {
             if (200..300).contains(&response.status) {
-                if let Some(namespace) = namespace_from_tpuf_path(path) {
+                if let Some(namespace) = namespace {
                     if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
                         if let Some(billing) = body.get("billing") {
                             self.metrics.observe_tpuf_billing(namespace, billing);
@@ -1756,8 +1781,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
     }
 }
 
-fn native_embedding_model(body: &Value) -> Option<String> {
-    let schema_models = body
+fn native_embedding_model(metrics: &LayerMetrics, namespace: &str, body: &Value) -> Option<String> {
+    let mut models = body
         .get("schema")
         .and_then(Value::as_object)
         .into_iter()
@@ -1768,28 +1793,51 @@ fn native_embedding_model(body: &Value) -> Option<String> {
                 .as_str()
                 .or_else(|| embed.get("model").and_then(Value::as_str))
         })
+        .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
-    if schema_models.len() == 1 {
-        return schema_models.first().map(|model| (*model).to_string());
-    }
-    if schema_models.len() > 1 {
-        return Some("multiple".to_string());
-    }
 
-    let embed = body
-        .get("rank_by")
-        .and_then(Value::as_array)
-        .and_then(|rank_by| rank_by.get(2))
-        .and_then(Value::as_array)
-        .filter(|embed| embed.first().and_then(Value::as_str) == Some("Embed"))?;
-    Some(
-        embed
+    let mut collect_rank_by = |rank_by: &Value| {
+        let Some(rank_by) = rank_by.as_array() else {
+            return;
+        };
+        let Some(embed) = rank_by.get(2).and_then(Value::as_array) else {
+            return;
+        };
+        if embed.first().and_then(Value::as_str) != Some("Embed") {
+            return;
+        }
+        let model = embed
             .get(2)
+            .and_then(Value::as_object)
             .and_then(|options| options.get("model"))
             .and_then(Value::as_str)
-            .unwrap_or("schema-inferred")
-            .to_string(),
-    )
+            .map(str::to_string)
+            .or_else(|| {
+                rank_by
+                    .first()
+                    .and_then(Value::as_str)
+                    .and_then(|attribute| metrics.embed_model_hint(namespace, attribute))
+            })
+            .unwrap_or_else(|| "schema-inferred".to_string());
+        models.insert(model);
+    };
+
+    if let Some(rank_by) = body.get("rank_by") {
+        collect_rank_by(rank_by);
+    }
+    if let Some(queries) = body.get("queries").and_then(Value::as_array) {
+        for query in queries {
+            if let Some(rank_by) = query.get("rank_by") {
+                collect_rank_by(rank_by);
+            }
+        }
+    }
+
+    match models.len() {
+        0 => None,
+        1 => models.into_iter().next(),
+        _ => Some("multiple".to_string()),
+    }
 }
 
 struct MetricsAerospikeClient {

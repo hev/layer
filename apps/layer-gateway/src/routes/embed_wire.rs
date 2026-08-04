@@ -104,6 +104,7 @@ pub(crate) struct WritePreparation {
     pub performance: Value,
     pub generated_chunk_attributes: bool,
     profiles_to_save: Option<Vec<EmbeddingProfile>>,
+    profile_persistence_required: bool,
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +123,9 @@ pub(crate) async fn prepare_write(
     search_store: bool,
 ) -> Result<WritePreparation, AppError> {
     let mut profiles = load_profiles(state, namespace).await?;
+    let had_persisted_profiles = profiles
+        .iter()
+        .any(|profile| profile.serving != ServingPreference::Native || profile.materialized);
     let mut profile_changed = false;
     let mut has_embed_schema = false;
     let mut native_embed_schema = false;
@@ -174,9 +178,13 @@ pub(crate) async fn prepare_write(
                 config.remove("embed");
             } else {
                 native_embed_schema = true;
-                let previous = profiles.len();
+                let previous = profiles
+                    .iter()
+                    .find(|profile| profile.source == attribute)
+                    .cloned();
                 profiles.retain(|profile| profile.source != attribute);
-                profile_changed |= profiles.len() != previous;
+                profiles.push(parsed.clone());
+                profile_changed |= previous.as_ref() != Some(&parsed);
                 consume_serving(embed);
             }
             if parsed.has_extensions() {
@@ -195,23 +203,34 @@ pub(crate) async fn prepare_write(
         }
     }
 
-    reject_source_patches(body, &profiles)?;
+    let gateway_profiles = profiles
+        .iter()
+        .filter(|profile| profile.serving != ServingPreference::Native || search_store)
+        .collect::<Vec<_>>();
 
-    if profiles.is_empty() || !has_row_write(body.as_object()) {
+    reject_source_patches(body, &gateway_profiles)?;
+
+    if gateway_profiles.is_empty() || !has_row_write(body.as_object()) {
         return Ok(WritePreparation {
             requires_distance_check: native_embed_schema && has_embed_schema,
             performance: json!({}),
             profiles_to_save: profile_changed.then_some(profiles),
+            profile_persistence_required: had_persisted_profiles
+                || (profile_changed && search_store),
             generated_chunk_attributes: false,
         });
     }
-    if search_store && profiles.len() > 1 {
+    if search_store && gateway_profiles.len() > 1 {
         return Err(AppError::Validation(
             "hev search currently supports one autoscaler-served embedding attribute per namespace"
                 .to_string(),
         ));
     }
-    if profiles.iter().any(|profile| profile.chunk.is_some()) && profiles.len() > 1 {
+    if gateway_profiles
+        .iter()
+        .any(|profile| profile.chunk.is_some())
+        && gateway_profiles.len() > 1
+    {
         return Err(AppError::Validation(
             "chunked embedding currently supports one autoscaler-served embedding attribute per namespace"
                 .to_string(),
@@ -219,7 +238,7 @@ pub(crate) async fn prepare_write(
     }
 
     let mut performance = json!({});
-    for profile in &profiles {
+    for profile in gateway_profiles {
         let inputs = prepare_write_inputs(body, profile)?;
         if inputs.values.is_empty() {
             continue;
@@ -241,11 +260,17 @@ pub(crate) async fn prepare_write(
         apply_write_vectors(body, profile, &inputs.row_indices, &vectors, search_store)?;
     }
 
-    let requires_distance_check =
-        native_embed_schema || profiles.iter().any(|profile| !profile.materialized);
-    let materialized_changed = profiles.iter().any(|profile| !profile.materialized);
+    let requires_distance_check = native_embed_schema
+        || profiles.iter().any(|profile| {
+            (profile.serving != ServingPreference::Native || search_store) && !profile.materialized
+        });
+    let materialized_changed = profiles.iter().any(|profile| {
+        (profile.serving != ServingPreference::Native || search_store) && !profile.materialized
+    });
     for profile in &mut profiles {
-        profile.materialized = true;
+        if profile.serving != ServingPreference::Native || search_store {
+            profile.materialized = true;
+        }
     }
     let generated_chunk_attributes = profiles.iter().any(|profile| profile.chunk.is_some());
 
@@ -253,6 +278,7 @@ pub(crate) async fn prepare_write(
         requires_distance_check,
         performance,
         profiles_to_save: (profile_changed || materialized_changed).then_some(profiles),
+        profile_persistence_required: true,
         generated_chunk_attributes,
     })
 }
@@ -270,7 +296,13 @@ pub(crate) async fn commit_profiles(
     preparation: &WritePreparation,
 ) -> Result<(), AppError> {
     if let Some(profiles) = preparation.profiles_to_save.as_deref() {
-        save_profiles(state, namespace, profiles).await?;
+        if preparation.profile_persistence_required {
+            save_profiles(state, namespace, profiles).await?;
+        } else {
+            state
+                .wire_embedding_profiles
+                .insert(namespace.to_string(), profiles.to_vec());
+        }
     }
     Ok(())
 }
@@ -387,7 +419,15 @@ async fn prepare_rank_by(
     let declared = profiles
         .iter()
         .find(|profile| profile.source == target || profile.target == target);
-    if target.starts_with("embed_") && explicit_model.is_none() && declared.is_none() {
+    if let Some(profile) = declared {
+        state.metrics.remember_embed_model(
+            namespace,
+            &profile.source,
+            &profile.target,
+            &profile.model,
+        );
+    }
+    if target.starts_with("embed_") && explicit_model.is_none() {
         return Err(AppError::Validation(
             "a model name must be provided".to_string(),
         ));
@@ -398,6 +438,43 @@ async fn prepare_rank_by(
         .unwrap_or(ServingPreference::Native);
     let gateway_served = serving != ServingPreference::Native || search_store;
     if !gateway_served {
+        let resolved = explicit_model
+            .map(|model| {
+                (
+                    target.to_string(),
+                    format!("embed_{target}"),
+                    model.to_string(),
+                )
+            })
+            .or_else(|| {
+                declared.map(|profile| {
+                    (
+                        profile.source.clone(),
+                        profile.target.clone(),
+                        profile.model.clone(),
+                    )
+                })
+            })
+            .or_else(|| {
+                state
+                    .metrics
+                    .embed_model_hint(namespace, target)
+                    .map(|model| (target.to_string(), format!("embed_{target}"), model))
+            });
+        let resolved = match resolved {
+            Some(resolved) => Some(resolved),
+            None => state
+                .turbopuffer()
+                .head_namespace(namespace)
+                .await
+                .ok()
+                .and_then(|metadata| metadata_embed_profile(&metadata.raw, target)),
+        };
+        if let Some((source, target, model)) = resolved {
+            state
+                .metrics
+                .remember_embed_model(namespace, &source, &target, &model);
+        }
         return Ok(());
     }
     let model = explicit_model
@@ -440,6 +517,19 @@ async fn prepare_rank_by(
     }
     preparation.passthrough = false;
     Ok(())
+}
+
+fn metadata_embed_profile(metadata: &Value, source: &str) -> Option<(String, String, String)> {
+    let embed = metadata.get("schema")?.get(source)?.get("embed")?;
+    let model = embed
+        .as_str()
+        .or_else(|| embed.get("model").and_then(Value::as_str))?;
+    let target = embed
+        .get("attribute")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("embed_{source}"));
+    Some((source.to_string(), target, model.to_string()))
 }
 
 fn validate_embed(attribute: &str, embed: &Value) -> Result<EmbeddingProfile, AppError> {
@@ -815,7 +905,7 @@ fn non_empty_collection(value: &Value) -> bool {
         || value.as_object().is_some_and(|value| !value.is_empty())
 }
 
-fn reject_source_patches(body: &Value, profiles: &[EmbeddingProfile]) -> Result<(), AppError> {
+fn reject_source_patches(body: &Value, profiles: &[&EmbeddingProfile]) -> Result<(), AppError> {
     for profile in profiles {
         let mut sources = vec![profile.source.as_str()];
         if let Some(chunk) = profile
@@ -1437,6 +1527,22 @@ mod tests {
         assert!(!metadata_has_embed_schema(&json!({
             "schema": {"title": {"type": "string"}}
         })));
+        assert_eq!(
+            metadata_embed_profile(
+                &json!({
+                    "schema": {"title": {"type": "string", "embed": {
+                        "model": "voyage/voyage-4-lite",
+                        "attribute": "title_vector"
+                    }}}
+                }),
+                "title"
+            ),
+            Some((
+                "title".to_string(),
+                "title_vector".to_string(),
+                "voyage/voyage-4-lite".to_string()
+            ))
+        );
     }
 
     #[test]

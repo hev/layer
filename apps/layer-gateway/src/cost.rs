@@ -25,20 +25,35 @@ const TPUF_QUERIES_RETURNED_RATE: f64 = 0.05;
 const TPUF_STORAGE_RATE: f64 = 0.0004517083;
 const MILLION_TOKENS: f64 = 1_000_000.0;
 
-const TPUF_EMBEDDING_RATES: &[(&str, f64)] = &[
-    ("baai/bge-m3", 0.01),
-    ("cohere/embed-english-v3.0", 0.10),
-    ("cohere/embed-v4.0", 0.12),
-    ("google/gemini-embedding-001", 0.15),
-    ("google/gemini-embedding-2", 0.20),
-    ("qwen/qwen3-embedding-0p6b", 0.01),
-    ("qwen/qwen3-embedding-4b", 0.02),
-    ("qwen/qwen3-embedding-8b", 0.05),
-    ("voyage/voyage-4", 0.06),
-    ("voyage/voyage-4-large", 0.12),
-    ("voyage/voyage-4-lite", 0.02),
-    ("voyage/voyage-code-3", 0.18),
+const TPUF_EMBEDDING_RATES: &[EmbeddingRateStatic] = &[
+    EmbeddingRateStatic::new("baai/bge-m3", 0.01),
+    EmbeddingRateStatic::new("cohere/embed-english-v3.0", 0.10),
+    EmbeddingRateStatic::new("cohere/embed-v4.0", 0.12),
+    EmbeddingRateStatic::new("google/gemini-embedding-001", 0.15),
+    EmbeddingRateStatic::new("google/gemini-embedding-2", 0.20),
+    EmbeddingRateStatic::new("qwen/qwen3-embedding-0p6b", 0.01),
+    EmbeddingRateStatic::new("qwen/qwen3-embedding-4b", 0.02),
+    EmbeddingRateStatic::new("qwen/qwen3-embedding-8b", 0.05),
+    EmbeddingRateStatic::new("voyage/voyage-4", 0.06),
+    EmbeddingRateStatic::new("voyage/voyage-4-large", 0.12),
+    EmbeddingRateStatic::new("voyage/voyage-4-lite", 0.02),
+    EmbeddingRateStatic::new("voyage/voyage-code-3", 0.18),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EmbeddingRateStatic {
+    model: &'static str,
+    usd_per_million_tokens: f64,
+}
+
+impl EmbeddingRateStatic {
+    const fn new(model: &'static str, usd_per_million_tokens: f64) -> Self {
+        Self {
+            model,
+            usd_per_million_tokens,
+        }
+    }
+}
 
 const AWS_COST_SOURCE: &str = "cost_explorer";
 const AWS_ESTIMATOR_REFRESHED_AT_MS: u64 = 1_781_568_000_000; // 2026-06-16T00:00:00Z
@@ -370,12 +385,12 @@ const AWS_INSTANCE_PRICE_TABLE: &[AwsInstancePriceStatic] = &[
 ];
 
 /// Code-resident Turbopuffer rate card. Bump `version` and `verified_at`
-/// whenever rates are re-checked against a real invoice.
+/// whenever invoice rates or published embedding prices are re-checked.
 pub const TURBOPUFFER_RATE_CARD: TurbopufferRateCardStatic = TurbopufferRateCardStatic {
-    version: "2026-07",
-    verified_by: "hev",
-    verified_at: "2026-07-25",
-    source: "invoice+published_embedding_prices",
+    version: "2026-08",
+    verified_by: "hevbot",
+    verified_at: "2026-08-04",
+    source: "invoice+https://turbopuffer.com/docs/embedding",
     lines: &[
         TurbopufferRateLineStatic {
             service: "tpuf_writes",
@@ -396,66 +411,6 @@ pub const TURBOPUFFER_RATE_CARD: TurbopufferRateCardStatic = TurbopufferRateCard
             service: "tpuf_storage",
             unit: "logical_gb_hour",
             usd: TPUF_STORAGE_RATE,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:baai/bge-m3",
-            unit: "million_tokens",
-            usd: 0.01,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:cohere/embed-english-v3.0",
-            unit: "million_tokens",
-            usd: 0.10,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:cohere/embed-v4.0",
-            unit: "million_tokens",
-            usd: 0.12,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:google/gemini-embedding-001",
-            unit: "million_tokens",
-            usd: 0.15,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:google/gemini-embedding-2",
-            unit: "million_tokens",
-            usd: 0.20,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:qwen/qwen3-embedding-0p6b",
-            unit: "million_tokens",
-            usd: 0.01,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:qwen/qwen3-embedding-4b",
-            unit: "million_tokens",
-            usd: 0.02,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:qwen/qwen3-embedding-8b",
-            unit: "million_tokens",
-            usd: 0.05,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:voyage/voyage-4",
-            unit: "million_tokens",
-            usd: 0.06,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:voyage/voyage-4-large",
-            unit: "million_tokens",
-            usd: 0.12,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:voyage/voyage-4-lite",
-            unit: "million_tokens",
-            usd: 0.02,
-        },
-        TurbopufferRateLineStatic {
-            service: "tpuf_embeddings:voyage/voyage-code-3",
-            unit: "million_tokens",
-            usd: 0.18,
         },
     ],
 };
@@ -489,6 +444,11 @@ impl TurbopufferRateCardStatic {
                     unit: l.unit.to_string(),
                     usd: l.usd,
                 })
+                .chain(TPUF_EMBEDDING_RATES.iter().map(|rate| TurbopufferRateLine {
+                    service: format!("tpuf_embeddings:{}", rate.model),
+                    unit: "million_tokens".to_string(),
+                    usd: rate.usd_per_million_tokens,
+                }))
                 .collect(),
         }
     }
@@ -1014,9 +974,7 @@ async fn read_tpuf_lines(
                 let Some(model) = labels.get("model") else {
                     continue;
                 };
-                let Some((_, rate)) = TPUF_EMBEDDING_RATES
-                    .iter()
-                    .find(|(candidate, _)| candidate == model)
+                let Some(rate) = TPUF_EMBEDDING_RATES.iter().find(|rate| rate.model == model)
                 else {
                     caveats.push(format!(
                         "Turbopuffer embedding price unavailable for model {model}"
@@ -1027,7 +985,7 @@ async fn read_tpuf_lines(
                     "tpuf_embeddings",
                     "million_tokens",
                     tokens / MILLION_TOKENS,
-                    *rate,
+                    rate.usd_per_million_tokens,
                     None,
                 );
                 line.service_detail = Some(model.clone());
@@ -1162,13 +1120,14 @@ pub async fn current_timeseries(
         ),
     ];
 
-    specs.extend(TPUF_EMBEDDING_RATES.iter().map(|(model, rate)| {
+    specs.extend(TPUF_EMBEDDING_RATES.iter().map(|rate| {
         (
             "tpuf_embeddings",
-            Some((*model).to_string()),
+            Some(rate.model.to_string()),
             format!(
                 "sum(rate(hevlayer_embed_tokens_total{{model=\"{}\"}}[{rate_window}])) * 3600 / {MILLION_TOKENS} * {rate}",
-                prometheus_label_value(model)
+                prometheus_label_value(rate.model),
+                rate = rate.usd_per_million_tokens,
             ),
         )
     }));
@@ -1643,21 +1602,46 @@ mod tests {
                 && item.memory_gib == 32.0
                 && item.nvme_gib == 474.0
         }));
-        assert_eq!(card.turbopuffer.version, "2026-07");
-        assert!(card.turbopuffer.lines.len() > 4);
-        let services: Vec<&str> = card
+        assert_eq!(card.turbopuffer.version, "2026-08");
+        assert_eq!(card.turbopuffer.verified_at, "2026-08-04");
+        assert_eq!(
+            card.turbopuffer.source,
+            "invoice+https://turbopuffer.com/docs/embedding"
+        );
+        let embedding_lines = card
             .turbopuffer
             .lines
             .iter()
-            .map(|l| l.service.as_str())
-            .collect();
-        assert!(services.starts_with(&[
-            "tpuf_writes",
-            "tpuf_queries_scanned",
-            "tpuf_queries_returned",
-            "tpuf_storage"
-        ]));
-        assert!(services.contains(&"tpuf_embeddings:baai/bge-m3"));
+            .filter_map(|line| {
+                line.service
+                    .strip_prefix("tpuf_embeddings:")
+                    .map(|model| (model, line.usd))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            embedding_lines,
+            TPUF_EMBEDDING_RATES
+                .iter()
+                .map(|rate| (rate.model, rate.usd_per_million_tokens))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            embedding_lines,
+            vec![
+                ("baai/bge-m3", 0.01),
+                ("cohere/embed-english-v3.0", 0.10),
+                ("cohere/embed-v4.0", 0.12),
+                ("google/gemini-embedding-001", 0.15),
+                ("google/gemini-embedding-2", 0.20),
+                ("qwen/qwen3-embedding-0p6b", 0.01),
+                ("qwen/qwen3-embedding-4b", 0.02),
+                ("qwen/qwen3-embedding-8b", 0.05),
+                ("voyage/voyage-4", 0.06),
+                ("voyage/voyage-4-large", 0.12),
+                ("voyage/voyage-4-lite", 0.02),
+                ("voyage/voyage-code-3", 0.18),
+            ]
+        );
     }
 
     #[test]
@@ -1689,6 +1673,41 @@ mod tests {
         };
         assert!(metered.authoritative());
         assert!(!estimate.authoritative());
+    }
+
+    #[test]
+    fn sampled_cost_metric_keeps_embedding_model_attribution() {
+        let mut embedding = tpuf_line("tpuf_embeddings", "million_tokens", 1.0, 0.02, None);
+        embedding.service_detail = Some("voyage/voyage-4-lite".to_string());
+        let snapshot = CostSnapshot {
+            as_of_ms: 0,
+            window_seconds: 3_600,
+            totals: CostTotals {
+                total_usd: 0.02,
+                aws_usd: 0.0,
+                turbopuffer_usd: 0.02,
+                cost_per_query_usd: None,
+                cost_per_document_usd: None,
+                cost_per_tib_indexed_usd: None,
+            },
+            lines: vec![embedding],
+            rate_card_status: CostRateCardStatus {
+                turbopuffer_rate_card_version: TURBOPUFFER_RATE_CARD.version.to_string(),
+                aws_cost_source: AWS_COST_SOURCE.to_string(),
+                aws_cost_refreshed_at_ms: 0,
+                aws_cost_stale: true,
+                aws_pricing_stale: false,
+                aws_pricing_refreshed_at_ms: AWS_ESTIMATOR_REFRESHED_AT_MS,
+            },
+            caveats: Vec::new(),
+        };
+
+        let metric = format_cost_metrics(&snapshot, "main");
+        assert!(metric.contains("provider=\"turbopuffer\""));
+        assert!(metric.contains("service=\"tpuf_embeddings\""));
+        assert!(metric.contains("service_detail=\"voyage/voyage-4-lite\""));
+        assert!(metric.contains("rate_card_version=\"2026-08\""));
+        assert!(metric.ends_with(" 0.02\n"));
     }
 
     #[test]
