@@ -12,6 +12,50 @@ use crate::clients::turbopuffer::{
 
 pub type EmbeddingCache = dashmap::DashMap<String, (std::time::Instant, Arc<Vec<f64>>)>;
 
+/// Per-profile state for the blended native-to-autoscaler handoff.
+///
+/// A profile starts cold. Its first request stays on native serving and arms
+/// one subsequent request as the availability probe. Only one request probes
+/// at a time; concurrent traffic remains on native until that probe succeeds.
+/// A provider failure moves the profile back to cold immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendedEmbeddingState {
+    Cold { native_requests: u8 },
+    Probing,
+    Warm,
+}
+
+pub type BlendedEmbeddingStates = dashmap::DashMap<String, BlendedEmbeddingState>;
+
+pub fn should_use_blended_gateway(states: &BlendedEmbeddingStates, key: &str) -> bool {
+    let mut state = states
+        .entry(key.to_string())
+        .or_insert(BlendedEmbeddingState::Cold { native_requests: 0 });
+    match *state {
+        BlendedEmbeddingState::Cold { native_requests: 0 } => {
+            *state = BlendedEmbeddingState::Cold { native_requests: 1 };
+            false
+        }
+        BlendedEmbeddingState::Cold { .. } => {
+            *state = BlendedEmbeddingState::Probing;
+            true
+        }
+        BlendedEmbeddingState::Probing => false,
+        BlendedEmbeddingState::Warm => true,
+    }
+}
+
+pub fn mark_blended_warm(states: &BlendedEmbeddingStates, key: &str) {
+    states.insert(key.to_string(), BlendedEmbeddingState::Warm);
+}
+
+pub fn mark_blended_degraded(states: &BlendedEmbeddingStates, key: &str) {
+    states.insert(
+        key.to_string(),
+        BlendedEmbeddingState::Cold { native_requests: 0 },
+    );
+}
+
 #[derive(Debug, Clone)]
 pub struct EmbeddingBatch {
     pub vectors: Vec<Vec<f64>>,
@@ -252,6 +296,23 @@ fn merge_billing(left: Option<&Value>, right: Option<&Value>) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blended_handoff_has_single_probe_and_resets_after_degradation() {
+        let states = BlendedEmbeddingStates::new();
+        let key = "namespace\0title\0model";
+
+        assert!(!should_use_blended_gateway(&states, key));
+        assert!(should_use_blended_gateway(&states, key));
+        assert!(!should_use_blended_gateway(&states, key));
+
+        mark_blended_warm(&states, key);
+        assert!(should_use_blended_gateway(&states, key));
+
+        mark_blended_degraded(&states, key);
+        assert!(!should_use_blended_gateway(&states, key));
+        assert!(should_use_blended_gateway(&states, key));
+    }
 
     #[test]
     fn provider_namespaces_are_stable_and_profile_specific() {

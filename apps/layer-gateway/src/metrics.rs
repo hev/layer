@@ -144,6 +144,7 @@ pub struct LayerMetrics {
     embed_tokens_total: IntCounterVec,
     embed_compute_seconds_total: CounterVec,
     embed_model_hints: DashMap<String, String>,
+    embed_serving_hints: DashMap<String, String>,
     tpuf_billable_bytes_written_total: IntCounterVec,
     tpuf_billable_bytes_queried_total: IntCounterVec,
     tpuf_billable_bytes_returned_total: IntCounterVec,
@@ -635,6 +636,7 @@ impl LayerMetrics {
             embed_tokens_total,
             embed_compute_seconds_total,
             embed_model_hints: DashMap::new(),
+            embed_serving_hints: DashMap::new(),
             tpuf_billable_bytes_written_total,
             tpuf_billable_bytes_queried_total,
             tpuf_billable_bytes_returned_total,
@@ -910,6 +912,25 @@ impl LayerMetrics {
         self.embed_model_hints
             .get(&format!("{namespace}\u{1f}{attribute}"))
             .map(|model| model.clone())
+    }
+
+    pub(crate) fn remember_embed_serving(
+        &self,
+        namespace: &str,
+        source: &str,
+        target: &str,
+        serving: &str,
+    ) {
+        for attribute in [source, target] {
+            self.embed_serving_hints
+                .insert(format!("{namespace}\u{1f}{attribute}"), serving.to_string());
+        }
+    }
+
+    fn embed_serving_hint(&self, namespace: &str, attribute: &str) -> Option<String> {
+        self.embed_serving_hints
+            .get(&format!("{namespace}\u{1f}{attribute}"))
+            .map(|serving| serving.clone())
     }
 
     pub fn observe_tpuf_billing(&self, namespace: &str, billing: &Value) {
@@ -1531,7 +1552,7 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         body: Option<Value>,
     ) -> Result<crate::clients::turbopuffer::TurbopufferPassthroughResponse, TurbopufferError> {
         let namespace = namespace_from_tpuf_path(path);
-        let embedding_model = namespace.and_then(|namespace| {
+        let embedding = namespace.and_then(|namespace| {
             body.as_ref()
                 .and_then(|body| native_embedding_model(&self.metrics, namespace, body))
         });
@@ -1545,13 +1566,13 @@ impl TurbopufferClient for MetricsTurbopufferClient {
                         if let Some(billing) = body.get("billing") {
                             self.metrics.observe_tpuf_billing(namespace, billing);
                         }
-                        if let (Some(model), Some(performance)) =
-                            (embedding_model.as_deref(), body.get("performance"))
+                        if let (Some((model, serving)), Some(performance)) =
+                            (embedding.as_ref(), body.get("performance"))
                         {
                             self.metrics.observe_embed_performance(
                                 namespace,
                                 model,
-                                "native",
+                                serving,
                                 performance,
                             );
                         }
@@ -1781,19 +1802,28 @@ impl TurbopufferClient for MetricsTurbopufferClient {
     }
 }
 
-fn native_embedding_model(metrics: &LayerMetrics, namespace: &str, body: &Value) -> Option<String> {
+fn native_embedding_model(
+    metrics: &LayerMetrics,
+    namespace: &str,
+    body: &Value,
+) -> Option<(String, String)> {
     let mut models = body
         .get("schema")
         .and_then(Value::as_object)
         .into_iter()
-        .flat_map(|schema| schema.values())
-        .filter_map(|attribute| attribute.get("embed"))
-        .filter_map(|embed| {
-            embed
+        .flat_map(|schema| schema.iter())
+        .filter_map(|(name, attribute)| {
+            let embed = attribute.get("embed")?;
+            let model = embed
                 .as_str()
-                .or_else(|| embed.get("model").and_then(Value::as_str))
+                .or_else(|| embed.get("model").and_then(Value::as_str))?;
+            Some((
+                model.to_string(),
+                metrics
+                    .embed_serving_hint(namespace, name)
+                    .unwrap_or_else(|| "native".to_string()),
+            ))
         })
-        .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
 
     let mut collect_rank_by = |rank_by: &Value| {
@@ -1806,6 +1836,7 @@ fn native_embedding_model(metrics: &LayerMetrics, namespace: &str, body: &Value)
         if embed.first().and_then(Value::as_str) != Some("Embed") {
             return;
         }
+        let attribute = rank_by.first().and_then(Value::as_str);
         let model = embed
             .get(2)
             .and_then(Value::as_object)
@@ -1813,13 +1844,13 @@ fn native_embedding_model(metrics: &LayerMetrics, namespace: &str, body: &Value)
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| {
-                rank_by
-                    .first()
-                    .and_then(Value::as_str)
-                    .and_then(|attribute| metrics.embed_model_hint(namespace, attribute))
+                attribute.and_then(|attribute| metrics.embed_model_hint(namespace, attribute))
             })
             .unwrap_or_else(|| "schema-inferred".to_string());
-        models.insert(model);
+        let serving = attribute
+            .and_then(|attribute| metrics.embed_serving_hint(namespace, attribute))
+            .unwrap_or_else(|| "native".to_string());
+        models.insert((model, serving));
     };
 
     if let Some(rank_by) = body.get("rank_by") {
@@ -1836,7 +1867,7 @@ fn native_embedding_model(metrics: &LayerMetrics, namespace: &str, body: &Value)
     match models.len() {
         0 => None,
         1 => models.into_iter().next(),
-        _ => Some("multiple".to_string()),
+        _ => Some(("multiple".to_string(), "multiple".to_string())),
     }
 }
 

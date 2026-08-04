@@ -5,6 +5,7 @@
 //! the gateway's Turbopuffer-native provider and lowered to concrete vectors,
 //! so Layer-only serving policy and `embed` / `Embed` are never forwarded.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,6 +56,8 @@ pub struct EmbeddingProfile {
     layer_extensions: bool,
     #[serde(default)]
     materialized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +99,96 @@ impl EmbeddingProfile {
             || self.modality != EmbeddingModality::Text
             || self.chunk.is_some()
     }
+
+    fn handoff_key(&self, namespace: &str) -> String {
+        format!(
+            "{namespace}\0{}\0{}\0{}\0{}",
+            self.source,
+            self.model,
+            self.revision.as_deref().unwrap_or_default(),
+            self.dims.unwrap_or_default()
+        )
+    }
+}
+
+fn native_attribute_schema(config: &Map<String, Value>) -> Value {
+    let mut config = Value::Object(config.clone());
+    if let Some(embed) = config.get_mut("embed") {
+        consume_serving(embed);
+    }
+    config
+}
+
+fn schema_object(body: &mut Value) -> Result<&mut Map<String, Value>, AppError> {
+    body.as_object_mut()
+        .expect("write body is object")
+        .entry("schema")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AppError::Validation("schema must be an object".to_string()))
+}
+
+fn disable_native_schema(body: &mut Value, profile: &EmbeddingProfile) -> Result<(), AppError> {
+    let mut source = profile
+        .native_schema
+        .clone()
+        .unwrap_or_else(|| json!({"type": "string"}));
+    source
+        .as_object_mut()
+        .expect("native schema is an object")
+        .remove("embed");
+    schema_object(body)?.insert(profile.source.clone(), source);
+    Ok(())
+}
+
+fn enable_native_schema(body: &mut Value, profile: &EmbeddingProfile) -> Result<(), AppError> {
+    let mut source = profile
+        .native_schema
+        .clone()
+        .unwrap_or_else(|| json!({"type": "string"}));
+    let mut embed = json!({
+        "model": profile.model,
+        "attribute": profile.target,
+    });
+    if let Some(dims) = profile.dims {
+        embed["dims"] = Value::from(dims);
+    }
+    source
+        .as_object_mut()
+        .expect("native schema is an object")
+        .insert("embed".to_string(), embed);
+    schema_object(body)?.insert(profile.source.clone(), source);
+    Ok(())
+}
+
+fn write_uses_gateway(
+    state: &AppState,
+    namespace: &str,
+    profile: &EmbeddingProfile,
+    search_store: bool,
+    row_write: bool,
+    blended_probe_keys: &mut HashMap<String, String>,
+) -> bool {
+    match profile.serving {
+        ServingPreference::Native => search_store,
+        ServingPreference::Autoscaler => true,
+        ServingPreference::Blended if search_store || profile.has_extensions() => true,
+        ServingPreference::Blended if profile.materialized && profile.native_schema.is_none() => {
+            true
+        }
+        ServingPreference::Blended if !row_write => false,
+        ServingPreference::Blended => {
+            let key = profile.handoff_key(namespace);
+            let gateway = crate::embedding::should_use_blended_gateway(
+                state.blended_embedding_states.as_ref(),
+                &key,
+            );
+            if gateway {
+                blended_probe_keys.insert(profile.source.clone(), key);
+            }
+            gateway
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -123,12 +216,16 @@ pub(crate) async fn prepare_write(
     search_store: bool,
 ) -> Result<WritePreparation, AppError> {
     let mut profiles = load_profiles(state, namespace).await?;
+    let row_write = has_row_write(body.as_object());
     let had_persisted_profiles = profiles
         .iter()
         .any(|profile| profile.serving != ServingPreference::Native || profile.materialized);
     let mut profile_changed = false;
     let mut has_embed_schema = false;
     let mut native_embed_schema = false;
+    let mut gateway_sources = HashSet::new();
+    let mut routed_sources = HashSet::new();
+    let mut blended_probe_keys = HashMap::new();
 
     if let Some(schema) = body.get_mut("schema").and_then(Value::as_object_mut) {
         let attributes = schema.keys().cloned().collect::<Vec<_>>();
@@ -136,6 +233,7 @@ pub(crate) async fn prepare_write(
             let Some(config) = schema.get_mut(&attribute).and_then(Value::as_object_mut) else {
                 continue;
             };
+            let native_schema = native_attribute_schema(config);
             let Some(embed) = config.get_mut("embed") else {
                 continue;
             };
@@ -150,12 +248,30 @@ pub(crate) async fn prepare_write(
             }
             has_embed_schema = true;
             let mut parsed = validate_embed(&attribute, embed)?;
-            let gateway_served = parsed.serving != ServingPreference::Native || search_store;
+            parsed.native_schema = Some(native_schema);
+            let previous = profiles
+                .iter()
+                .find(|profile| profile.source == attribute)
+                .cloned();
+            if let Some(previous) = previous.as_ref() {
+                parsed.materialized = previous.materialized;
+                if previous.materialized && previous.native_schema.is_none() {
+                    parsed.native_schema = None;
+                }
+            }
+            let gateway_served = write_uses_gateway(
+                state,
+                namespace,
+                &parsed,
+                search_store,
+                row_write,
+                &mut blended_probe_keys,
+            );
+            routed_sources.insert(attribute.clone());
             if gateway_served {
-                let previous = profiles
-                    .iter()
-                    .find(|profile| profile.source == attribute)
-                    .cloned();
+                gateway_sources.insert(attribute.clone());
+            }
+            if gateway_served {
                 if previous.as_ref().is_some_and(|previous| {
                     previous.source == parsed.source
                         && previous.target == parsed.target
@@ -178,10 +294,6 @@ pub(crate) async fn prepare_write(
                 config.remove("embed");
             } else {
                 native_embed_schema = true;
-                let previous = profiles
-                    .iter()
-                    .find(|profile| profile.source == attribute)
-                    .cloned();
                 profiles.retain(|profile| profile.source != attribute);
                 profiles.push(parsed.clone());
                 profile_changed |= previous.as_ref() != Some(&parsed);
@@ -203,19 +315,60 @@ pub(crate) async fn prepare_write(
         }
     }
 
+    for profile in &profiles {
+        state.metrics.remember_embed_model(
+            namespace,
+            &profile.source,
+            &profile.target,
+            &profile.model,
+        );
+        state.metrics.remember_embed_serving(
+            namespace,
+            &profile.source,
+            &profile.target,
+            profile.serving.label(),
+        );
+        if routed_sources.contains(&profile.source) {
+            continue;
+        }
+        if write_uses_gateway(
+            state,
+            namespace,
+            profile,
+            search_store,
+            row_write,
+            &mut blended_probe_keys,
+        ) {
+            gateway_sources.insert(profile.source.clone());
+        }
+    }
+
     let gateway_profiles = profiles
         .iter()
-        .filter(|profile| profile.serving != ServingPreference::Native || search_store)
+        .filter(|profile| gateway_sources.contains(&profile.source))
         .collect::<Vec<_>>();
 
     reject_source_patches(body, &gateway_profiles)?;
 
-    if gateway_profiles.is_empty() || !has_row_write(body.as_object()) {
+    if gateway_profiles.is_empty() || !row_write {
+        let requires_distance_check = native_embed_schema
+            && has_embed_schema
+            && profiles.iter().any(|profile| !profile.materialized);
+        let materialized_changed =
+            row_write && profiles.iter().any(|profile| !profile.materialized);
+        if row_write {
+            for profile in &mut profiles {
+                profile.materialized = true;
+            }
+        }
         return Ok(WritePreparation {
-            requires_distance_check: native_embed_schema && has_embed_schema,
+            requires_distance_check,
             performance: json!({}),
-            profiles_to_save: profile_changed.then_some(profiles),
+            profiles_to_save: (profile_changed || materialized_changed).then_some(profiles.clone()),
             profile_persistence_required: had_persisted_profiles
+                || profiles
+                    .iter()
+                    .any(|profile| profile.serving != ServingPreference::Native)
                 || (profile_changed && search_store),
             generated_chunk_attributes: false,
         });
@@ -237,8 +390,16 @@ pub(crate) async fn prepare_write(
         ));
     }
 
+    let can_fallback_to_native = !search_store
+        && gateway_profiles.iter().all(|profile| {
+            profile.serving == ServingPreference::Blended && !profile.has_extensions()
+        });
+    let body_before_gateway = body.clone();
     let mut performance = json!({});
     for profile in gateway_profiles {
+        if profile.serving == ServingPreference::Blended && !search_store {
+            disable_native_schema(body, profile)?;
+        }
         let inputs = prepare_write_inputs(body, profile)?;
         if inputs.values.is_empty() {
             continue;
@@ -248,7 +409,7 @@ pub(crate) async fn prepare_write(
             .iter()
             .map(|value| apply_instruction(profile.instructions.document.as_deref(), value))
             .collect::<Vec<_>>();
-        let vectors = resolve_vectors(
+        let vectors = match resolve_vectors(
             state,
             namespace,
             profile,
@@ -256,19 +417,59 @@ pub(crate) async fn prepare_write(
             &values,
             &mut performance,
         )
-        .await?;
-        apply_write_vectors(body, profile, &inputs.row_indices, &vectors, search_store)?;
+        .await
+        {
+            Ok(vectors) => vectors,
+            Err(error) if can_fallback_to_native => {
+                for key in blended_probe_keys.values() {
+                    crate::embedding::mark_blended_degraded(
+                        state.blended_embedding_states.as_ref(),
+                        key,
+                    );
+                }
+                *body = body_before_gateway;
+                for profile in profiles.iter().filter(|profile| {
+                    profile.serving == ServingPreference::Blended && !profile.has_extensions()
+                }) {
+                    enable_native_schema(body, profile)?;
+                }
+                tracing::warn!(
+                    namespace,
+                    error = %error,
+                    "blended embedding provider degraded; falling back to native write"
+                );
+                return Ok(WritePreparation {
+                    requires_distance_check: false,
+                    performance: json!({}),
+                    profiles_to_save: profile_changed.then_some(profiles),
+                    profile_persistence_required: true,
+                    generated_chunk_attributes: false,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(key) = blended_probe_keys.get(&profile.source) {
+            crate::embedding::mark_blended_warm(state.blended_embedding_states.as_ref(), key);
+        }
+        apply_write_vectors(
+            body,
+            profile,
+            &inputs.row_indices,
+            &vectors,
+            search_store,
+            profile.serving == ServingPreference::Blended && !search_store,
+        )?;
     }
 
     let requires_distance_check = native_embed_schema
-        || profiles.iter().any(|profile| {
-            (profile.serving != ServingPreference::Native || search_store) && !profile.materialized
-        });
-    let materialized_changed = profiles.iter().any(|profile| {
-        (profile.serving != ServingPreference::Native || search_store) && !profile.materialized
-    });
+        || profiles
+            .iter()
+            .any(|profile| gateway_sources.contains(&profile.source) && !profile.materialized);
+    let materialized_changed = profiles
+        .iter()
+        .any(|profile| gateway_sources.contains(&profile.source) && !profile.materialized);
     for profile in &mut profiles {
-        if profile.serving != ServingPreference::Native || search_store {
+        if gateway_sources.contains(&profile.source) {
             profile.materialized = true;
         }
     }
@@ -426,6 +627,12 @@ async fn prepare_rank_by(
             &profile.target,
             &profile.model,
         );
+        state.metrics.remember_embed_serving(
+            namespace,
+            &profile.source,
+            &profile.target,
+            profile.serving.label(),
+        );
     }
     if target.starts_with("embed_") && explicit_model.is_none() {
         return Err(AppError::Validation(
@@ -436,7 +643,29 @@ async fn prepare_rank_by(
     let serving = declared
         .map(|profile| profile.serving)
         .unwrap_or(ServingPreference::Native);
-    let gateway_served = serving != ServingPreference::Native || search_store;
+    let blended_key = declared.and_then(|profile| {
+        if profile.serving != ServingPreference::Blended
+            || search_store
+            || profile.has_extensions()
+            || (profile.materialized && profile.native_schema.is_none())
+        {
+            return None;
+        }
+        let key = profile.handoff_key(namespace);
+        crate::embedding::should_use_blended_gateway(state.blended_embedding_states.as_ref(), &key)
+            .then_some(key)
+    });
+    let gateway_served = match serving {
+        ServingPreference::Native => search_store,
+        ServingPreference::Autoscaler => true,
+        ServingPreference::Blended => {
+            search_store
+                || declared.is_some_and(EmbeddingProfile::has_extensions)
+                || declared
+                    .is_some_and(|profile| profile.materialized && profile.native_schema.is_none())
+                || blended_key.is_some()
+        }
+    };
     if !gateway_served {
         let resolved = explicit_model
             .map(|model| {
@@ -500,9 +729,10 @@ async fn prepare_rank_by(
         chunk: None,
         layer_extensions: declared.is_some_and(|profile| profile.layer_extensions),
         materialized: declared.is_some_and(|profile| profile.materialized),
+        native_schema: declared.and_then(|profile| profile.native_schema.clone()),
     };
     let text = apply_instruction(profile.instructions.query.as_deref(), &text);
-    let vectors = resolve_vectors(
+    let vectors = match resolve_vectors(
         state,
         namespace,
         &profile,
@@ -510,7 +740,24 @@ async fn prepare_rank_by(
         &[text],
         &mut preparation.performance,
     )
-    .await?;
+    .await
+    {
+        Ok(vectors) => vectors,
+        Err(error) if blended_key.is_some() && !search_store => {
+            let key = blended_key.as_deref().expect("checked blended key");
+            crate::embedding::mark_blended_degraded(state.blended_embedding_states.as_ref(), key);
+            tracing::warn!(
+                namespace,
+                error = %error,
+                "blended embedding provider degraded; falling back to native query"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(key) = blended_key.as_deref() {
+        crate::embedding::mark_blended_warm(state.blended_embedding_states.as_ref(), key);
+    }
     rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
     if search_store {
         rank_by[0] = Value::String("vector".to_string());
@@ -548,6 +795,7 @@ fn validate_embed(attribute: &str, embed: &Value) -> Result<EmbeddingProfile, Ap
                 chunk: None,
                 layer_extensions: false,
                 materialized: false,
+                native_schema: None,
             })
         }
         Value::Object(options) => validate_embed_options(attribute, options),
@@ -665,6 +913,7 @@ fn validate_embed_options(
         chunk,
         layer_extensions,
         materialized: false,
+        native_schema: None,
     })
 }
 
@@ -1258,6 +1507,7 @@ fn apply_write_vectors(
     row_indices: &[usize],
     vectors: &[Vec<f64>],
     search_store: bool,
+    native_handoff: bool,
 ) -> Result<(), AppError> {
     if let Some(rows) = body.get_mut("upsert_rows").and_then(Value::as_array_mut) {
         for (&row_index, vector) in row_indices.iter().zip(vectors) {
@@ -1299,7 +1549,10 @@ fn apply_write_vectors(
         .ok_or_else(|| AppError::Validation("schema must be an object".to_string()))?;
     schema.insert(
         profile.target.clone(),
-        json!({"type": format!("[{dims}]f32"), "ann": true}),
+        json!({
+            "type": format!("[{dims}]{}", if native_handoff { "f16" } else { "f32" }),
+            "ann": true
+        }),
     );
     Ok(())
 }
