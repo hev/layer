@@ -1297,9 +1297,11 @@ fn apply_write_vectors(
                 .as_object_mut()
                 .expect("prepare_write_inputs validated rows");
             let vector = serde_json::to_value(vector).expect("vector is JSON");
-            row.insert(profile.target.clone(), vector.clone());
             if search_store {
+                row.remove(&profile.target);
                 row.insert("vector".to_string(), vector);
+            } else {
+                row.insert(profile.target.clone(), vector);
             }
         }
     } else if let Some(columns) = body
@@ -1307,9 +1309,11 @@ fn apply_write_vectors(
         .and_then(Value::as_object_mut)
     {
         let vectors = serde_json::to_value(vectors).expect("vectors are JSON");
-        columns.insert(profile.target.clone(), vectors.clone());
         if search_store {
+            columns.remove(&profile.target);
             columns.insert("vector".to_string(), vectors);
+        } else {
+            columns.insert(profile.target.clone(), vectors);
         }
     }
     let Some(first) = vectors.first() else {
@@ -1329,10 +1333,12 @@ fn apply_write_vectors(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or_else(|| AppError::Validation("schema must be an object".to_string()))?;
-    schema.insert(
-        profile.target.clone(),
-        json!({"type": format!("[{dims}]f32"), "ann": true}),
-    );
+    if !search_store {
+        schema.insert(
+            profile.target.clone(),
+            json!({"type": format!("[{dims}]f32"), "ann": true}),
+        );
+    }
     Ok(())
 }
 
