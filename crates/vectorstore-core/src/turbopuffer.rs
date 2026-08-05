@@ -157,6 +157,15 @@ pub trait TurbopufferClient: Send + Sync {
         body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError>;
 
+    /// Delete all backend state for a namespace.
+    async fn delete_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.passthrough("DELETE", &format!("/v2/namespaces/{namespace}"), None, None)
+            .await
+    }
+
     /// Hint turbopuffer to prepare this namespace for low-latency requests.
     /// Mirrors `GET /v1/namespaces/{namespace}/hint_cache_warm`.
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError>;
@@ -439,6 +448,15 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
         self.client_for_namespace(namespace_from_path(path))?
             .passthrough(method, path, query, body)
+            .await
+    }
+
+    async fn delete_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .delete_namespace(namespace)
             .await
     }
 

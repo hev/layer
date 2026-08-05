@@ -1588,6 +1588,16 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         result
     }
 
+    async fn delete_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<crate::clients::turbopuffer::TurbopufferPassthroughResponse, TurbopufferError> {
+        self.metrics.inc_tpuf_inflight();
+        let result = self.inner.delete_namespace(namespace).await;
+        self.metrics.dec_tpuf_inflight();
+        result
+    }
+
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.hint_cache_warm(namespace).await;

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{OriginalUri, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
@@ -85,7 +85,6 @@ pub async fn list_namespaces(
 pub async fn delete_namespace(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
-    OriginalUri(uri): OriginalUri,
 ) -> Result<Json<StatusResponse>, AppError> {
     if namespace.trim().is_empty() {
         return Err(AppError::Validation("namespace is required".to_string()));
@@ -93,13 +92,13 @@ pub async fn delete_namespace(
 
     let upstream = state
         .turbopuffer()
-        .passthrough("DELETE", uri.path(), uri.query(), None)
+        .delete_namespace(&namespace)
         .await
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace delete failed: {e}")))?;
+        .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
 
     if upstream.status >= 400 && upstream.status != 404 {
         return Err(AppError::Upstream(format!(
-            "Turbopuffer namespace delete returned {}",
+            "VectorStore namespace delete returned {}",
             upstream.status
         )));
     }

@@ -61,6 +61,13 @@ impl TurbopufferClient for MockSearchClient {
         })
     }
 
+    async fn delete_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.inner.delete_namespace(namespace).await
+    }
+
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
         self.inner.hint_cache_warm(namespace).await
     }
@@ -297,6 +304,19 @@ impl TurbopufferClient for HttpSearchClient {
             content_type: Some("application/json".to_string()),
             body: br#"{"error":"UnsupportedByStore","message":"search backend does not support turbopuffer passthrough"}"#.to_vec(),
         })
+    }
+
+    async fn delete_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        let resp = self
+            .client
+            .delete(format!("{}/ns/{namespace}", self.base_url))
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        raw_response(resp).await
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
