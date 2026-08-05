@@ -547,6 +547,8 @@ async fn prepare_rank_by(
     rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
     if search_store {
         rank_by[0] = Value::String("vector".to_string());
+    } else if let Some(profile) = declared {
+        rank_by[0] = Value::String(profile.target.clone());
     }
     preparation.passthrough = false;
     Ok(())
