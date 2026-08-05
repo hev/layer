@@ -1973,12 +1973,12 @@ components:
         The first row write establishing an embedded schema requires `distance_metric`.
         `serving.prefer: native` is consumed by Layer and the tpuf-compatible fields
         are forwarded on a Turbopuffer store. `autoscaler` and native-on-search are
-        resolved through a configured Turbopuffer embedding provider. `blended` starts
-        on native serving, probes that provider after the first native request, shifts
-        on success, and returns to native on provider degradation. Only concrete derived
-        vectors reach the active store on the provider leg. The Layer-only revision,
-        instruction, modality, and chunking fields require that provider leg and are
-        never forwarded upstream.
+        resolved through a configured Turbopuffer embedding provider. `serving.prefer`
+        accepts exactly `native` or `autoscaler`; there is no fallback between them.
+        The autoscaler path accepts supported Hugging Face checkpoints, including
+        finetuned models, and sends only concrete vectors to the active store. The
+        Layer-only revision, instruction, modality, and chunking fields require that
+        provider leg and are never forwarded upstream.
 
         '
     TurbopufferBranchFromRequest:
@@ -2058,11 +2058,9 @@ components:
         `group_by`, `limit`, etc.). `rank_by` may reference `["Embed", text]` / `["Embed",
         text, {model}]`. A source attribute infers its schema model; a derived `embed_<attr>`
         target requires the explicit model or returns `a model name must be provided`.
-        Native requests on a Turbopuffer store are forwarded transparently. Blended
-        requests start native, shift after a successful gateway-provider availability
-        probe, and return to native if that provider degrades. Layer-served requests
-        are lowered to concrete vectors and merge the provider''s embedding performance
-        into the response — see `docs/api/embed.mdx`.
+        Native requests on a Turbopuffer store are forwarded transparently. Autoscaler
+        requests are lowered to concrete vectors and merge the provider''s embedding
+        performance into the response, without falling back to native — see `docs/api/embed.mdx`.
 
         '
     TurbopufferQueryResponse:

@@ -238,9 +238,6 @@ fn purge_in_memory_namespace_state(state: &AppState, namespace: &str) {
     state.last_snapshot_at.remove(namespace);
     state.snapshot_inflight.remove(namespace);
     state.sharded_namespaces.remove(namespace);
-    state
-        .blended_embedding_states
-        .retain(|key, _| !key.starts_with(&format!("{namespace}\0")));
     state.namespace_list_cache.clear();
 }
 

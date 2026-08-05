@@ -73,7 +73,6 @@ pub struct AppState {
     pub embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     pub embedding_cache: Arc<embedding::EmbeddingCache>,
     pub embedding_cache_ttl: std::time::Duration,
-    pub blended_embedding_states: Arc<embedding::BlendedEmbeddingStates>,
     pub wire_embedding_profiles:
         Arc<DashMap<String, Vec<crate::routes::embed_wire::EmbeddingProfile>>>,
     pub aerospike: Arc<dyn AerospikeClient>,
