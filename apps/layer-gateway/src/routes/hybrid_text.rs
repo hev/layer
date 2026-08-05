@@ -1376,8 +1376,7 @@ pub(crate) async fn run_hybrid_text(
     };
     let expr: &HybridTextExpr = &expr;
 
-    let watermark = state.consistency.get(namespace);
-    let inject_filter = state.consistency.should_inject_filter(namespace);
+    let (watermark, inject_filter) = state.query_consistency(namespace);
     let shard_count = active_shard_count(state, namespace).await;
     let offset = request.cursor.as_ref().map_or(0, |cursor| cursor.offset);
     let page_end = offset.checked_add(request.top_k).ok_or_else(|| {

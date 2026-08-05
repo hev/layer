@@ -98,8 +98,7 @@ pub async fn multi_query(
         )));
     }
 
-    let watermark = state.consistency.get(&namespace);
-    let inject_filter = state.consistency.should_inject_filter(&namespace);
+    let (watermark, inject_filter) = state.query_consistency(&namespace);
     let temporal_filter = temporal_filter_from_body(&body)?;
     let shard_count = active_shard_count(&state, &namespace).await;
     let (traceparent, trace_id) = traceparent_for_query(&headers);

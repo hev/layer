@@ -401,6 +401,19 @@ impl AppState {
             .contains(&self.store_for_namespace(namespace))
     }
 
+    /// Watermark state used by query paths. Search stores do not persist the
+    /// Turbopuffer-only `_hevlayer_upserted_at` attribute, so neither the
+    /// updating-state filter nor the 429 retry cut applies to them.
+    pub fn query_consistency(&self, namespace: &str) -> (Option<u64>, bool) {
+        if self.namespace_uses_search_store(namespace) {
+            return (None, false);
+        }
+        (
+            self.consistency.get(namespace),
+            self.consistency.should_inject_filter(namespace),
+        )
+    }
+
     pub fn snapshot_retention_namespaces(&self) -> Vec<(String, Retention)> {
         self.snapshot_retention
             .read()

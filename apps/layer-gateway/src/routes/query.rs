@@ -215,8 +215,7 @@ async fn query_hevlayer(
     headers: HeaderMap,
     request: QueryRequest,
 ) -> Result<Response, AppError> {
-    let watermark = state.consistency.get(&namespace);
-    let inject_filter = state.consistency.should_inject_filter(&namespace);
+    let (watermark, inject_filter) = state.query_consistency(&namespace);
     let temporal_filter = temporal_filter(request.as_of, request.between)?;
     let (traceparent, trace_id) = traceparent_for_query(&headers);
     let tags = tags_from_headers(&headers).map_err(AppError::Validation)?;

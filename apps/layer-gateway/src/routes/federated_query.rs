@@ -708,8 +708,7 @@ async fn run_namespace_vector(
                 .to_string(),
         ));
     }
-    let watermark = state.consistency.get(namespace);
-    let inject_filter = state.consistency.should_inject_filter(namespace);
+    let (watermark, inject_filter) = state.query_consistency(namespace);
     let temporal_filter = crate::routes::query::temporal_filter(request.as_of, request.between)?;
     let shard_count = crate::shards::active_shard_count(state, namespace).await;
     let output = run_query_leg(
