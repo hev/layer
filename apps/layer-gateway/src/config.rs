@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(not(feature = "pro"))]
 const DEFAULT_TURBOPUFFER_REGION: &str = "aws-us-east-1";
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,9 @@ pub struct Config {
     pub namespace_list_cache_ttl_ms: u64,
     /// TTL for gateway-resolved query embeddings. Defaults to 60 seconds.
     pub embedding_cache_ttl_ms: u64,
+    /// Lattice deployment artifact. Its sibling `tokenizer.json` is loaded
+    /// with it; unset means the `lattice` serving leg is unavailable.
+    pub lattice_model_path: Option<PathBuf>,
     /// Static Agent specs for local/dev use. Production Kubernetes
     /// resolution populates the same in-memory registry.
     pub agents_json: Option<String>,
@@ -265,6 +269,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60_000),
+            lattice_model_path: env::var("LAYER_LATTICE_MODEL_PATH")
+                .ok()
+                .and_then(trimmed_non_empty)
+                .map(PathBuf::from),
             agents_json: env::var("LAYER_AGENTS_JSON")
                 .ok()
                 .and_then(trimmed_non_empty),
@@ -322,6 +330,19 @@ fn stores_json_from_env() -> Option<String> {
             .to_string(),
         );
     }
+    default_store_json()
+}
+
+// Pro deployments resolve their default store from Kubernetes unless an
+// explicit standalone override was supplied above. Synthesizing the CE
+// fallback here would make the Kubernetes resolver unreachable.
+#[cfg(feature = "pro")]
+fn default_store_json() -> Option<String> {
+    None
+}
+
+#[cfg(not(feature = "pro"))]
+fn default_store_json() -> Option<String> {
     let region = env::var("TURBOPUFFER_REGION")
         .ok()
         .and_then(trimmed_non_empty)
@@ -376,7 +397,24 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{telemetry_enabled, trimmed_non_empty};
+    use super::{default_store_json, telemetry_enabled, trimmed_non_empty};
+
+    #[cfg(feature = "pro")]
+    #[test]
+    fn pro_does_not_synthesize_a_standalone_store() {
+        assert_eq!(default_store_json(), None);
+    }
+
+    #[cfg(not(feature = "pro"))]
+    #[test]
+    fn open_gateway_synthesizes_a_standalone_store() {
+        let store: serde_json::Value =
+            serde_json::from_str(&default_store_json().expect("open fallback")).unwrap();
+        assert_eq!(
+            store["default"]["endpoint"]["url"],
+            "https://api.turbopuffer.com"
+        );
+    }
 
     #[test]
     fn trimmed_non_empty_removes_surrounding_whitespace() {

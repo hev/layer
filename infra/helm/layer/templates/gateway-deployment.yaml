@@ -38,6 +38,25 @@ spec:
         {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      {{- if .Values.gateway.lattice.enabled }}
+      initContainers:
+        - name: lattice-model
+          image: {{ required "gateway.lattice.artifact.image is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              artifact_dir=/var/lib/hevlayer/lattice
+              aws s3 cp "{{ required "gateway.lattice.artifact.s3Uri is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.s3Uri }}/model.safetensors" "$artifact_dir/model.safetensors" --only-show-errors
+              aws s3 cp "{{ .Values.gateway.lattice.artifact.s3Uri }}/tokenizer.json" "$artifact_dir/tokenizer.json" --only-show-errors
+              echo "{{ required "gateway.lattice.artifact.modelSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.modelSha256 }}  $artifact_dir/model.safetensors" | sha256sum -c -
+              echo "{{ required "gateway.lattice.artifact.tokenizerSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.tokenizerSha256 }}  $artifact_dir/tokenizer.json" | sha256sum -c -
+          volumeMounts:
+            - name: lattice-model
+              mountPath: /var/lib/hevlayer/lattice
+      {{- end }}
       containers:
         {{- if .Values.gateway.queue.embedded }}
         - name: postgres
@@ -159,6 +178,10 @@ spec:
               value: {{ .Values.gateway.cost.site | quote }}
             - name: LAYER_AWS_COST_CACHE_TTL_SECONDS
               value: {{ .Values.gateway.cost.cacheTtlSeconds | quote }}
+            {{- if .Values.gateway.lattice.enabled }}
+            - name: LAYER_LATTICE_MODEL_PATH
+              value: {{ .Values.gateway.lattice.modelPath | quote }}
+            {{- end }}
             - name: LAYER_KEY_PEPPER
               valueFrom:
                 secretKeyRef:
@@ -196,6 +219,12 @@ spec:
               value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
               {{- end }}
             {{- end }}
+          {{- if .Values.gateway.lattice.enabled }}
+          volumeMounts:
+            - name: lattice-model
+              mountPath: /var/lib/hevlayer/lattice
+              readOnly: true
+          {{- end }}
           lifecycle:
             preStop:
               exec:
@@ -216,6 +245,10 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
       volumes:
+        {{- if .Values.gateway.lattice.enabled }}
+        - name: lattice-model
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.gateway.queue.embedded }}
         - name: gateway-internal-config
           configMap:

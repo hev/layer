@@ -2,10 +2,9 @@
 //!
 //! The route is chosen from the shape of the input text alone — vector
 //! availability never changes which route is best, only whether it can
-//! execute in this request. The gateway never embeds: a vectorless query
-//! routed `semantic` or `fused` gets a deferral response (the routing
-//! decision, `executed: false`, no rows) and the application embeds and
-//! re-issues with the route forced.
+//! execute in this request. An inline `Embed` vector source is resolved only
+//! after the route needs it; otherwise a vectorless `semantic` or `fused`
+//! query gets a deferral response.
 
 use std::sync::Arc;
 
@@ -84,7 +83,7 @@ pub(crate) struct AutoExpr {
     pub field: String,
     pub input: String,
     pub forced_route: Option<Route>,
-    pub vector: Option<Vec<f64>>,
+    pub vector: Option<AutoVector>,
     /// Optional fuzziness override forwarded to the `HybridText` expansion
     /// on the `hybrid_text`/`fused` routes. `None` keeps the
     /// documented hybrid default (`auto`); no effect on `semantic`.
@@ -92,6 +91,12 @@ pub(crate) struct AutoExpr {
     /// Optional stop-word policy override (RFC 0090), forwarded like
     /// `fuzziness`. `None` keeps the default (English list, on).
     pub stopwords: Option<StopwordsOption>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AutoVector {
+    Numeric(Vec<f64>),
+    Embed { field: String, expression: Value },
 }
 
 /// Parse `["field", "Auto", "input", {route?, vector?, fuzziness?, stopwords?}?]`.
@@ -139,15 +144,7 @@ pub(crate) fn parse_auto_expr(rank_by: &Value) -> Result<AutoExpr, AppError> {
                     }
                 },
                 "vector" => {
-                    let parsed: Vec<f64> = serde_json::from_value(value.clone()).map_err(|e| {
-                        AppError::Validation(format!("Auto vector must be a number array: {e}"))
-                    })?;
-                    if parsed.is_empty() {
-                        return Err(AppError::Validation(
-                            "Auto vector must not be empty".to_string(),
-                        ));
-                    }
-                    vector = Some(parsed);
+                    vector = Some(parse_auto_vector(value, &field)?);
                 }
                 "fuzziness" => fuzziness = Some(parse_fuzziness(value)?),
                 "stopwords" => stopwords = Some(parse_stopwords(value)?),
@@ -168,6 +165,84 @@ pub(crate) fn parse_auto_expr(rank_by: &Value) -> Result<AutoExpr, AppError> {
         fuzziness,
         stopwords,
     })
+}
+
+fn parse_auto_vector(value: &Value, default_field: &str) -> Result<AutoVector, AppError> {
+    if value
+        .as_array()
+        .and_then(|expression| expression.first())
+        .and_then(Value::as_str)
+        == Some("Embed")
+    {
+        let expression = value.as_array().expect("checked array");
+        if expression.len() != 2 && expression.len() != 3 {
+            return Err(AppError::Validation(
+                "Auto inline `Embed` must be `[\"Embed\", text]` or `[\"Embed\", text, {field?, model?}]`"
+                    .to_string(),
+            ));
+        }
+        if expression.get(1).and_then(Value::as_str).is_none() {
+            return Err(AppError::Validation(
+                "Auto inline `Embed` text must be a string".to_string(),
+            ));
+        }
+
+        let mut field = default_field.to_string();
+        let mut normalized = expression.clone();
+        if let Some(options) = expression.get(2) {
+            let options = options.as_object().ok_or_else(|| {
+                AppError::Validation("Auto inline `Embed` options must be an object".to_string())
+            })?;
+            for key in options.keys() {
+                if key != "field" && key != "model" {
+                    return Err(AppError::Validation(format!(
+                        "unknown Auto inline `Embed` option `{key}`"
+                    )));
+                }
+            }
+            if let Some(value) = options.get("field") {
+                field = value
+                    .as_str()
+                    .filter(|field| !field.is_empty())
+                    .ok_or_else(|| {
+                        AppError::Validation(
+                            "Auto inline `Embed` field must be a non-empty string".to_string(),
+                        )
+                    })?
+                    .to_string();
+            }
+            if let Some(value) = options.get("model") {
+                if value.as_str().is_none() {
+                    return Err(AppError::Validation(
+                        "Auto inline `Embed` model must be a string".to_string(),
+                    ));
+                }
+            }
+            let mut embed_options = options.clone();
+            embed_options.remove("field");
+            if embed_options.is_empty() {
+                normalized.truncate(2);
+            } else {
+                normalized[2] = Value::Object(embed_options);
+            }
+        }
+        return Ok(AutoVector::Embed {
+            field,
+            expression: Value::Array(normalized),
+        });
+    }
+
+    let parsed: Vec<f64> = serde_json::from_value(value.clone()).map_err(|error| {
+        AppError::Validation(format!(
+            "Auto vector must be a number array or inline `Embed`: {error}"
+        ))
+    })?;
+    if parsed.is_empty() {
+        return Err(AppError::Validation(
+            "Auto vector must not be empty".to_string(),
+        ));
+    }
+    Ok(AutoVector::Numeric(parsed))
 }
 
 pub(crate) fn routing_echo(route: Route, forced: bool, tokens: usize, executed: bool) -> Value {
@@ -221,6 +296,31 @@ pub async fn auto_query(
         return Ok(Json(body).into_response());
     }
 
+    let mut embedding_performance = json!({});
+    let resolved_vector = if route.needs_vector() {
+        match expr
+            .vector
+            .as_ref()
+            .expect("vector-needing route checked source")
+        {
+            AutoVector::Numeric(vector) => Some((vector.clone(), "vector".to_string())),
+            AutoVector::Embed { field, expression } => {
+                let resolved = crate::routes::embed_wire::resolve_auto_embed(
+                    &state,
+                    &namespace,
+                    field,
+                    expression.clone(),
+                    state.namespace_uses_search_store(&namespace),
+                )
+                .await?;
+                embedding_performance = resolved.performance;
+                Some((resolved.vector, resolved.target))
+            }
+        }
+    } else {
+        None
+    };
+
     state
         .metrics
         .observe_query_router(&namespace, route.as_str(), true);
@@ -234,18 +334,20 @@ pub async fn auto_query(
         }
         Route::Fused => {
             state.telemetry.touch_hybrid_rrf();
-            let vector = expr.vector.clone().expect("fused route checked vector");
+            let (vector, target) = resolved_vector
+                .clone()
+                .expect("fused route checked vector source");
             let ann_leg = LegSpec {
                 label: "semantic".to_string(),
-                rank_by: json!(["vector", "ANN", vector]),
+                rank_by: json!([target, "ANN", vector]),
                 filter: request.filters.clone(),
             };
             let out = run_hybrid(&state, &namespace, &expr, &request, Some(ann_leg)).await?;
             (out.0, Some(out.1), out.2, out.3)
         }
         Route::Semantic => {
-            let vector = expr.vector.clone().expect("semantic route checked vector");
-            run_semantic(&state, &namespace, &request, vector).await?
+            let (vector, target) = resolved_vector.expect("semantic route checked vector source");
+            run_semantic(&state, &namespace, &request, vector, target).await?
         }
     };
 
@@ -274,6 +376,12 @@ pub async fn auto_query(
     );
     if let Some(hybrid) = hybrid_echo {
         body.insert("hybrid".to_string(), hybrid);
+    }
+    if embedding_performance
+        .as_object()
+        .is_some_and(|performance| !performance.is_empty())
+    {
+        body.insert("performance".to_string(), embedding_performance);
     }
     Ok((response_headers, Json(Value::Object(body))).into_response())
 }
@@ -308,6 +416,7 @@ pub(crate) async fn run_semantic(
     namespace: &str,
     request: &HybridRequest,
     vector: Vec<f64>,
+    target: String,
 ) -> Result<(Vec<Value>, Option<Value>, Option<u64>, Option<String>), AppError> {
     let include_attributes: Option<IncludeAttributes> = match &request.include_attributes {
         None => None,
@@ -321,8 +430,9 @@ pub(crate) async fn run_semantic(
         AppError::Validation("cursor offset exceeds routed pagination depth".to_string())
     })?;
     let fetch_top_k = page_end.saturating_add(1).min(10_000);
+    let canonical_vector = target == "vector";
     let query = QueryRequest {
-        vector: Some(vector),
+        vector: canonical_vector.then_some(vector.clone()),
         nearest_to_id: None,
         top_k: fetch_top_k,
         filters: request.filters.clone(),
@@ -330,7 +440,7 @@ pub(crate) async fn run_semantic(
         between: request.between,
         include_attributes,
         cursor: None,
-        rank_by: None,
+        rank_by: (!canonical_vector).then(|| json!([target, "ANN", vector])),
     };
     let (watermark, inject_filter) = state.query_consistency(namespace);
     let shard_count = crate::shards::active_shard_count(state, namespace).await;
@@ -434,7 +544,29 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(expr.forced_route, Some(Route::Semantic));
-        assert_eq!(expr.vector, Some(vec![0.1, -0.2]));
+        assert_eq!(expr.vector, Some(AutoVector::Numeric(vec![0.1, -0.2])));
+    }
+
+    #[test]
+    fn parse_accepts_inline_embed_with_independent_field() {
+        let expr = parse_auto_expr(&json!([
+            "title",
+            "Auto",
+            "why do plants turn sunlight into useful chemical energy",
+            {"vector": ["Embed", "why do plants turn sunlight into useful chemical energy", {"field": "text"}]}
+        ]))
+        .unwrap();
+        assert_eq!(
+            expr.vector,
+            Some(AutoVector::Embed {
+                field: "text".to_string(),
+                expression: json!([
+                    "Embed",
+                    "why do plants turn sunlight into useful chemical energy"
+                ]),
+            })
+        );
+        assert_eq!(expr.forced_route, None);
     }
 
     #[test]

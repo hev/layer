@@ -1,3 +1,5 @@
+#![cfg(not(feature = "pro"))]
+
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

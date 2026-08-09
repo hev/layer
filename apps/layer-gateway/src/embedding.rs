@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -62,6 +64,139 @@ pub trait EmbeddingProvider: Send + Sync {
 /// only concrete vectors to its actual VectorStore.
 pub struct TurbopufferEmbeddingProvider {
     client: Arc<dyn TurbopufferClient>,
+}
+
+/// CPU-only embedding provider backed by Erik Kaum's Lattice runtime.
+///
+/// The deployment artifact is generated separately from the canonical
+/// `erikkaum/lattice-retrieval` checkpoint. Lattice's quantization applies to
+/// this lookup table only; the provider returns normalized floating-point
+/// vectors for storage by the active VectorStore.
+pub struct LatticeEmbeddingProvider {
+    model: Arc<lattice::Model>,
+    tokenizer: Arc<lattice::LatticeTokenizer>,
+}
+
+impl LatticeEmbeddingProvider {
+    pub const MODEL: &'static str = "erikkaum/lattice-retrieval";
+
+    pub fn load(model_path: &Path) -> Result<Self, TurbopufferError> {
+        let tokenizer_path = model_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("tokenizer.json");
+        let model = lattice::Model::load(model_path).map_err(|error| {
+            TurbopufferError::Other(format!(
+                "failed to load Lattice model {}: {error}",
+                model_path.display()
+            ))
+        })?;
+        let tokenizer = lattice::LatticeTokenizer::load(&tokenizer_path).map_err(|error| {
+            TurbopufferError::Other(format!(
+                "failed to load Lattice tokenizer {}: {error}",
+                tokenizer_path.display()
+            ))
+        })?;
+        Ok(Self {
+            model: Arc::new(model),
+            tokenizer: Arc::new(tokenizer),
+        })
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for LatticeEmbeddingProvider {
+    async fn embed(
+        &self,
+        request: &EmbeddingRequest<'_>,
+        texts: &[String],
+    ) -> Result<EmbeddingBatch, TurbopufferError> {
+        if request.model != Self::MODEL {
+            return Err(TurbopufferError::Other(format!(
+                "Lattice provider supports only model `{}` (got `{}`)",
+                Self::MODEL,
+                request.model
+            )));
+        }
+        if request.revision.is_some() {
+            return Err(TurbopufferError::Other(
+                "Lattice provider does not support model revisions".to_string(),
+            ));
+        }
+        if request.modality != EmbeddingModality::Text {
+            return Err(TurbopufferError::Other(
+                "Lattice provider supports only text embeddings".to_string(),
+            ));
+        }
+        let model_dim = self.model.dim() as u64;
+        if request.dims.is_some_and(|dims| dims != model_dim) {
+            return Err(TurbopufferError::Other(format!(
+                "Lattice artifact has {model_dim} dimensions, but {} were requested",
+                request.dims.expect("checked Some")
+            )));
+        }
+        if texts.is_empty() {
+            return Ok(EmbeddingBatch {
+                vectors: Vec::new(),
+                performance: json!({}),
+                billing: None,
+            });
+        }
+
+        let mut unique = Vec::<String>::new();
+        let mut positions = HashMap::<String, usize>::new();
+        let mut requested = Vec::with_capacity(texts.len());
+        for text in texts {
+            let id = content_id(text);
+            let position = if let Some(position) = positions.get(&id) {
+                *position
+            } else {
+                let position = unique.len();
+                positions.insert(id, position);
+                unique.push(text.clone());
+                position
+            };
+            requested.push(position);
+        }
+
+        let model = Arc::clone(&self.model);
+        let tokenizer = Arc::clone(&self.tokenizer);
+        let started = Instant::now();
+        let (unique_vectors, token_count) = tokio::task::spawn_blocking(move || {
+            let token_ids = tokenizer.encode_batch(unique).map_err(|error| {
+                TurbopufferError::Other(format!("Lattice tokenization failed: {error}"))
+            })?;
+            let token_count = token_ids.iter().map(Vec::len).sum::<usize>();
+            let mut scratch = model.scratch();
+            let mut vectors = Vec::with_capacity(token_ids.len());
+            for ids in token_ids {
+                let mut vector = vec![0.0_f32; model.dim()];
+                model
+                    .embed(&ids, &mut vector, &mut scratch)
+                    .map_err(|error| {
+                        TurbopufferError::Other(format!("Lattice embedding failed: {error}"))
+                    })?;
+                lattice::kernel::l2_normalize(&mut vector);
+                vectors.push(vector.into_iter().map(f64::from).collect::<Vec<_>>());
+            }
+            Ok::<_, TurbopufferError>((vectors, token_count))
+        })
+        .await
+        .map_err(|error| TurbopufferError::Other(format!("Lattice worker failed: {error}")))??;
+        let vectors = requested
+            .into_iter()
+            .map(|position| unique_vectors[position].clone())
+            .collect();
+
+        Ok(EmbeddingBatch {
+            vectors,
+            performance: json!({
+                "embedding_tokens": token_count,
+                "embedding_ms": started.elapsed().as_secs_f64() * 1000.0,
+            }),
+            billing: None,
+        })
+    }
 }
 
 impl TurbopufferEmbeddingProvider {
@@ -253,6 +388,57 @@ fn merge_billing(left: Option<&Value>, right: Option<&Value>) -> Option<Value> {
 mod tests {
     use super::*;
 
+    fn write_lattice_fixture(directory: &Path) {
+        use safetensors::tensor::{serialize_to_file, Dtype, TensorView};
+        use tokenizers::models::wordpiece::WordPiece;
+        use tokenizers::normalizers::bert::BertNormalizer;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+        use tokenizers::Tokenizer;
+
+        std::fs::create_dir_all(directory).unwrap();
+        let weights = [
+            [0.0_f32, 0.0, 0.0, 0.0],
+            [1.0_f32, 0.0, 0.0, 0.0],
+            [0.0_f32, 1.0, 0.0, 0.0],
+            [0.0_f32, 0.0, 1.0, 0.0],
+        ];
+        let weight_bytes = weights
+            .into_iter()
+            .flatten()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let weight = TensorView::new(Dtype::F32, vec![4, 4], &weight_bytes).unwrap();
+        let metadata = HashMap::from([
+            ("lattice_variant".to_string(), "fp32".to_string()),
+            ("bits".to_string(), "32".to_string()),
+            ("axis".to_string(), "none".to_string()),
+            ("dim".to_string(), "4".to_string()),
+            ("vocab_size".to_string(), "4".to_string()),
+        ]);
+        serialize_to_file(
+            [("weight", weight)],
+            Some(metadata),
+            &directory.join("model.safetensors"),
+        )
+        .unwrap();
+
+        let vocab = [
+            ("[UNK]".to_string(), 0),
+            ("hello".to_string(), 1),
+            ("world".to_string(), 2),
+            ("static".to_string(), 3),
+        ];
+        let wordpiece = WordPiece::builder().vocab(vocab).build().unwrap();
+        let mut tokenizer = Tokenizer::new(wordpiece);
+        tokenizer
+            .with_normalizer(Some(BertNormalizer::default()))
+            .unwrap();
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer
+            .save(directory.join("tokenizer.json"), false)
+            .unwrap();
+    }
+
     #[test]
     fn provider_namespaces_are_stable_and_profile_specific() {
         let request = |dims, revision, modality| EmbeddingRequest {
@@ -293,5 +479,38 @@ mod tests {
                 "billable_logical_bytes_queried": 3,
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn lattice_embeds_real_text_normalizes_and_deduplicates() {
+        let directory = std::env::temp_dir().join(format!(
+            "hevlayer-lattice-provider-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        write_lattice_fixture(&directory);
+        let provider = LatticeEmbeddingProvider::load(&directory.join("model.safetensors"))
+            .expect("load fixture");
+        let batch = provider
+            .embed(
+                &EmbeddingRequest {
+                    model: LatticeEmbeddingProvider::MODEL,
+                    dims: Some(4),
+                    revision: None,
+                    modality: EmbeddingModality::Text,
+                },
+                &["hello world".to_string(), "hello world".to_string()],
+            )
+            .await
+            .expect("embed fixture text");
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(batch.vectors.len(), 2);
+        assert_eq!(batch.vectors[0], batch.vectors[1]);
+        let expected = 1.0_f64 / 2.0_f64.sqrt();
+        assert!((batch.vectors[0][0] - expected).abs() < 1e-6);
+        assert!((batch.vectors[0][1] - expected).abs() < 1e-6);
+        assert_eq!(&batch.vectors[0][2..], &[0.0, 0.0]);
+        assert_eq!(batch.performance["embedding_tokens"], 2);
+        assert!(batch.billing.is_none());
     }
 }

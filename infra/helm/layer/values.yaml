@@ -17,6 +17,17 @@ gateway:
   image: ""  # required — customer pull path: hevlayer/layer-gateway-pro:<version>
   port: 8080
   replicas: 1
+  # Optional in-process Lattice embedding artifact. When enabled, an init
+  # container copies the two pinned files from S3 into an ephemeral volume and
+  # verifies both checksums before the gateway starts.
+  lattice:
+    enabled: false
+    modelPath: /var/lib/hevlayer/lattice/model.safetensors
+    artifact:
+      image: amazon/aws-cli:2.27.49@sha256:1b7003e3ecb737b7533d8e16a547b4bc36e912508c3532ae51003aad8d0cd41d
+      s3Uri: ""
+      modelSha256: ""
+      tokenizerSha256: ""
   drain:
     markerPath: /tmp/layer-gateway-draining
     preStopSleepSeconds: 20

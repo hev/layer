@@ -1129,7 +1129,7 @@ paths:
       summary: Query a namespace by vector, document id, or Layer rank expression
       description: |
         Query nearest neighbors in a namespace. The caller supplies either a raw `vector` or `nearest_to_id` (an array of document ids; the gateway looks up each document's vector from the Aerospike cache, falling back to the namespace's configured VectorStore on miss with a cache backfill, and averages the resolved vectors component-wise into a single centroid query vector). The gateway forwards the vector search to that store and may inject a consistency watermark filter while the upstream index is updating. Query bypasses the document cache for results; cache-status telemetry is absent for this endpoint.
-        Two Layer-only `rank_by` spellings are intercepted ahead of passthrough. `["field", "HybridText", "input", {options}?]` runs hybrid text fusion: the gateway tokenizes the input (alyze, the `word_v4` tokenizer), expands one BM25 leg plus one fuzzy leg per token, and fuses them with RRF; the response carries a `hybrid` echo block. With `include_leg_breakdown: true`, fused rows also carry `$fused.legs` entries naming the BM25, fuzzy-token, and semantic legs that ranked the row. `["field", "Auto", "input", {route?, vector?}?]` runs the query router: the route (`hybrid_text`, `semantic`, or `fused`) is chosen from the token count alone, and a vectorless request routed `semantic`/`fused` returns a deferral (`routing` block with `executed: false`, empty `rows`) so the application can embed and re-issue with the route forced. All other bodies — including native multi-query + `rerank_by` — pass through unchanged.
+        Two Layer-only `rank_by` spellings are intercepted ahead of passthrough. `["field", "HybridText", "input", {options}?]` runs hybrid text fusion: the gateway tokenizes the input (alyze, the `word_v4` tokenizer), expands one BM25 leg plus one fuzzy leg per token, and fuses them with RRF; the response carries a `hybrid` echo block. With `include_leg_breakdown: true`, fused rows also carry `$fused.legs` entries naming the BM25, fuzzy-token, and semantic legs that ranked the row. `["field", "Auto", "input", {route?, vector?}?]` runs the query router: the route (`hybrid_text`, `semantic`, or `fused`) is chosen from the token count alone. `vector` accepts a number array or an inline `["Embed", input, {field?, model?}?]`; `field` independently selects the embedding profile and vector target and defaults to the Auto lexical field. Inline embedding is resolved only after the selected route needs a vector. A request without either form routed `semantic`/`fused` returns a deferral (`routing` block with `executed: false`, empty `rows`). All other bodies — including native multi-query + `rerank_by` — pass through unchanged.
         The `vector` column is never returned in `attributes`; if a caller lists `vector` in `include_attributes`, the gateway strips it and sets `x-layer-warning: vector_attribute_dropped` on the response.
       tags:
       - namespaces
@@ -1973,12 +1973,13 @@ components:
         The first row write establishing an embedded schema requires `distance_metric`.
         `serving.prefer: native` is consumed by Layer and the tpuf-compatible fields
         are forwarded on a Turbopuffer store. `autoscaler` and native-on-search are
-        resolved through a configured Turbopuffer embedding provider. `serving.prefer`
-        accepts exactly `native` or `autoscaler`; there is no fallback between them.
-        The autoscaler path accepts supported Hugging Face checkpoints, including
-        finetuned models, and sends only concrete vectors to the active store. The
-        Layer-only revision, instruction, modality, and chunking fields require that
-        provider leg and are never forwarded upstream.
+        resolved through a configured Turbopuffer embedding provider. `lattice` is
+        resolved in-process using the configured `erikkaum/lattice-retrieval` artifact.
+        `serving.prefer` accepts exactly `native`, `autoscaler`, or `lattice`; there
+        is no fallback between them. The autoscaler path accepts supported Hugging
+        Face checkpoints, including finetuned models, and sends only concrete vectors
+        to the active store. The Layer-only revision, instruction, modality, and chunking
+        fields require that provider leg and are never forwarded upstream.
 
         '
     TurbopufferBranchFromRequest:
@@ -3168,6 +3169,14 @@ components:
         rank_by:
           type: array
           items: {}
+          examples:
+          - - title
+            - Auto
+            - how plants turn sunlight into food
+            - vector:
+              - Embed
+              - how plants turn sunlight into food
+              - field: text
           description: 'Rank expression tuple. With `top_k`, Layer handles the portable
             subset with cache, history, and stable-read behavior; native upstream
             `rank_by` bodies that omit `top_k` pass through unchanged. For search-store
@@ -3176,10 +3185,14 @@ components:
             "HybridText", "input", {fuzziness?, rank_constant?, per_leg_limit?, threads?}?]`
             (hybrid text fusion, RFC 0022; `threads` is the same scatter/gather fan-out
             control as scans, defaulting from `Index.spec.scan.threads`) and `["field",
-            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). `["Embed",
-            "text"]` / `["Embed", "text", {model}]` is validated and transparently
-            forwarded on the native Turbopuffer leg. Autoscaler and native-on-search
-            requests are resolved to a concrete ANN vector in the gateway (`docs/api/embed.mdx`).
+            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). Auto `vector`
+            accepts a number array or `["Embed", input, {field?, model?}?]`; `field`
+            defaults to the Auto lexical field and may instead select a different
+            source attribute or derived vector target. Layer resolves the inline expression
+            only when the selected route is `semantic` or `fused`. `["Embed", "text"]`
+            / `["Embed", "text", {model}]` is validated and transparently forwarded
+            on the native Turbopuffer leg. Autoscaler and native-on-search requests
+            are resolved to a concrete ANN vector in the gateway (`docs/api/embed.mdx`).
             Source attributes infer their schema model; derived `embed_<attr>` targets
             require the explicit model. When `rank_by` is present, `vector` and `nearest_to_id`
             must be absent.
@@ -3404,7 +3417,8 @@ components:
         executed:
           type: boolean
           description: "`false` on a deferral — the route needs a vector the request
-            did not supply. `rows` is empty; embed and re-issue with the route forced.\n"
+            supplied neither numerically nor as an inline `Embed`. `rows` is empty;
+            embed and re-issue with the route forced.\n"
     QueryResponse:
       type: object
       additionalProperties: true

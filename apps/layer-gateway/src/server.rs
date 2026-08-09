@@ -173,6 +173,14 @@ pub async fn run_with_options(options: ServerOptions) {
         Arc::new(crate::embedding::TurbopufferEmbeddingProvider::new(client))
             as Arc<dyn crate::embedding::EmbeddingProvider>
     });
+    let lattice_embedding_provider = config.lattice_model_path.as_deref().map(|path| {
+        let provider =
+            crate::embedding::LatticeEmbeddingProvider::load(path).unwrap_or_else(|error| {
+                panic!("failed to configure Lattice embedding provider: {error}")
+            });
+        info!(model = %path.display(), "Lattice embedding provider initialized");
+        Arc::new(provider) as Arc<dyn crate::embedding::EmbeddingProvider>
+    });
 
     let aerospike_runtime = Arc::new(AerospikeRuntime::new(None));
     metrics.set_aerospike_connection_state(false);
@@ -228,6 +236,7 @@ pub async fn run_with_options(options: ServerOptions) {
         telemetry: Arc::clone(&telemetry_counters),
         turbopuffer: turbopuffer.clone(),
         embedding_provider,
+        lattice_embedding_provider,
         embedding_cache: Arc::new(DashMap::new()),
         embedding_cache_ttl: std::time::Duration::from_millis(config.embedding_cache_ttl_ms),
         wire_embedding_profiles: Arc::new(DashMap::new()),

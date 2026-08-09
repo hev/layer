@@ -1,8 +1,8 @@
 //! Validation and routing for Turbopuffer-compatible native embeddings.
 //!
-//! Native requests remain transparent on Turbopuffer stores. Autoscaler
-//! requests (and native requests targeting hev search) are resolved through
-//! the gateway's Turbopuffer-native provider and lowered to concrete vectors,
+//! Native requests remain transparent on Turbopuffer stores. Autoscaler and
+//! Lattice requests (plus native requests targeting hev search) are resolved
+//! through their selected gateway provider and lowered to concrete vectors,
 //! so Layer-only serving policy and `embed` / `Embed` are never forwarded.
 
 use std::sync::Arc;
@@ -23,6 +23,7 @@ const PROFILE_PREFIX: &str = "embedding-profiles";
 pub(crate) enum ServingPreference {
     Native,
     Autoscaler,
+    Lattice,
 }
 
 impl ServingPreference {
@@ -30,7 +31,12 @@ impl ServingPreference {
         match self {
             Self::Native => "native",
             Self::Autoscaler => "autoscaler",
+            Self::Lattice => "lattice",
         }
+    }
+
+    fn gateway_served(self, search_store: bool) -> bool {
+        self != Self::Native || search_store
     }
 }
 
@@ -112,6 +118,13 @@ pub(crate) struct QueryPreparation {
     pub performance: Value,
 }
 
+#[derive(Debug)]
+pub(crate) struct ResolvedQueryEmbed {
+    pub vector: Vec<f64>,
+    pub target: String,
+    pub performance: Value,
+}
+
 /// Validate schema-attribute embedding, persist Layer-served profiles, and
 /// lower any row writes to concrete vectors.
 pub(crate) async fn prepare_write(
@@ -156,7 +169,7 @@ pub(crate) async fn prepare_write(
             if let Some(previous) = previous.as_ref() {
                 parsed.materialized = previous.materialized;
             }
-            let gateway_served = parsed.serving == ServingPreference::Autoscaler || search_store;
+            let gateway_served = parsed.serving.gateway_served(search_store);
             if gateway_served {
                 if previous.as_ref().is_some_and(|previous| {
                     previous.source == parsed.source
@@ -186,7 +199,7 @@ pub(crate) async fn prepare_write(
                 consume_serving(embed);
             }
             if parsed.has_extensions() {
-                if parsed.serving == ServingPreference::Native {
+                if parsed.serving != ServingPreference::Autoscaler {
                     return Err(AppError::Validation(format!(
                         "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `autoscaler`"
                     )));
@@ -218,7 +231,7 @@ pub(crate) async fn prepare_write(
 
     let gateway_profiles = profiles
         .iter()
-        .filter(|profile| profile.serving == ServingPreference::Autoscaler || search_store)
+        .filter(|profile| profile.serving.gateway_served(search_store))
         .collect::<Vec<_>>();
 
     reject_source_patches(body, &gateway_profiles)?;
@@ -248,7 +261,7 @@ pub(crate) async fn prepare_write(
     }
     if search_store && gateway_profiles.len() > 1 {
         return Err(AppError::Validation(
-            "hev search currently supports one autoscaler-served embedding attribute per namespace"
+            "hev search currently supports one gateway-served embedding attribute per namespace"
                 .to_string(),
         ));
     }
@@ -258,7 +271,7 @@ pub(crate) async fn prepare_write(
         && gateway_profiles.len() > 1
     {
         return Err(AppError::Validation(
-            "chunked embedding currently supports one autoscaler-served embedding attribute per namespace"
+            "chunked embedding currently supports one gateway-served embedding attribute per namespace"
                 .to_string(),
         ));
     }
@@ -287,15 +300,14 @@ pub(crate) async fn prepare_write(
     }
 
     let requires_distance_check = native_embed_schema
-        || profiles.iter().any(|profile| {
-            (profile.serving == ServingPreference::Autoscaler || search_store)
-                && !profile.materialized
-        });
-    let materialized_changed = profiles.iter().any(|profile| {
-        (profile.serving == ServingPreference::Autoscaler || search_store) && !profile.materialized
-    });
+        || profiles
+            .iter()
+            .any(|profile| profile.serving.gateway_served(search_store) && !profile.materialized);
+    let materialized_changed = profiles
+        .iter()
+        .any(|profile| profile.serving.gateway_served(search_store) && !profile.materialized);
     for profile in &mut profiles {
-        if profile.serving == ServingPreference::Autoscaler || search_store {
+        if profile.serving.gateway_served(search_store) {
             profile.materialized = true;
         }
     }
@@ -372,6 +384,7 @@ pub(crate) async fn prepare_query(
             search_store,
             &profiles,
             &mut preparation,
+            false,
         )
         .await?;
     }
@@ -385,6 +398,7 @@ pub(crate) async fn prepare_query(
                     search_store,
                     &profiles,
                     &mut preparation,
+                    false,
                 )
                 .await?;
             }
@@ -421,6 +435,7 @@ async fn prepare_rank_by(
     search_store: bool,
     profiles: &[EmbeddingProfile],
     preparation: &mut QueryPreparation,
+    force_gateway: bool,
 ) -> Result<(), AppError> {
     let Some(rank_by) = rank_by.as_array_mut() else {
         return Ok(());
@@ -443,10 +458,32 @@ async fn prepare_rank_by(
     if let Some(model) = explicit_model {
         validate_model(model)?;
     }
-    let declared = profiles
+    let mut declared = profiles
         .iter()
-        .find(|profile| profile.source == target || profile.target == target);
-    if let Some(profile) = declared {
+        .find(|profile| profile.source == target || profile.target == target)
+        .cloned();
+    if force_gateway && declared.is_none() {
+        declared = state
+            .turbopuffer()
+            .head_namespace(namespace)
+            .await
+            .ok()
+            .and_then(|metadata| metadata_embed_profile(&metadata.raw, target))
+            .map(|(source, target, model)| EmbeddingProfile {
+                source,
+                target,
+                model,
+                dims: None,
+                serving: ServingPreference::Native,
+                revision: None,
+                instructions: EmbeddingInstructions::default(),
+                modality: EmbeddingModality::Text,
+                chunk: None,
+                layer_extensions: false,
+                materialized: true,
+            });
+    }
+    if let Some(profile) = declared.as_ref() {
         state.metrics.remember_embed_model(
             namespace,
             &profile.source,
@@ -467,10 +504,11 @@ async fn prepare_rank_by(
     }
 
     let serving = declared
+        .as_ref()
         .map(|profile| profile.serving)
         .unwrap_or(ServingPreference::Native);
-    let gateway_served = serving == ServingPreference::Autoscaler || search_store;
-    if !gateway_served {
+    let gateway_served = serving.gateway_served(search_store);
+    if !gateway_served && !force_gateway {
         let resolved = explicit_model
             .map(|model| {
                 (
@@ -480,7 +518,7 @@ async fn prepare_rank_by(
                 )
             })
             .or_else(|| {
-                declared.map(|profile| {
+                declared.as_ref().map(|profile| {
                     (
                         profile.source.clone(),
                         profile.target.clone(),
@@ -512,7 +550,7 @@ async fn prepare_rank_by(
     }
     let model = explicit_model
         .map(str::to_string)
-        .or_else(|| declared.map(|profile| profile.model.clone()))
+        .or_else(|| declared.as_ref().map(|profile| profile.model.clone()))
         .ok_or_else(|| {
             AppError::Validation(
                 "a model name must be provided when Layer resolves `Embed`".to_string(),
@@ -520,19 +558,43 @@ async fn prepare_rank_by(
         })?;
     let text = embed[1].as_str().expect("validated string").to_string();
     let profile = EmbeddingProfile {
-        source: target.to_string(),
-        target: target.to_string(),
+        source: declared
+            .as_ref()
+            .map(|profile| profile.source.clone())
+            .unwrap_or_else(|| target.to_string()),
+        target: declared
+            .as_ref()
+            .map(|profile| profile.target.clone())
+            .unwrap_or_else(|| {
+                if search_store || target == "vector" {
+                    "vector".to_string()
+                } else if target.starts_with("embed_") {
+                    target.to_string()
+                } else {
+                    format!("embed_{target}")
+                }
+            }),
         model,
-        dims: declared.and_then(|profile| profile.dims),
+        dims: declared.as_ref().and_then(|profile| profile.dims),
         serving,
-        revision: declared.and_then(|profile| profile.revision.clone()),
+        revision: declared
+            .as_ref()
+            .and_then(|profile| profile.revision.clone()),
         instructions: declared
+            .as_ref()
             .map(|profile| profile.instructions.clone())
             .unwrap_or_default(),
-        modality: declared.map(|profile| profile.modality).unwrap_or_default(),
+        modality: declared
+            .as_ref()
+            .map(|profile| profile.modality)
+            .unwrap_or_default(),
         chunk: None,
-        layer_extensions: declared.is_some_and(|profile| profile.layer_extensions),
-        materialized: declared.is_some_and(|profile| profile.materialized),
+        layer_extensions: declared
+            .as_ref()
+            .is_some_and(|profile| profile.layer_extensions),
+        materialized: declared
+            .as_ref()
+            .is_some_and(|profile| profile.materialized),
     };
     let text = apply_instruction(profile.instructions.query.as_deref(), &text);
     let vectors = resolve_vectors(
@@ -547,11 +609,57 @@ async fn prepare_rank_by(
     rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
     if search_store {
         rank_by[0] = Value::String("vector".to_string());
-    } else if let Some(profile) = declared {
+    } else {
         rank_by[0] = Value::String(profile.target.clone());
     }
     preparation.passthrough = false;
     Ok(())
+}
+
+/// Resolve an inline `Embed` selected by the Auto router. This entry point is
+/// intentionally called only after routing chooses a vector-needing route;
+/// unlike transparent native query passthrough, Auto must obtain a concrete
+/// vector before it can expand the semantic/fused leg while preserving the
+/// original routing decision.
+pub(crate) async fn resolve_auto_embed(
+    state: &AppState,
+    namespace: &str,
+    field: &str,
+    embed: Value,
+    search_store: bool,
+) -> Result<ResolvedQueryEmbed, AppError> {
+    let profiles = load_profiles(state, namespace).await?;
+    let mut preparation = QueryPreparation {
+        passthrough: true,
+        performance: json!({}),
+        ..QueryPreparation::default()
+    };
+    let mut rank_by = json!([field, "ANN", embed]);
+    prepare_rank_by(
+        state,
+        namespace,
+        &mut rank_by,
+        search_store,
+        &profiles,
+        &mut preparation,
+        true,
+    )
+    .await?;
+    let tuple = rank_by.as_array().expect("rank_by remains a tuple");
+    let target = tuple[0]
+        .as_str()
+        .expect("resolved rank target remains a string")
+        .to_string();
+    let vector = serde_json::from_value(tuple[2].clone()).map_err(|error| {
+        AppError::Upstream(format!(
+            "inline Auto `Embed` did not resolve to a vector: {error}"
+        ))
+    })?;
+    Ok(ResolvedQueryEmbed {
+        vector,
+        target,
+        performance: preparation.performance,
+    })
 }
 
 fn metadata_embed_profile(metadata: &Value, source: &str) -> Option<(String, String, String)> {
@@ -722,12 +830,13 @@ fn parse_serving_preference(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "schema attribute `{attribute}` `embed.serving` requires `prefer: native` or `prefer: autoscaler`"
+                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: autoscaler`, or `prefer: lattice`"
             ))
         })?;
     match prefer {
         "native" => Ok(ServingPreference::Native),
         "autoscaler" => Ok(ServingPreference::Autoscaler),
+        "lattice" => Ok(ServingPreference::Lattice),
         _ => Err(AppError::Validation(format!(
             "schema attribute `{attribute}` has unsupported `embed.serving.prefer` value `{prefer}`"
         ))),
@@ -1365,7 +1474,15 @@ async fn resolve_vectors(
     let mut miss_keys = Vec::new();
     let keys = texts
         .iter()
-        .map(|text| cache_key(&provider_model, profile.dims, modality, text))
+        .map(|text| {
+            cache_key(
+                profile.serving,
+                &provider_model,
+                profile.dims,
+                modality,
+                text,
+            )
+        })
         .collect::<Vec<_>>();
     for (position, key) in keys.iter().enumerate() {
         if let Some(cached) = state.embedding_cache.get(key) {
@@ -1381,12 +1498,23 @@ async fn resolve_vectors(
     }
 
     if !misses.is_empty() {
-        let provider = state.embedding_provider.as_ref().ok_or_else(|| {
-            AppError::ServiceUnavailable(
-                "Layer-served embedding requires a configured kind=turbopuffer VectorStore credential"
-                    .to_string(),
-            )
-        })?;
+        let provider = match profile.serving {
+            ServingPreference::Lattice => state.lattice_embedding_provider.as_ref().ok_or_else(|| {
+                AppError::ServiceUnavailable(
+                    "Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
+                        .to_string(),
+                )
+            })?,
+            ServingPreference::Native | ServingPreference::Autoscaler => state
+                .embedding_provider
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::ServiceUnavailable(
+                        "Layer-served embedding requires a configured kind=turbopuffer VectorStore credential"
+                            .to_string(),
+                    )
+                })?,
+        };
         let batch = provider
             .embed(&request, &misses)
             .await
@@ -1427,8 +1555,16 @@ async fn resolve_vectors(
         .collect()
 }
 
-fn cache_key(model: &str, dims: Option<u64>, modality: EmbeddingModality, text: &str) -> String {
+fn cache_key(
+    serving: ServingPreference,
+    model: &str,
+    dims: Option<u64>,
+    modality: EmbeddingModality,
+    text: &str,
+) -> String {
     let mut hash = Sha256::new();
+    hash.update(serving.label().as_bytes());
+    hash.update([0]);
     hash.update(model.as_bytes());
     hash.update([0]);
     hash.update(dims.unwrap_or_default().to_le_bytes());
@@ -1551,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn serving_preference_accepts_only_native_or_autoscaler() {
+    fn serving_preference_accepts_native_autoscaler_or_lattice() {
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "native"})), "title").unwrap(),
             ServingPreference::Native
@@ -1560,7 +1696,15 @@ mod tests {
             parse_serving_preference(Some(&json!({"prefer": "autoscaler"})), "title").unwrap(),
             ServingPreference::Autoscaler
         );
+        assert_eq!(
+            parse_serving_preference(Some(&json!({"prefer": "lattice"})), "title").unwrap(),
+            ServingPreference::Lattice
+        );
         assert!(parse_serving_preference(Some(&json!({"prefer": "automatic"})), "title").is_err());
+        let missing = parse_serving_preference(Some(&json!({})), "title").unwrap_err();
+        let message = missing.to_string();
+        assert!(message.contains("prefer: lattice"));
+        assert!(!message.contains("prefer: blended"));
     }
 
     #[test]
@@ -1568,6 +1712,25 @@ mod tests {
         let embed = json!(["Embed", "query"]);
         validate_embed_expression(embed.as_array().unwrap()).unwrap();
         assert!("embed_title".starts_with("embed_"));
+    }
+
+    #[test]
+    fn embedding_cache_isolated_by_serving_leg() {
+        let autoscaler = cache_key(
+            ServingPreference::Autoscaler,
+            "erikkaum/lattice-retrieval",
+            Some(512),
+            EmbeddingModality::Text,
+            "hello",
+        );
+        let lattice = cache_key(
+            ServingPreference::Lattice,
+            "erikkaum/lattice-retrieval",
+            Some(512),
+            EmbeddingModality::Text,
+            "hello",
+        );
+        assert_ne!(autoscaler, lattice);
     }
 
     #[test]

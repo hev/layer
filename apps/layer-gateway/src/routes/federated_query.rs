@@ -19,7 +19,7 @@ use crate::routes::query::{
     LAYER_STABLE_AS_OF_HEADER,
 };
 use crate::routes::query_router::{
-    parse_auto_expr, route_for_tokens, routing_echo, run_hybrid, run_semantic, Route,
+    parse_auto_expr, route_for_tokens, routing_echo, run_hybrid, run_semantic, AutoVector, Route,
 };
 use crate::AppState;
 
@@ -645,6 +645,28 @@ async fn run_namespace_auto(
     }
 
     let routing = routing_echo(route, forced, token_count, true);
+    let resolved_vector = if route.needs_vector() {
+        match expr
+            .vector
+            .as_ref()
+            .expect("vector-needing route checked source")
+        {
+            AutoVector::Numeric(vector) => Some((vector.clone(), "vector".to_string())),
+            AutoVector::Embed { field, expression } => {
+                let resolved = crate::routes::embed_wire::resolve_auto_embed(
+                    state,
+                    namespace,
+                    field,
+                    expression.clone(),
+                    state.namespace_uses_search_store(namespace),
+                )
+                .await?;
+                Some((resolved.vector, resolved.target))
+            }
+        }
+    } else {
+        None
+    };
     match route {
         Route::HybridText => {
             let (rows, hybrid, watermark, _) =
@@ -660,10 +682,12 @@ async fn run_namespace_auto(
             })
         }
         Route::Fused => {
-            let vector = expr.vector.clone().expect("fused route checked vector");
+            let (vector, target) = resolved_vector
+                .clone()
+                .expect("fused route checked vector source");
             let ann_leg = LegSpec {
                 label: "semantic".to_string(),
-                rank_by: json!(["vector", "ANN", vector]),
+                rank_by: json!([target, "ANN", vector]),
                 filter: request.filters.clone(),
             };
             let (rows, hybrid, watermark, _) =
@@ -679,9 +703,10 @@ async fn run_namespace_auto(
             })
         }
         Route::Semantic => {
-            let vector = expr.vector.clone().expect("semantic route checked vector");
+            let (vector, target) = resolved_vector.expect("semantic route checked vector source");
             let vector_dim = vector.len();
-            let (rows, _, watermark, _) = run_semantic(state, namespace, &request, vector).await?;
+            let (rows, _, watermark, _) =
+                run_semantic(state, namespace, &request, vector, target).await?;
             Ok(NamespaceOutput {
                 namespace: namespace.to_string(),
                 rows,

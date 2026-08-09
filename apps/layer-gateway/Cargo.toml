@@ -30,6 +30,7 @@ dashmap = "6"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+lattice = { git = "https://github.com/ErikKaum/lattice", rev = "fe4b29dbed7707f8be6f9e38fb6dbd71551dee2c" }
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1"
 prometheus = "0.14"
@@ -43,6 +44,8 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde_yaml = "0.9"
 ed25519-dalek = "3"
+safetensors = "0.7"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [[test]]
 name = "standalone_boot"
