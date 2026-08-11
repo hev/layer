@@ -28,6 +28,19 @@ gateway:
       s3Uri: ""
       modelSha256: ""
       tokenizerSha256: ""
+  # Optional in-process CLIP model directory. When enabled, an init container
+  # copies the four pinned Hugging Face artifacts from S3 into an ephemeral
+  # volume and verifies every checksum before the gateway starts.
+  localClip:
+    enabled: false
+    modelPath: /var/lib/hevlayer/clip
+    artifact:
+      image: amazon/aws-cli:2.27.49@sha256:1b7003e3ecb737b7533d8e16a547b4bc36e912508c3532ae51003aad8d0cd41d
+      s3Uri: ""
+      modelSha256: ""
+      tokenizerSha256: ""
+      configSha256: ""
+      preprocessorSha256: ""
   drain:
     markerPath: /tmp/layer-gateway-draining
     preStopSleepSeconds: 20

@@ -38,8 +38,9 @@ spec:
         {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
-      {{- if .Values.gateway.lattice.enabled }}
+      {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled }}
       initContainers:
+        {{- if .Values.gateway.lattice.enabled }}
         - name: lattice-model
           image: {{ required "gateway.lattice.artifact.image is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.image | quote }}
           command:
@@ -56,6 +57,29 @@ spec:
           volumeMounts:
             - name: lattice-model
               mountPath: /var/lib/hevlayer/lattice
+        {{- end }}
+        {{- if .Values.gateway.localClip.enabled }}
+        - name: local-clip-model
+          image: {{ required "gateway.localClip.artifact.image is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              artifact_dir=/var/lib/hevlayer/clip
+              artifact_uri={{ required "gateway.localClip.artifact.s3Uri is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.s3Uri | quote }}
+              for file in model.safetensors tokenizer.json config.json preprocessor_config.json; do
+                aws s3 cp "$artifact_uri/$file" "$artifact_dir/$file" --only-show-errors
+              done
+              echo "{{ required "gateway.localClip.artifact.modelSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.modelSha256 }}  $artifact_dir/model.safetensors" | sha256sum -c -
+              echo "{{ required "gateway.localClip.artifact.tokenizerSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.tokenizerSha256 }}  $artifact_dir/tokenizer.json" | sha256sum -c -
+              echo "{{ required "gateway.localClip.artifact.configSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.configSha256 }}  $artifact_dir/config.json" | sha256sum -c -
+              echo "{{ required "gateway.localClip.artifact.preprocessorSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.preprocessorSha256 }}  $artifact_dir/preprocessor_config.json" | sha256sum -c -
+          volumeMounts:
+            - name: local-clip-model
+              mountPath: /var/lib/hevlayer/clip
+        {{- end }}
       {{- end }}
       containers:
         {{- if .Values.gateway.queue.embedded }}
@@ -182,6 +206,10 @@ spec:
             - name: LAYER_LATTICE_MODEL_PATH
               value: {{ .Values.gateway.lattice.modelPath | quote }}
             {{- end }}
+            {{- if .Values.gateway.localClip.enabled }}
+            - name: LAYER_LOCAL_CLIP_MODEL_PATH
+              value: {{ .Values.gateway.localClip.modelPath | quote }}
+            {{- end }}
             - name: LAYER_KEY_PEPPER
               valueFrom:
                 secretKeyRef:
@@ -219,11 +247,18 @@ spec:
               value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
               {{- end }}
             {{- end }}
-          {{- if .Values.gateway.lattice.enabled }}
+          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled }}
           volumeMounts:
+            {{- if .Values.gateway.lattice.enabled }}
             - name: lattice-model
               mountPath: /var/lib/hevlayer/lattice
               readOnly: true
+            {{- end }}
+            {{- if .Values.gateway.localClip.enabled }}
+            - name: local-clip-model
+              mountPath: /var/lib/hevlayer/clip
+              readOnly: true
+            {{- end }}
           {{- end }}
           lifecycle:
             preStop:
@@ -248,6 +283,11 @@ spec:
         {{- if .Values.gateway.lattice.enabled }}
         - name: lattice-model
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.gateway.localClip.enabled }}
+        - name: local-clip-model
+          emptyDir:
+            sizeLimit: 1Gi
         {{- end }}
         {{- if .Values.gateway.queue.embedded }}
         - name: gateway-internal-config
