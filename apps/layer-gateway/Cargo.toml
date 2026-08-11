@@ -44,7 +44,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde_yaml = "0.9"
 ed25519-dalek = "3"
-safetensors = "0.7"
+safetensors = "0.8"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [[test]]
