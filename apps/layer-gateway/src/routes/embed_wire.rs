@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::http::StatusCode;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures::future::try_join_all;
@@ -1576,16 +1577,16 @@ async fn resolve_vectors(
                     )
                 })?,
         };
-        let batch = if profile.serving == ServingPreference::Local
+        let local_clip_image = profile.serving == ServingPreference::Local
             && is_clip_model(&profile.model)
-            && modality == EmbeddingModality::Image
-        {
+            && modality == EmbeddingModality::Image;
+        let batch = if local_clip_image {
             let images = resolve_image_inputs(namespace, &misses).await?;
             provider.embed_images(&request, &images).await
         } else {
             provider.embed(&request, &misses).await
         }
-        .map_err(|error| AppError::Upstream(format!("embedding provider failed: {error}")))?;
+        .map_err(|error| map_embedding_provider_error(local_clip_image, error))?;
         if batch.vectors.len() != misses.len() {
             return Err(AppError::Upstream(format!(
                 "embedding provider returned {} vectors for {} inputs",
@@ -1620,6 +1621,24 @@ async fn resolve_vectors(
                 .ok_or_else(|| AppError::Upstream("embedding cache resolution failed".to_string()))
         })
         .collect()
+}
+
+fn map_embedding_provider_error(
+    local_clip_image: bool,
+    error: crate::clients::turbopuffer::TurbopufferError,
+) -> AppError {
+    if local_clip_image
+        && matches!(
+            &error,
+            crate::clients::turbopuffer::TurbopufferError::Other(message)
+                if message.starts_with("failed to decode CLIP image:")
+                    || message == "CLIP image has zero width or height"
+        )
+    {
+        AppError::Validation(format!("embedding provider rejected image input: {error}"))
+    } else {
+        AppError::Upstream(format!("embedding provider failed: {error}"))
+    }
 }
 
 fn cache_key(
@@ -1689,21 +1708,41 @@ async fn resolve_image_input(
     input: &str,
 ) -> Result<Vec<u8>, AppError> {
     if input.starts_with("http://") || input.starts_with("https://") {
-        let response = client
-            .get(input)
-            .send()
-            .await
-            .map_err(|error| {
-                AppError::Validation(format!(
-                    "namespace `{namespace}` could not fetch embedding image URL: {error}"
-                ))
-            })?
-            .error_for_status()
-            .map_err(|error| {
-                AppError::Validation(format!(
-                    "namespace `{namespace}` embedding image URL failed: {error}"
-                ))
-            })?;
+        let response = client.get(input).send().await.map_err(|error| {
+            let message =
+                format!("namespace `{namespace}` could not fetch embedding image URL: {error}");
+            if error.is_builder() {
+                AppError::Validation(message)
+            } else if error.is_timeout() {
+                AppError::GatewayTimeout(message)
+            } else {
+                AppError::Upstream(message)
+            }
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            return Err(AppError::RetryableUpstream {
+                status: if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                message: format!(
+                    "namespace `{namespace}` embedding image URL returned upstream status {status}"
+                ),
+                retry_after,
+            });
+        }
+        let response = response.error_for_status().map_err(|error| {
+            AppError::Validation(format!(
+                "namespace `{namespace}` embedding image URL failed: {error}"
+            ))
+        })?;
         if response
             .content_length()
             .is_some_and(|length| length > MAX_LOCAL_IMAGE_BYTES as u64)
@@ -1721,7 +1760,7 @@ async fn resolve_image_input(
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
-                AppError::Validation(format!(
+                AppError::Upstream(format!(
                     "namespace `{namespace}` could not read embedding image URL: {error}"
                 ))
             })?;
@@ -1915,6 +1954,17 @@ mod tests {
             "local:clip:fp32"
         );
         assert_ne!(autoscaler, local);
+    }
+
+    #[test]
+    fn local_clip_decode_failure_is_validation_error() {
+        let error = map_embedding_provider_error(
+            true,
+            crate::clients::turbopuffer::TurbopufferError::Other(
+                "failed to decode CLIP image: unsupported format".to_string(),
+            ),
+        );
+        assert!(matches!(error, AppError::Validation(_)));
     }
 
     #[test]

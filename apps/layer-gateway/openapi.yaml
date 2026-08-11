@@ -910,8 +910,32 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+        '429':
+          description: The upstream host serving a local CLIP image URL rate-limited
+            the fetch
+          headers:
+            Retry-After:
+              description: Retry delay or date supplied by the image host, when present.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
         '502':
-          description: Turbopuffer write failed
+          description: Turbopuffer write or local CLIP image fetch failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: The upstream host serving a local CLIP image URL returned a
+            server error
+          headers:
+            Retry-After:
+              description: Retry delay or date supplied by the image host, when present.
+              schema:
+                type: string
           content:
             application/json:
               schema:

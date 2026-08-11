@@ -15,6 +15,13 @@ pub enum AppError {
     #[error("Upstream error: {0}")]
     Upstream(String),
 
+    #[error("Retryable upstream error: {message}")]
+    RetryableUpstream {
+        status: StatusCode,
+        message: String,
+        retry_after: Option<String>,
+    },
+
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
@@ -152,12 +159,30 @@ impl IntoResponse for AppError {
             return response;
         }
 
+        let retry_after = match &self {
+            AppError::RetryableUpstream { retry_after, .. } => retry_after.as_deref(),
+            _ => None,
+        };
         let (status, error_type, message, store, route, cache_state) = match &self {
             AppError::UpstreamResponse { .. } => unreachable!("handled above"),
             AppError::Upstream(msg) => (
                 StatusCode::BAD_GATEWAY,
                 "upstream_error",
                 msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::RetryableUpstream {
+                status, message, ..
+            } => (
+                *status,
+                if *status == StatusCode::TOO_MANY_REQUESTS {
+                    "upstream_error"
+                } else {
+                    "service_unavailable"
+                },
+                message.clone(),
                 None,
                 None,
                 None,
@@ -256,6 +281,12 @@ impl IntoResponse for AppError {
             cache_state,
         };
 
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(retry_after) = retry_after.and_then(|value| HeaderValue::from_str(value).ok()) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after);
+        }
+        response
     }
 }
