@@ -72,6 +72,7 @@ pub struct AppState {
     pub turbopuffer: Option<Arc<dyn TurbopufferClient>>,
     pub embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     pub lattice_embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
+    pub local_clip_embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     pub embedding_cache: Arc<embedding::EmbeddingCache>,
     pub embedding_cache_ttl: std::time::Duration,
     pub wire_embedding_profiles:

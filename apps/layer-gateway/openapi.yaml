@@ -1973,13 +1973,16 @@ components:
         The first row write establishing an embedded schema requires `distance_metric`.
         `serving.prefer: native` is consumed by Layer and the tpuf-compatible fields
         are forwarded on a Turbopuffer store. `autoscaler` and native-on-search are
-        resolved through a configured Turbopuffer embedding provider. `lattice` is
-        resolved in-process using the configured `erikkaum/lattice-retrieval` artifact.
-        `serving.prefer` accepts exactly `native`, `autoscaler`, or `lattice`; there
-        is no fallback between them. The autoscaler path accepts supported Hugging
-        Face checkpoints, including finetuned models, and sends only concrete vectors
-        to the active store. The Layer-only revision, instruction, modality, and chunking
-        fields require that provider leg and are never forwarded upstream.
+        resolved through a configured Turbopuffer embedding provider. `local` is resolved
+        in-process by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
+        while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`; `lattice` remains
+        an alias for `local`. `serving.prefer` accepts exactly `native`, `autoscaler`,
+        `local`, or the `lattice` alias; there is no fallback between them. The autoscaler
+        path accepts supported Hugging Face checkpoints, including finetuned models,
+        and sends only concrete vectors to the active store. The Layer-only revision,
+        instruction, modality, and chunking fields are never forwarded upstream; local
+        CLIP supports image modality while the remaining extensions require the autoscaler
+        leg.
 
         '
     TurbopufferBranchFromRequest:

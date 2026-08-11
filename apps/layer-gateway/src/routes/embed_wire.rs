@@ -8,11 +8,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use futures::future::try_join_all;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::embedding::{EmbeddingModality, EmbeddingRequest};
+use crate::embedding::{is_clip_model, EmbeddingModality, EmbeddingRequest};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -23,7 +27,8 @@ const PROFILE_PREFIX: &str = "embedding-profiles";
 pub(crate) enum ServingPreference {
     Native,
     Autoscaler,
-    Lattice,
+    #[serde(alias = "lattice")]
+    Local,
 }
 
 impl ServingPreference {
@@ -31,7 +36,7 @@ impl ServingPreference {
         match self {
             Self::Native => "native",
             Self::Autoscaler => "autoscaler",
-            Self::Lattice => "lattice",
+            Self::Local => "local",
         }
     }
 
@@ -162,6 +167,22 @@ pub(crate) async fn prepare_write(
             }
             has_embed_schema = true;
             let mut parsed = validate_embed(&attribute, embed)?;
+            if parsed.serving == ServingPreference::Local {
+                if parsed.model == crate::embedding::LatticeEmbeddingProvider::MODEL
+                    && state.lattice_embedding_provider.is_none()
+                {
+                    return Err(AppError::Validation(
+                        "local Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
+                            .to_string(),
+                    ));
+                }
+                if is_clip_model(&parsed.model) && state.local_clip_embedding_provider.is_none() {
+                    return Err(AppError::Validation(
+                        "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
+                            .to_string(),
+                    ));
+                }
+            }
             let previous = profiles
                 .iter()
                 .find(|profile| profile.source == attribute)
@@ -199,12 +220,19 @@ pub(crate) async fn prepare_write(
                 consume_serving(embed);
             }
             if parsed.has_extensions() {
-                if parsed.serving != ServingPreference::Autoscaler {
+                let local_clip_image = parsed.serving == ServingPreference::Local
+                    && parsed.modality == EmbeddingModality::Image
+                    && parsed.revision.is_none()
+                    && parsed.instructions == EmbeddingInstructions::default()
+                    && parsed.chunk.is_none();
+                if parsed.serving != ServingPreference::Autoscaler && !local_clip_image {
                     return Err(AppError::Validation(format!(
-                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `autoscaler`"
+                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `autoscaler`, except CLIP image embeddings may use `local`"
                     )));
                 }
-                if state.embedding_provider.is_none() {
+                if parsed.serving == ServingPreference::Autoscaler
+                    && state.embedding_provider.is_none()
+                {
                     return Err(AppError::ServiceUnavailable(
                         "Layer embedding extensions require a configured production autoscaler inference provider"
                             .to_string(),
@@ -796,12 +824,26 @@ fn validate_embed_options(
             )));
         }
     }
+    let serving = parse_serving_preference(options.get("serving"), attribute)?;
+    if serving == ServingPreference::Local {
+        if model == crate::embedding::LatticeEmbeddingProvider::MODEL {
+            if modality != EmbeddingModality::Text {
+                return Err(AppError::Validation(format!(
+                    "schema attribute `{attribute}` local Lattice embedding supports only text"
+                )));
+            }
+        } else if !is_clip_model(model) {
+            return Err(AppError::Validation(format!(
+                "schema attribute `{attribute}` local embedding requires the Lattice model or a CLIP-family model"
+            )));
+        }
+    }
     Ok(EmbeddingProfile {
         source: attribute.to_string(),
         target,
         model: model.to_string(),
         dims,
-        serving: parse_serving_preference(options.get("serving"), attribute)?,
+        serving,
         revision,
         instructions,
         modality,
@@ -830,13 +872,13 @@ fn parse_serving_preference(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: autoscaler`, or `prefer: lattice`"
+                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: autoscaler`, or `prefer: local` (`lattice` is an alias)"
             ))
         })?;
     match prefer {
         "native" => Ok(ServingPreference::Native),
         "autoscaler" => Ok(ServingPreference::Autoscaler),
-        "lattice" => Ok(ServingPreference::Lattice),
+        "local" | "lattice" => Ok(ServingPreference::Local),
         _ => Err(AppError::Validation(format!(
             "schema attribute `{attribute}` has unsupported `embed.serving.prefer` value `{prefer}`"
         ))),
@@ -1499,12 +1541,31 @@ async fn resolve_vectors(
 
     if !misses.is_empty() {
         let provider = match profile.serving {
-            ServingPreference::Lattice => state.lattice_embedding_provider.as_ref().ok_or_else(|| {
-                AppError::ServiceUnavailable(
-                    "Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
-                        .to_string(),
-                )
-            })?,
+            ServingPreference::Local
+                if profile.model == crate::embedding::LatticeEmbeddingProvider::MODEL =>
+            {
+                state.lattice_embedding_provider.as_ref().ok_or_else(|| {
+                    AppError::Validation(
+                        "local Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
+                            .to_string(),
+                    )
+                })?
+            }
+            ServingPreference::Local if is_clip_model(&profile.model) => state
+                .local_clip_embedding_provider
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::Validation(
+                        "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
+                            .to_string(),
+                    )
+                })?,
+            ServingPreference::Local => {
+                return Err(AppError::Validation(format!(
+                    "local embedding does not support model `{}`",
+                    profile.model
+                )))
+            }
             ServingPreference::Native | ServingPreference::Autoscaler => state
                 .embedding_provider
                 .as_ref()
@@ -1515,10 +1576,16 @@ async fn resolve_vectors(
                     )
                 })?,
         };
-        let batch = provider
-            .embed(&request, &misses)
-            .await
-            .map_err(|error| AppError::Upstream(format!("embedding provider failed: {error}")))?;
+        let batch = if profile.serving == ServingPreference::Local
+            && is_clip_model(&profile.model)
+            && modality == EmbeddingModality::Image
+        {
+            let images = resolve_image_inputs(namespace, &misses).await?;
+            provider.embed_images(&request, &images).await
+        } else {
+            provider.embed(&request, &misses).await
+        }
+        .map_err(|error| AppError::Upstream(format!("embedding provider failed: {error}")))?;
         if batch.vectors.len() != misses.len() {
             return Err(AppError::Upstream(format!(
                 "embedding provider returned {} vectors for {} inputs",
@@ -1563,7 +1630,7 @@ fn cache_key(
     text: &str,
 ) -> String {
     let mut hash = Sha256::new();
-    hash.update(serving.label().as_bytes());
+    hash.update(cache_variant(serving, model).as_bytes());
     hash.update([0]);
     hash.update(model.as_bytes());
     hash.update([0]);
@@ -1578,6 +1645,102 @@ fn cache_key(
     format!("{:x}", hash.finalize())
 }
 
+fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
+    match serving {
+        ServingPreference::Native => "native",
+        ServingPreference::Autoscaler => "autoscaler",
+        ServingPreference::Local if model == crate::embedding::LatticeEmbeddingProvider::MODEL => {
+            "local:lattice:fp32"
+        }
+        ServingPreference::Local => "local:clip:fp32",
+    }
+}
+
+const MAX_LOCAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+async fn resolve_image_inputs(
+    namespace: &str,
+    inputs: &[String],
+) -> Result<Vec<Vec<u8>>, AppError> {
+    let client = reqwest::Client::new();
+    try_join_all(
+        inputs
+            .iter()
+            .map(|input| resolve_image_input(&client, namespace, input)),
+    )
+    .await
+}
+
+async fn resolve_image_input(
+    client: &reqwest::Client,
+    namespace: &str,
+    input: &str,
+) -> Result<Vec<u8>, AppError> {
+    if input.starts_with("http://") || input.starts_with("https://") {
+        let response = client
+            .get(input)
+            .send()
+            .await
+            .map_err(|error| {
+                AppError::Validation(format!(
+                    "namespace `{namespace}` could not fetch embedding image URL: {error}"
+                ))
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                AppError::Validation(format!(
+                    "namespace `{namespace}` embedding image URL failed: {error}"
+                ))
+            })?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_LOCAL_IMAGE_BYTES as u64)
+        {
+            return Err(AppError::Validation(format!(
+                "namespace `{namespace}` embedding image exceeds the {MAX_LOCAL_IMAGE_BYTES}-byte limit"
+            )));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or_default()
+                .min(MAX_LOCAL_IMAGE_BYTES as u64) as usize,
+        );
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                AppError::Validation(format!(
+                    "namespace `{namespace}` could not read embedding image URL: {error}"
+                ))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_LOCAL_IMAGE_BYTES {
+                return Err(AppError::Validation(format!(
+                    "namespace `{namespace}` embedding image exceeds the {MAX_LOCAL_IMAGE_BYTES}-byte limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+
+    let encoded = input
+        .strip_prefix("data:")
+        .and_then(|data| data.split_once(','))
+        .map(|(_, encoded)| encoded)
+        .unwrap_or(input);
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        AppError::Validation(format!(
+            "namespace `{namespace}` embedding image must be an HTTP(S) URL or base64 data: {error}"
+        ))
+    })?;
+    if bytes.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(AppError::Validation(format!(
+            "namespace `{namespace}` embedding image exceeds the {MAX_LOCAL_IMAGE_BYTES}-byte limit"
+        )));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn merge_performance(target: &mut Value, source: &Value) {
     let Some(source) = source.as_object() else {
         return;
@@ -1586,7 +1749,7 @@ pub(crate) fn merge_performance(target: &mut Value, source: &Value) {
         *target = json!({});
     }
     let target = target.as_object_mut().expect("set to object");
-    for key in ["embedding_tokens", "embedding_ms"] {
+    for key in ["embedding_tokens", "embedding_images", "embedding_ms"] {
         let Some(value) = source.get(key).and_then(Value::as_f64) else {
             continue;
         };
@@ -1687,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn serving_preference_accepts_native_autoscaler_or_lattice() {
+    fn serving_preference_accepts_local_and_lattice_alias() {
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "native"})), "title").unwrap(),
             ServingPreference::Native
@@ -1697,13 +1860,18 @@ mod tests {
             ServingPreference::Autoscaler
         );
         assert_eq!(
+            parse_serving_preference(Some(&json!({"prefer": "local"})), "title").unwrap(),
+            ServingPreference::Local
+        );
+        assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "lattice"})), "title").unwrap(),
-            ServingPreference::Lattice
+            ServingPreference::Local
         );
         assert!(parse_serving_preference(Some(&json!({"prefer": "automatic"})), "title").is_err());
         let missing = parse_serving_preference(Some(&json!({})), "title").unwrap_err();
         let message = missing.to_string();
-        assert!(message.contains("prefer: lattice"));
+        assert!(message.contains("prefer: local"));
+        assert!(message.contains("lattice` is an alias"));
         assert!(!message.contains("prefer: blended"));
     }
 
@@ -1715,22 +1883,26 @@ mod tests {
     }
 
     #[test]
-    fn embedding_cache_isolated_by_serving_leg() {
+    fn embedding_cache_includes_local_clip_variant() {
         let autoscaler = cache_key(
             ServingPreference::Autoscaler,
-            "erikkaum/lattice-retrieval",
+            "openai/clip-vit-base-patch32",
             Some(512),
-            EmbeddingModality::Text,
-            "hello",
+            EmbeddingModality::Image,
+            "same-input",
         );
-        let lattice = cache_key(
-            ServingPreference::Lattice,
-            "erikkaum/lattice-retrieval",
+        let local = cache_key(
+            ServingPreference::Local,
+            "openai/clip-vit-base-patch32",
             Some(512),
-            EmbeddingModality::Text,
-            "hello",
+            EmbeddingModality::Image,
+            "same-input",
         );
-        assert_ne!(autoscaler, lattice);
+        assert_eq!(
+            cache_variant(ServingPreference::Local, "openai/clip-vit-base-patch32"),
+            "local:clip:fp32"
+        );
+        assert_ne!(autoscaler, local);
     }
 
     #[test]

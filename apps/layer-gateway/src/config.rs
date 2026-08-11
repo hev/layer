@@ -94,6 +94,9 @@ pub struct Config {
     /// Lattice deployment artifact. Its sibling `tokenizer.json` is loaded
     /// with it; unset means the `lattice` serving leg is unavailable.
     pub lattice_model_path: Option<PathBuf>,
+    /// Directory containing a CLIP checkpoint, tokenizer, and preprocessor
+    /// configuration. Unset means the local CLIP serving leg is unavailable.
+    pub local_clip_model_path: Option<PathBuf>,
     /// Static Agent specs for local/dev use. Production Kubernetes
     /// resolution populates the same in-memory registry.
     pub agents_json: Option<String>,
@@ -270,6 +273,10 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60_000),
             lattice_model_path: env::var("LAYER_LATTICE_MODEL_PATH")
+                .ok()
+                .and_then(trimmed_non_empty)
+                .map(PathBuf::from),
+            local_clip_model_path: env::var("LAYER_LOCAL_CLIP_MODEL_PATH")
                 .ok()
                 .and_then(trimmed_non_empty)
                 .map(PathBuf::from),

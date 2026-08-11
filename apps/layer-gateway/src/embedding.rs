@@ -12,6 +12,10 @@ use crate::clients::turbopuffer::{
     TurbopufferClient, TurbopufferError, TurbopufferPassthroughResponse,
 };
 
+mod local_clip;
+pub(crate) use local_clip::is_clip_model;
+pub use local_clip::LocalClipEmbeddingProvider;
+
 pub type EmbeddingCache = dashmap::DashMap<String, (std::time::Instant, Arc<Vec<f64>>)>;
 
 #[derive(Debug, Clone)]
@@ -53,6 +57,16 @@ pub trait EmbeddingProvider: Send + Sync {
         request: &EmbeddingRequest<'_>,
         texts: &[String],
     ) -> Result<EmbeddingBatch, TurbopufferError>;
+
+    async fn embed_images(
+        &self,
+        _request: &EmbeddingRequest<'_>,
+        _images: &[Vec<u8>],
+    ) -> Result<EmbeddingBatch, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "embedding provider does not support image inputs".to_string(),
+        ))
+    }
 }
 
 /// Production embedding provider backed by Turbopuffer native embeddings.
