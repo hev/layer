@@ -1657,12 +1657,24 @@ fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
 }
 
 const MAX_LOCAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const LOCAL_IMAGE_FETCH_USER_AGENT: &str = concat!(
+    "hevlayer-gateway/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://hevlayer.com)"
+);
 
 async fn resolve_image_inputs(
     namespace: &str,
     inputs: &[String],
 ) -> Result<Vec<Vec<u8>>, AppError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(LOCAL_IMAGE_FETCH_USER_AGENT)
+        .build()
+        .map_err(|error| {
+            AppError::Upstream(format!(
+                "could not construct local image embedding client: {error}"
+            ))
+        })?;
     try_join_all(
         inputs
             .iter()
