@@ -60,6 +60,16 @@ spec:
               value: {{ include "layer.gatewayApiSecretKey" . | quote }}
             - name: GATEWAY_BASE_URL
               value: {{ $gatewayBaseURL | quote }}
+            {{- if .Values.s3.bucket }}
+            - name: HEVLAYER_SNAPSHOT_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: HEVLAYER_SNAPSHOT_REGION
+              value: {{ .Values.s3.region | quote }}
+            {{- if .Values.s3.endpoint }}
+            - name: HEVLAYER_SNAPSHOT_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            {{- end }}
+            {{- end }}
             - name: LAYER_LICENSE
               valueFrom:
                 secretKeyRef:

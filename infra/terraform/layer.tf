@@ -197,6 +197,45 @@ resource "aws_ecr_lifecycle_policy" "layer_operator" {
   })
 }
 
+resource "aws_ecr_repository" "layer_rest_source" {
+  name                 = "layer-rest-source"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  tags = {
+    Name = "layer-rest-source"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "layer_rest_source" {
+  repository = aws_ecr_repository.layer_rest_source.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images after 7 days"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 7
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
+}
+
 # ---------- Layer: IRSA roles ----------
 
 resource "aws_iam_role" "layer_sa" {

@@ -5,10 +5,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: InfraRules
     plural: infrarules
-    shortNames: []
     singular: infrarules
   scope: Cluster
   versions:
@@ -147,7 +145,6 @@ spec:
     storage: true
     subresources:
       status: {}
-
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -156,10 +153,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: VectorStore
     plural: vectorstores
-    shortNames: []
     singular: vectorstore
   scope: Namespaced
   versions:
@@ -262,7 +257,9 @@ spec:
                 nullable: true
                 properties:
                   adminCredential:
-                    description: Admin bearer for the hev search control plane. Data requests use `spec.credential`; the admin credential stays operator-only.
+                    description: |-
+                      Admin bearer for the hev search control plane. Data requests use
+                      `spec.credential`; the admin credential stays operator-only.
                     nullable: true
                     properties:
                       secretRef:
@@ -283,7 +280,9 @@ spec:
                 nullable: true
                 properties:
                   orgId:
-                    description: Turbopuffer organization id. Used only to deep-link into the Turbopuffer dashboard and orient support; not used for auth.
+                    description: |-
+                      Turbopuffer organization id. Used only to deep-link into the
+                      Turbopuffer dashboard and orient support; not used for auth.
                     type: string
                 required:
                 - orgId
@@ -342,10 +341,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: ApiKey
     plural: apikeys
-    shortNames: []
     singular: apikey
   scope: Namespaced
   versions:
@@ -376,7 +373,9 @@ spec:
                 additionalProperties:
                   properties:
                     claims:
-                      description: Opaque claim strings. Layer stores and echoes them, never interprets them.
+                      description: |-
+                        Opaque claim strings. Layer stores and echoes them, never
+                        interprets them.
                       items:
                         type: string
                       type: array
@@ -395,14 +394,20 @@ spec:
                         type: string
                       type: array
                   type: object
-                description: 'Map keyed by target resource: `vectorstore.<name>`, `warehouse.<name>`, `agent.<name>`, or `layer`. Unknown prefixes are rejected at admission; a missing target is an `EntitlementTargetMissing` status condition, not an error.'
+                description: |-
+                  Map keyed by target resource: `vectorstore.<name>`,
+                  `warehouse.<name>`, `agent.<name>`, or `layer`. Unknown prefixes
+                  are rejected at admission; a missing target is an
+                  `EntitlementTargetMissing` status condition, not an error.
                 type: object
                 x-kubernetes-validations:
                 - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', or 'agent.<name>'
                   rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6))
               expiresAfter:
                 default: 365d
-                description: Duration (`365d`, `12h`) or `never`. `status.expiresAt` is computed at mint.
+                description: |-
+                  Duration (`365d`, `12h`) or `never`. `status.expiresAt` is
+                  computed at mint.
                 type: string
               owner:
                 description: Free-form owner label, echoed in list and authenticate responses.
@@ -458,7 +463,10 @@ spec:
                 type: integer
               phase:
                 default: Pending
-                description: Phases keep Kubernetes' PascalCase convention (`Active`, not `active`) — they surface verbatim in REST responses and kubectl printcolumns.
+                description: |-
+                  Phases keep Kubernetes' PascalCase convention (`Active`, not
+                  `active`) — they surface verbatim in REST responses and kubectl
+                  printcolumns.
                 enum:
                 - Pending
                 - Active
@@ -499,10 +507,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: Warehouse
     plural: warehouses
-    shortNames: []
     singular: warehouse
   scope: Namespaced
   versions:
@@ -534,10 +540,14 @@ spec:
                 properties:
                   endpoint:
                     default: https://huggingface.co
-                    description: Hub endpoint. Defaults to the public Hugging Face Hub; override for Enterprise Hub or a mirror.
+                    description: |-
+                      Hub endpoint. Defaults to the public Hugging Face Hub; override for
+                      Enterprise Hub or a mirror.
                     type: string
                   tokenSecretRef:
-                    description: Optional Secret in the same namespace holding `token` for gated or private datasets. Public datasets do not require a Secret.
+                    description: |-
+                      Optional Secret in the same namespace holding `token` for gated or
+                      private datasets. Public datasets do not require a Secret.
                     nullable: true
                     properties:
                       name:
@@ -547,7 +557,10 @@ spec:
                     type: object
                 type: object
               kind:
-                description: Warehouse source kind. `databricks` and `iceberg` remain reserved; `snowflake`, `huggingface`, `rss`, `youtube`, and `rest` are admitted and reconciled.
+                description: |-
+                  Warehouse source kind. `databricks` and `iceberg` remain reserved;
+                  `snowflake`, `huggingface`, `rss`, `youtube`, and `rest` are admitted
+                  and reconciled.
                 enum:
                 - snowflake
                 - huggingface
@@ -599,6 +612,10 @@ spec:
                     required:
                     - requestsPerSecond
                     type: object
+                  userAgent:
+                    default: hevlayer/rest-source (+https://hevlayer.com/contact)
+                    description: User-Agent sent by stock REST source workers.
+                    type: string
                   verify:
                     description: Cheap reachability endpoint probed by the operator.
                     properties:
@@ -630,7 +647,9 @@ spec:
                     description: Snowflake account identifier.
                     type: string
                   keyPairSecretRef:
-                    description: Secret in the same namespace holding `private-key.pem` and optional `passphrase`. The credential is never stored in the CRD.
+                    description: |-
+                      Secret in the same namespace holding `private-key.pem` and
+                      optional `passphrase`. The credential is never stored in the CRD.
                     properties:
                       name:
                         type: string
@@ -666,13 +685,18 @@ spec:
                 type: object
               verifyInterval:
                 default: 1h
-                description: Probe cadence. The operator also probes on apply and whenever the referenced Secret's content changes.
+                description: |-
+                  Probe cadence. The operator also probes on apply and whenever the
+                  referenced Secret's content changes.
                 type: string
               youtube:
                 nullable: true
                 properties:
                   apiKeySecretRef:
-                    description: Optional Secret in the same namespace holding `api-key` for quota-backed YouTube Data API access. Public channel RSS and captions do not require a key.
+                    description: |-
+                      Optional Secret in the same namespace holding `api-key` for quota-backed
+                      YouTube Data API access. Public channel RSS and captions do not require
+                      a key.
                     nullable: true
                     properties:
                       name:
@@ -724,7 +748,10 @@ spec:
                     type: integer
                 type: object
               credentialRevision:
-                description: sha256 over the referenced Secret's key material at the last probe. A different live revision means the Secret rotated and the operator re-verifies.
+                description: |-
+                  sha256 over the referenced Secret's key material at the last
+                  probe. A different live revision means the Secret rotated and the
+                  operator re-verifies.
                 nullable: true
                 type: string
               failureReason:
@@ -745,7 +772,9 @@ spec:
               sourceRevisions:
                 additionalProperties:
                   type: string
-                description: For source kinds whose revision is part of replayability, this maps declared source keys to the latest resolved upstream revision.
+                description: |-
+                  For source kinds whose revision is part of replayability, this maps
+                  declared source keys to the latest resolved upstream revision.
                 type: object
               verifiedAt:
                 nullable: true
@@ -768,10 +797,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: Agent
     plural: agents
-    shortNames: []
     singular: agent
   scope: Namespaced
   versions:
@@ -954,10 +981,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: Index
     plural: indexes
-    shortNames: []
     singular: index
   scope: Namespaced
   versions:
@@ -1161,10 +1186,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: Pipeline
     plural: pipelines
-    shortNames: []
     singular: pipeline
   scope: Namespaced
   versions:
@@ -1189,7 +1212,10 @@ spec:
                 default: false
                 type: boolean
               pipelineId:
-                description: Gateway pipeline (queue) id this worker stages into and scales on. Defaults to the resource name. Set it when multiple worker resources share one queue.
+                description: |-
+                  Gateway pipeline (queue) id this worker stages into and scales on.
+                  Defaults to the resource name. Set it when multiple worker
+                  resources share one queue.
                 nullable: true
                 type: string
               scaling:
@@ -1223,11 +1249,20 @@ spec:
                 - replicas
                 type: object
               schedule:
-                description: Optional cron window for source-refresh Pipelines. When set, the operator wakes the worker on this schedule instead of scaling it on pending queue depth.
+                description: |-
+                  Optional cron window for source-refresh Pipelines. When set, the
+                  operator wakes the worker on this schedule instead of scaling it on
+                  pending queue depth.
                 nullable: true
                 properties:
                   cron:
-                    description: 'Cron expression (5-field, UTC) for `schedule`-triggered workloads: when the worker wakes to run. For Functions, this is ignored for discovery/write triggers. Defaults to hourly (`0 * * * *`) when a schedule trigger is active. The minute field must be a single integer; the operator scales the worker from zero across a short window sized by `leaseSeconds`.'
+                    description: |-
+                      Cron expression (5-field, UTC) for `schedule`-triggered workloads:
+                      when the worker wakes to run. For Functions, this is ignored for
+                      discovery/write triggers. Defaults to hourly (`0 * * * *`) when a
+                      schedule trigger is active. The minute field must be a single integer;
+                      the operator scales the worker from zero across a short window sized
+                      by `leaseSeconds`.
                     nullable: true
                     type: string
                   discoveryIntervalSeconds:
@@ -1361,10 +1396,8 @@ metadata:
 spec:
   group: hevlayer.com
   names:
-    categories: []
     kind: Function
     plural: functions
-    shortNames: []
     singular: function
   scope: Namespaced
   versions:
@@ -1460,7 +1493,13 @@ spec:
                   maxInFlightBatches: 8
                 properties:
                   cron:
-                    description: 'Cron expression (5-field, UTC) for `schedule`-triggered workloads: when the worker wakes to run. For Functions, this is ignored for discovery/write triggers. Defaults to hourly (`0 * * * *`) when a schedule trigger is active. The minute field must be a single integer; the operator scales the worker from zero across a short window sized by `leaseSeconds`.'
+                    description: |-
+                      Cron expression (5-field, UTC) for `schedule`-triggered workloads:
+                      when the worker wakes to run. For Functions, this is ignored for
+                      discovery/write triggers. Defaults to hourly (`0 * * * *`) when a
+                      schedule trigger is active. The minute field must be a single integer;
+                      the operator scales the worker from zero across a short window sized
+                      by `leaseSeconds`.
                     nullable: true
                     type: string
                   discoveryIntervalSeconds:

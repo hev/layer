@@ -104,6 +104,11 @@ output "ecr_layer_operator_url" {
   value       = aws_ecr_repository.layer_operator.repository_url
 }
 
+output "ecr_layer_rest_source_url" {
+  description = "ECR repository URL for layer-rest-source images"
+  value       = aws_ecr_repository.layer_rest_source.repository_url
+}
+
 output "karpenter_controller_role_arn" {
   description = "IRSA role ARN for the Karpenter controller service account"
   value       = try(aws_iam_role.karpenter_controller[0].arn, null)
