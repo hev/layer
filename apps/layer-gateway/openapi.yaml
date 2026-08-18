@@ -452,7 +452,10 @@ paths:
               schema:
                 "$ref": "#/components/schemas/SnapshotJob"
         '422':
-          description: Validation error
+          description: 'Validation error, or `object_store_not_configured` when the
+            gateway runs without an object store (no `S3_BUCKET`)
+
+            '
           content:
             application/json:
               schema:
@@ -519,7 +522,10 @@ paths:
               schema:
                 "$ref": "#/components/schemas/SnapshotPolicy"
         '422':
-          description: Validation error
+          description: 'Validation error, or `object_store_not_configured` when the
+            gateway runs without an object store (no `S3_BUCKET`)
+
+            '
           content:
             application/json:
               schema:

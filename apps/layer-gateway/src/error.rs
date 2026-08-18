@@ -55,6 +55,9 @@ pub enum AppError {
 
     #[error("Gateway timeout: {0}")]
     GatewayTimeout(String),
+
+    #[error("Object store not configured: {0}")]
+    ObjectStoreNotConfigured(String),
 }
 
 #[cfg(feature = "pro")]
@@ -134,6 +137,25 @@ impl AppError {
 
     pub fn is_store_support_error(error: impl ToString) -> bool {
         error.to_string().contains("UnsupportedByStore")
+    }
+
+    /// Map an S3 client failure into a response error: a gateway composed
+    /// without an object store gets a clear 4xx naming the missing
+    /// configuration; real object-store failures stay 502s.
+    pub fn from_s3(error: crate::clients::s3::S3Error, context: impl AsRef<str>) -> Self {
+        if error.is_not_configured() {
+            Self::object_store_not_configured(context)
+        } else {
+            Self::Upstream(format!("{}: {error}", context.as_ref()))
+        }
+    }
+
+    pub fn object_store_not_configured(feature: impl AsRef<str>) -> Self {
+        Self::ObjectStoreNotConfigured(format!(
+            "{} requires an S3-compatible object store, and this gateway has none \
+             configured (set S3_BUCKET)",
+            feature.as_ref()
+        ))
     }
 }
 
@@ -266,6 +288,14 @@ impl IntoResponse for AppError {
             AppError::GatewayTimeout(msg) => (
                 StatusCode::GATEWAY_TIMEOUT,
                 "gateway_timeout",
+                msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::ObjectStoreNotConfigured(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "object_store_not_configured",
                 msg.clone(),
                 None,
                 None,

@@ -1,8 +1,25 @@
 use async_trait::async_trait;
 
+/// Marker message carried by [`S3Error::not_configured`] errors so call sites
+/// can distinguish "this deployment has no object store" from a transient or
+/// upstream S3 failure.
+pub const OBJECT_STORE_NOT_CONFIGURED: &str = "object store not configured";
+
 #[derive(Debug, thiserror::Error)]
 #[error("S3 error: {0}")]
 pub struct S3Error(pub String);
+
+impl S3Error {
+    /// Typed error returned by [`NoopS3Client`] writes: the gateway was
+    /// composed without an object store (no `S3_BUCKET` configured).
+    pub fn not_configured() -> Self {
+        Self(OBJECT_STORE_NOT_CONFIGURED.to_string())
+    }
+
+    pub fn is_not_configured(&self) -> bool {
+        self.0 == OBJECT_STORE_NOT_CONFIGURED
+    }
+}
 
 #[async_trait]
 pub trait S3Client: Send + Sync {
@@ -21,6 +38,13 @@ pub trait S3Client: Send + Sync {
 
     /// Delete an object by key. Missing keys are treated as success.
     async fn delete_key(&self, key: &str) -> Result<(), S3Error>;
+
+    /// Whether this client is backed by a real object store. Callers use this
+    /// to skip S3-backed work entirely (background writers) or fail fast with
+    /// a clear error (feature endpoints) instead of surfacing per-op failures.
+    fn is_configured(&self) -> bool {
+        true
+    }
 }
 
 // --- Real implementation using aws-sdk-s3 ---
@@ -171,6 +195,41 @@ impl S3Client for AwsS3Client {
             .await
             .map_err(|e| S3Error(format!("{}", e.into_service_error())))?;
         Ok(())
+    }
+}
+
+// --- Noop implementation for deployments without an object store ---
+
+/// Composed when no object store is configured (no `S3_BUCKET`). Reads degrade
+/// instantly to "no objects"; writes fail with a typed
+/// "object store not configured" error. Never touches the AWS credential
+/// chain, so a standalone gateway pays no IMDS lookup or timeout.
+pub struct NoopS3Client;
+
+#[async_trait]
+impl S3Client for NoopS3Client {
+    async fn put(&self, _key: &str, _body: Vec<u8>) -> Result<(), S3Error> {
+        Err(S3Error::not_configured())
+    }
+
+    async fn put_if_not_exists(&self, _key: &str, _body: Vec<u8>) -> Result<bool, S3Error> {
+        Err(S3Error::not_configured())
+    }
+
+    async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, S3Error> {
+        Ok(None)
+    }
+
+    async fn list_keys(&self, _prefix: &str) -> Result<Vec<String>, S3Error> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_key(&self, _key: &str) -> Result<(), S3Error> {
+        Err(S3Error::not_configured())
+    }
+
+    fn is_configured(&self) -> bool {
+        false
     }
 }
 

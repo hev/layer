@@ -198,6 +198,11 @@ pub async fn create_snapshot_job(
     if field.is_empty() {
         return Err(AppError::Validation("field is required".to_string()));
     }
+    // Snapshot jobs exist to materialize a durable snapshot; refuse up front
+    // instead of running the scan and failing at the persist step.
+    if !state.s3.is_configured() {
+        return Err(AppError::object_store_not_configured("snapshot jobs"));
+    }
     if matches!(request.source, Some(SnapshotSource::Cache)) {
         state.observe_cache_demand(&namespace);
         if !state.cache_available().await {

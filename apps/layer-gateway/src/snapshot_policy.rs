@@ -61,7 +61,7 @@ pub async fn put_snapshot_policy(
         .s3
         .put(&snapshot_policy_key(namespace), body)
         .await
-        .map_err(|err| AppError::Upstream(format!("s3 put snapshot policy: {err}")))?;
+        .map_err(|err| AppError::from_s3(err, "s3 put snapshot policy"))?;
     apply_snapshot_policy(state, namespace, &applied)?;
     Ok(applied)
 }

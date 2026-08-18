@@ -25,7 +25,7 @@ use axum::Json;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::clients::turbopuffer::{IndexStatus, NamespaceMeta, TurbopufferError};
 use crate::consistency::now_ms;
@@ -136,28 +136,41 @@ struct NamespaceCleanupOutcome {
 async fn cleanup_namespace_state(state: &AppState, namespace: &str) -> NamespaceCleanupOutcome {
     let mut outcome = NamespaceCleanupOutcome::default();
 
-    if let Err(e) = state.aerospike.delete_set(namespace).await {
-        outcome
-            .errors
-            .push(format!("Aerospike document cache purge failed: {e}"));
-    }
+    // Generation 0 means no cache client has ever been part of this process
+    // (standalone/open composition, or a pro gateway booted without
+    // AEROSPIKE_HOSTS): there is no cache to purge, so skip rather than count
+    // the purge as incomplete cleanup. A cache that was connected and dropped
+    // keeps its errors — skipping the purge there could resurrect deleted
+    // documents.
+    if state.aerospike_runtime.generation() == 0 {
+        debug!(
+            namespace = %namespace,
+            "document cache never composed; skipping cache purge on namespace delete"
+        );
+    } else {
+        if let Err(e) = state.aerospike.delete_set(namespace).await {
+            outcome
+                .errors
+                .push(format!("Aerospike document cache purge failed: {e}"));
+        }
 
-    let snapshot_cache_key = latest_snapshot_cache_key(namespace);
-    if let Err(e) = state
-        .aerospike
-        .delete(SNAPSHOT_CACHE_SET, &snapshot_cache_key)
-        .await
-    {
-        outcome
-            .errors
-            .push(format!("Aerospike latest snapshot purge failed: {e}"));
-    }
+        let snapshot_cache_key = latest_snapshot_cache_key(namespace);
+        if let Err(e) = state
+            .aerospike
+            .delete(SNAPSHOT_CACHE_SET, &snapshot_cache_key)
+            .await
+        {
+            outcome
+                .errors
+                .push(format!("Aerospike latest snapshot purge failed: {e}"));
+        }
 
-    let history_cache_namespace = search_history_cache_namespace(namespace);
-    if let Err(e) = state.aerospike.delete_set(&history_cache_namespace).await {
-        outcome
-            .errors
-            .push(format!("Aerospike search history purge failed: {e}"));
+        let history_cache_namespace = search_history_cache_namespace(namespace);
+        if let Err(e) = state.aerospike.delete_set(&history_cache_namespace).await {
+            outcome
+                .errors
+                .push(format!("Aerospike search history purge failed: {e}"));
+        }
     }
 
     for prefix in namespace_s3_prefixes(namespace) {

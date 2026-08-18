@@ -2097,6 +2097,10 @@ impl S3Client for MetricsS3Client {
             .observe_s3_op("delete", s3_status(&result), elapsed(start));
         result
     }
+
+    fn is_configured(&self) -> bool {
+        self.inner.is_configured()
+    }
 }
 
 #[cfg(feature = "pro")]

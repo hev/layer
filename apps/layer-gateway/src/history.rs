@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, HeaderValue};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::clients::aerospike::AerospikeClient;
@@ -202,6 +202,13 @@ pub async fn log_search_history(
         );
     }
 
+    if !s3.is_configured() {
+        debug!(
+            namespace = %entry.namespace,
+            "no object store configured; search history entry not retained durably"
+        );
+        return;
+    }
     let key = search_history_s3_key(&entry);
     let line = format!("{json}\n");
     if let Err(e) = s3.put_if_not_exists(&key, line.into_bytes()).await {
@@ -285,6 +292,10 @@ pub async fn list_search_history(
 }
 
 pub async fn log_clickstream_events(s3: Arc<dyn S3Client>, events: Vec<ClickstreamEvent>) {
+    if !s3.is_configured() {
+        debug!("no object store configured; clickstream events not retained");
+        return;
+    }
     for event in events {
         let json = match serde_json::to_string(&event) {
             Ok(json) => json,

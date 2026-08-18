@@ -165,6 +165,13 @@ impl SnapshotTrigger for AppStateSnapshotTrigger {
 /// `snapshot_inflight` (single-flight) and `last_snapshot_at` (interval floor).
 /// Errors are logged, never returned — the call site is fire-and-forget.
 pub async fn snapshot_namespace(state: Arc<AppState>, namespace: String) {
+    // Durable snapshots need an object store; without one there is nothing to
+    // write, so bail before scanning rather than warn on every stable mark.
+    if !state.s3.is_configured() {
+        debug!(namespace = %namespace, "no object store configured; skipping snapshot");
+        return;
+    }
+
     // Skip namespaces with no facet config — nothing to histogram.
     let facet_fields = match state.facet_fields_for(&namespace) {
         Some(fields) => fields,

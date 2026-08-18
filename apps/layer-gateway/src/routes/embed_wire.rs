@@ -1867,11 +1867,23 @@ async fn save_profiles(
     let key = profile_key(namespace);
     let body = serde_json::to_vec(profiles)
         .map_err(|error| AppError::Upstream(format!("serialize embedding profiles: {error}")))?;
-    state
-        .s3
-        .put(&key, body)
-        .await
-        .map_err(|error| AppError::Upstream(format!("persist embedding profiles: {error}")))?;
+    match state.s3.put(&key, body).await {
+        Ok(()) => {}
+        // No object store: keep the profiles in memory so embed-wire writes
+        // still work standalone. They re-materialize from the next schema
+        // write after a restart.
+        Err(error) if error.is_not_configured() => {
+            tracing::debug!(
+                namespace = %namespace,
+                "no object store configured; embedding profiles held in memory only"
+            );
+        }
+        Err(error) => {
+            return Err(AppError::Upstream(format!(
+                "persist embedding profiles: {error}"
+            )));
+        }
+    }
     state
         .wire_embedding_profiles
         .insert(namespace.to_string(), profiles.to_vec());

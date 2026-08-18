@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use tracing::{info, warn};
 
 use crate::clients::aerospike::{AerospikeClient, AerospikeRuntime};
-use crate::clients::s3::{AwsS3Client, S3Client};
+use crate::clients::s3::{AwsS3Client, NoopS3Client, S3Client};
 use crate::clients::search::HttpSearchClient;
 use crate::clients::turbopuffer::{
     HttpTurbopufferClient, RoutingTurbopufferClient, TurbopufferClient,
@@ -195,14 +195,24 @@ pub async fn run_with_options(options: ServerOptions) {
     info!("Document cache disabled in public gateway composition");
     let aerospike: Arc<dyn AerospikeClient> = aerospike_runtime.clone();
 
-    let s3_inner: Arc<dyn S3Client> = Arc::new(
-        AwsS3Client::new(
-            &config.s3_bucket,
-            &config.s3_region,
-            config.s3_endpoint.as_deref(),
-        )
-        .await,
-    );
+    let s3_inner: Arc<dyn S3Client> = match config.s3_bucket.as_deref() {
+        Some(bucket) => Arc::new(
+            AwsS3Client::new(bucket, &config.s3_region, config.s3_endpoint.as_deref()).await,
+        ),
+        None => {
+            if config.s3_endpoint.is_some() {
+                warn!(
+                    "S3_ENDPOINT is set but S3_BUCKET is not; ignoring the endpoint and \
+                     running without an object store"
+                );
+            }
+            info!(
+                "S3_BUCKET is unset; object store disabled — snapshots, search history, \
+                 checkpoints, and blobs degrade or report \"object store not configured\""
+            );
+            Arc::new(NoopS3Client)
+        }
+    };
     let s3: Arc<dyn S3Client> = metrics.instrument_s3(s3_inner);
 
     let facet_override_enabled = !config.facet_fields.is_empty();

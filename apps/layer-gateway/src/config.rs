@@ -13,7 +13,9 @@ pub struct Config {
     pub aerospike_namespace: String,
     pub aerospike_set_prefix: String,
     pub aerospike_cluster_name: Option<String>,
-    pub s3_bucket: String,
+    /// `None` means no object store is configured: the gateway composes a
+    /// noop S3 client instead of walking the AWS credential chain.
+    pub s3_bucket: Option<String>,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
     /// Enables Kubernetes Index CR deletion when a namespace is hard-deleted.
@@ -155,7 +157,7 @@ impl Config {
             aerospike_set_prefix: env::var("AEROSPIKE_SET_PREFIX")
                 .unwrap_or_else(|_| "tpuf_".to_string()),
             aerospike_cluster_name: env::var("AEROSPIKE_CLUSTER_NAME").ok(),
-            s3_bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "hevlayer-wal".to_string()),
+            s3_bucket: env::var("S3_BUCKET").ok().and_then(trimmed_non_empty),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT").ok(),
             index_gc_enabled: env::var("LAYER_INDEX_GC_ENABLED")
