@@ -39,6 +39,13 @@ pub struct Config {
     pub keys_auth_rate_limit_per_min: u32,
     pub port: u16,
     pub database_url: Option<String>,
+    /// Bulk pipeline work is capped separately so it cannot consume the
+    /// connections reserved for Function control-plane and metrics requests.
+    pub database_data_pool_max_connections: u32,
+    pub database_control_pool_max_connections: u32,
+    /// PostgreSQL backstop for any transaction that becomes idle while holding
+    /// locks. Normal queue code keeps object-store I/O outside transactions.
+    pub database_idle_in_transaction_timeout_ms: u64,
     pub pipeline_segment_size: usize,
     /// Attempts before permanently unfetchable pipeline chunks dead-letter.
     pub pipeline_chunk_dead_letter_max_attempts: u32,
@@ -167,6 +174,25 @@ impl Config {
                 .parse()
                 .expect("PORT must be a valid u16"),
             database_url: env::var("DATABASE_URL").ok(),
+            database_data_pool_max_connections: env::var("LAYER_QUEUE_DATA_POOL_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|size| *size > 0)
+                .unwrap_or(8),
+            database_control_pool_max_connections: env::var(
+                "LAYER_QUEUE_CONTROL_POOL_MAX_CONNECTIONS",
+            )
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|size| *size > 0)
+            .unwrap_or(2),
+            database_idle_in_transaction_timeout_ms: env::var(
+                "LAYER_QUEUE_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+            )
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|timeout| *timeout > 0)
+            .unwrap_or(5_000),
             pipeline_segment_size: env::var("PIPELINE_SEGMENT_SIZE")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())

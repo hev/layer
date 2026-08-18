@@ -8,6 +8,9 @@ use tracing::warn;
 
 use crate::AppState;
 
+#[cfg(feature = "pro")]
+const METRICS_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response {
     #[cfg(feature = "pro")]
     {
@@ -15,13 +18,17 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response 
             .metrics
             .set_license_state(&state.license, state.license_grace_gateway);
         if let Some(store) = state.pipeline_store.as_ref() {
-            if let Ok(snapshot) = store.collect_metrics().await {
-                state.metrics.refresh_pipeline_metrics(snapshot);
+            match tokio::time::timeout(METRICS_REFRESH_TIMEOUT, store.collect_metrics()).await {
+                Ok(Ok(snapshot)) => state.metrics.refresh_pipeline_metrics(snapshot),
+                Ok(Err(error)) => warn!(%error, "pipeline metrics refresh failed"),
+                Err(_) => warn!("pipeline metrics refresh timed out; serving cached metrics"),
             }
         }
         if let Some(store) = state.udf_store.as_ref() {
-            if let Ok(snapshot) = store.collect_metrics().await {
-                state.metrics.refresh_udf_metrics(snapshot);
+            match tokio::time::timeout(METRICS_REFRESH_TIMEOUT, store.collect_metrics()).await {
+                Ok(Ok(snapshot)) => state.metrics.refresh_udf_metrics(snapshot),
+                Ok(Err(error)) => warn!(%error, "UDF metrics refresh failed"),
+                Err(_) => warn!("UDF metrics refresh timed out; serving cached metrics"),
             }
         }
     }
