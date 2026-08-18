@@ -1841,9 +1841,16 @@ async fn load_profiles(
         })?,
         Ok(None) => Vec::new(),
         Err(error) => {
-            return Err(AppError::Upstream(format!(
-                "failed to read embedding profiles: {error}"
-            )))
+            // The standalone gateway runs with no object store; every write
+            // passes through here, so an unreachable S3 must degrade to "no
+            // wire profiles" instead of failing the write. Skip the cache so
+            // a transient S3 failure can't pin an empty profile set.
+            tracing::warn!(
+                namespace = %namespace,
+                error = %error,
+                "Failed to read embedding profiles; treating namespace as unprofiled"
+            );
+            return Ok(Vec::new());
         }
     };
     state
