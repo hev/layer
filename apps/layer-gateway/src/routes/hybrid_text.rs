@@ -1339,9 +1339,12 @@ async fn run_fused_specs(
 
 /// The expansion shared by the `HybridText` handler and the router's
 /// `hybrid_text` / `fused` routes: tokenize, build leg specs (plus any
-/// router-supplied extra leg), fuse — upstream RRF on unsharded namespaces,
-/// gateway RRF over scatter/gathered legs on sharded ones — and truncate to
-/// `top_k`. The `hybrid` echo block always reflects the effective expansion.
+/// router-supplied extra leg), issue one `ranked_query` per leg spec, and
+/// fuse gateway-side via `rrf_fuse_legs` — unsharded, sharded, and surfacing
+/// paths alike — then truncate to `top_k`. The only backend-fusion surface is
+/// the multi-query passthrough (`multi_query.rs` → `multi_ranked_query`), a
+/// different route. The `hybrid` echo block always reflects the effective
+/// expansion.
 pub(crate) async fn run_hybrid_text(
     state: &AppState,
     namespace: &str,
