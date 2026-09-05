@@ -785,6 +785,7 @@ fn vector_from_base64(encoded: &str) -> Option<Vec<f64>> {
     if bytes.is_empty() || bytes.len() % std::mem::size_of::<f32>() != 0 {
         return None;
     }
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     bytes
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|chunk| {
