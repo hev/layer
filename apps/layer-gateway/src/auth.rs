@@ -16,11 +16,16 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub struct AuthenticatedApiKey {
     pub name: String,
     pub scopes: Vec<ApiScope>,
+    pub namespaces: Vec<String>,
 }
 
 impl AuthenticatedApiKey {
     pub fn has_scope(&self, required: ApiScope) -> bool {
         self.scopes.contains(&ApiScope::Admin) || self.scopes.contains(&required)
+    }
+
+    pub fn allows_namespace(&self, _namespace: &str) -> bool {
+        true
     }
 }
 
@@ -51,6 +56,7 @@ pub async fn require_api_key(
         let authenticated = AuthenticatedApiKey {
             name: "deriveFromStore".to_string(),
             scopes: vec![ApiScope::Admin, ApiScope::Read, ApiScope::Write],
+            namespaces: Vec::new(),
         };
         request.extensions_mut().insert(authenticated);
         return vectorstore_core::turbopuffer::scope_upstream_api_key(provided, next.run(request))
@@ -66,6 +72,7 @@ pub async fn require_api_key(
             let authenticated = AuthenticatedApiKey {
                 name: key.name.clone(),
                 scopes: key.scopes.clone(),
+                namespaces: Vec::new(),
             };
             if !authenticated.has_scope(required_scope) {
                 return insufficient_scope(required_scope);

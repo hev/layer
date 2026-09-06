@@ -44,6 +44,9 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    #[error("Namespace not in grant: {namespace}")]
+    NamespaceNotInGrant { namespace: String },
+
     #[error("Payload too large: {0}")]
     PayloadTooLarge(String),
 
@@ -257,6 +260,14 @@ impl IntoResponse for AppError {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::NamespaceNotInGrant { namespace } => (
+                StatusCode::FORBIDDEN,
+                "namespace not in key grant",
+                format!("namespace `{namespace}` is not in the authenticated key grant"),
                 None,
                 None,
                 None,

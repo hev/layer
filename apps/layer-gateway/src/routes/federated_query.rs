@@ -463,9 +463,9 @@ async fn resolve_namespaces(
     }
     for namespace in &namespaces {
         if !namespace_allowed(auth, namespace) {
-            return Err(AppError::Forbidden(format!(
-                "namespace `{namespace}` is not in the authenticated key grant"
-            )));
+            return Err(AppError::NamespaceNotInGrant {
+                namespace: namespace.clone(),
+            });
         }
     }
     validate_namespace_limit(namespaces, state.federated_query_max_namespaces)
@@ -498,8 +498,9 @@ fn validate_namespace_limit(
     Ok(deduped)
 }
 
-fn namespace_allowed(_auth: Option<&AuthenticatedApiKey>, _namespace: &str) -> bool {
-    true
+fn namespace_allowed(auth: Option<&AuthenticatedApiKey>, namespace: &str) -> bool {
+    auth.map(|auth| auth.allows_namespace(namespace))
+        .unwrap_or(true)
 }
 
 async fn list_all_upstream_namespaces(state: &AppState) -> Result<Vec<String>, AppError> {
