@@ -293,8 +293,8 @@ vectorStore:
     orgId: ""
   credential:
     # Upstream data credential. In the default deriveFromStore auth mode,
-    # clients also send this value as the gateway bearer token. For kind=search,
-    # use keys/open inbound auth so this engine bearer stays upstream-only.
+    # clients also send this value as the gateway bearer token. For kind=search
+    # and kind=search-embedded, use keys/open inbound auth.
     apiKey: ""
     secretKey: turbopuffer-api-key
   inboundAuth:

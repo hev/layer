@@ -3679,7 +3679,14 @@ components:
           type: string
         kind:
           type: string
-          description: Store kind; `turbopuffer` is the implemented v1 kind.
+          enum:
+          - turbopuffer
+          - search
+          - search-embedded
+          description: 'Store kind. `search-embedded` is available only in the pro
+            image and treats `endpoint.url` as a `file://` or `s3://` dataset root.
+
+            '
         default:
           type: boolean
           description: 'True when this store is the default for indexes that omit

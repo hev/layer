@@ -985,7 +985,7 @@ pub(crate) fn turbolisp_to_sql(filter: &Value) -> Result<String, TurbopufferErro
     }
 }
 
-fn search_filter_and_fuzzy(
+pub(crate) fn search_filter_and_fuzzy(
     filter: &Value,
 ) -> Result<(Option<String>, Option<Value>), TurbopufferError> {
     if let Some(fuzzy) = fuzzy_from_filter(filter)? {

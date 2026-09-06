@@ -18,6 +18,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time"] }
+hevsearch-core = { git = "https://github.com/hev/search", rev = "1464e688186792c9a9fe38b4b3b4a6bfccdcae46", optional = true }
 
 [dev-dependencies]
 axum = "0.8"
