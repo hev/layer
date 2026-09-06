@@ -103,6 +103,9 @@ pub async fn delete_namespace(
         )));
     }
 
+    // Keep in-memory invalidation on the request path, before any local I/O
+    // cleanup that may later run in the background.
+    purge_in_memory_namespace_state(&state, &namespace);
     let cleanup = cleanup_namespace_state(&state, &namespace).await;
     if !cleanup.errors.is_empty() {
         return Err(AppError::Upstream(format!(
@@ -189,8 +192,6 @@ async fn cleanup_namespace_state(state: &AppState, namespace: &str) -> Namespace
                 .push(format!("Index CR garbage collection failed: {e}"));
         }
     }
-
-    purge_in_memory_namespace_state(state, namespace);
 
     if !outcome.errors.is_empty() {
         warn!(
