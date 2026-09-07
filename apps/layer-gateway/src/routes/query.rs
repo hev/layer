@@ -85,6 +85,42 @@ pub async fn query(
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    if state.turbopuffer().requires_native_wire(&namespace)
+        && !matches!(
+            crate::routes::hybrid_text::rank_by_operator(&body),
+            Some("HybridText" | "Auto")
+        )
+    {
+        return crate::routes::turbopuffer::passthrough(
+            state,
+            "POST",
+            uri.path(),
+            uri.query(),
+            Some(body),
+        )
+        .await;
+    }
+    if state.turbopuffer().requires_native_wire(&namespace) {
+        if let Some(body) = body.as_object() {
+            for key in body.keys() {
+                if ![
+                    "rank_by",
+                    "top_k",
+                    "filters",
+                    "include_attributes",
+                    "include_leg_breakdown",
+                ]
+                .contains(&key.as_str())
+                {
+                    return Err(AppError::unsupported_by_store(
+                        format!("pgvector {key}"),
+                        Some("pgvector".into()),
+                        Some(uri.path().into()),
+                    ));
+                }
+            }
+        }
+    }
     let embed = crate::routes::embed_wire::prepare_query(
         state.as_ref(),
         &namespace,
@@ -137,6 +173,16 @@ pub(crate) async fn query_prepared(
             }
             _ => crate::routes::query_router::auto_query(state, namespace, headers, map).await,
         };
+    }
+    if state.turbopuffer().requires_native_wire(&namespace) {
+        return crate::routes::turbopuffer::passthrough(
+            state,
+            "POST",
+            &format!("/v2/namespaces/{namespace}/query"),
+            None,
+            Some(body),
+        )
+        .await;
     }
     if crate::routes::hybrid_text::queries_contain_layer_operator(&body) {
         return Err(AppError::Validation(

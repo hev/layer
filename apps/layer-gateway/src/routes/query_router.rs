@@ -458,17 +458,19 @@ pub(crate) async fn run_semantic(
     )
     .await?;
     let mut rows = query_results_to_rows(&output.results);
+    crate::routes::hybrid_text::restore_native_query_ids(state, namespace, &mut rows);
     let has_more = rows.len() > page_end as usize;
     rows = rows
         .into_iter()
         .skip(offset as usize)
         .take(request.top_k as usize)
         .collect();
-    let next_cursor = if has_more && page_end < 10_000 {
-        Some(FusedCursor::next(page_end).encode())
-    } else {
-        None
-    };
+    let next_cursor =
+        if !state.turbopuffer().requires_native_wire(namespace) && has_more && page_end < 10_000 {
+            Some(FusedCursor::next(page_end).encode())
+        } else {
+            None
+        };
     Ok((rows, None, watermark, next_cursor))
 }
 

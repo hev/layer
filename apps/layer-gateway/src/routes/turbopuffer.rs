@@ -31,6 +31,10 @@ pub async fn passthrough_query_post(
     OriginalUri(uri): OriginalUri,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    if state.turbopuffer().requires_native_wire(&namespace) {
+        let path = uri.path().replacen("/v1/namespaces/", "/v2/namespaces/", 1);
+        return passthrough(state, "POST", &path, uri.query(), Some(body)).await;
+    }
     let embed = crate::routes::embed_wire::prepare_query(
         state.as_ref(),
         &namespace,

@@ -97,6 +97,47 @@ pub async fn upsert_or_delete(
     OriginalUri(uri): OriginalUri,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    if state.turbopuffer().requires_native_wire(&namespace) {
+        let mut ids = Vec::new();
+        for key in ["upsert_rows", "deletes"] {
+            if let Some(rows) = body.get(key).and_then(Value::as_array) {
+                ids.extend(
+                    rows.iter()
+                        .filter_map(|row| {
+                            if key == "upsert_rows" {
+                                row.get("id")
+                            } else {
+                                Some(row)
+                            }
+                        })
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+        }
+        if let Some(values) = body
+            .get("upsert_columns")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_array)
+        {
+            ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+        let response = crate::routes::turbopuffer::passthrough(
+            Arc::clone(&state),
+            "POST",
+            uri.path(),
+            uri.query(),
+            Some(body),
+        )
+        .await?;
+        if response.status().is_success() {
+            if state.aerospike_runtime.generation() > 0 {
+                delete_cache_ids(&state, &namespace, &ids).await;
+            }
+            state.namespace_list_cache.clear();
+        }
+        return Ok(response);
+    }
     let search_store = state.namespace_uses_search_store(&namespace);
     let embed = crate::routes::embed_wire::prepare_write(
         state.as_ref(),

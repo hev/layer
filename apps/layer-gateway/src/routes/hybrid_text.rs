@@ -1352,6 +1352,24 @@ pub(crate) async fn run_hybrid_text(
     request: &HybridRequest,
     extra_leg: Option<LegSpec>,
 ) -> Result<HybridOutcome, AppError> {
+    // RFC 0114's phase-one bundle serves BM25 and dense legs only. An
+    // explicit exact-only request uses the BM25 anchor (plus Auto's ANN leg);
+    // it does not manufacture support for the vendor Fuzzy filter.
+    let phase_one = state.turbopuffer().requires_native_wire(namespace);
+    if phase_one && expr.fuzziness != Fuzziness::Fixed(0) {
+        return Err(AppError::unsupported_by_store(
+            "pgvector Fuzzy; phase-one hybrid requires fuzziness: 0".to_string(),
+            Some("pgvector".to_string()),
+            None,
+        ));
+    }
+    if phase_one && (request.cursor.is_some() || request.temporal_filter.is_some()) {
+        return Err(AppError::unsupported_by_store(
+            "pgvector hybrid cursor/temporal_filter".to_string(),
+            Some("pgvector".to_string()),
+            None,
+        ));
+    }
     let policy = tokenize_query_input_with_stopwords(&expr.input, &expr.stopwords);
     // Zero-token guard (RFC 0090): stop-word removal must not turn a valid
     // input into a 422 — an all-stop-word query keeps its BM25 anchor leg
@@ -1396,7 +1414,15 @@ pub(crate) async fn run_hybrid_text(
         .unwrap_or_else(|| default_per_leg_limit(fetch_depth));
 
     let had_extra_leg = extra_leg.is_some();
-    let mut specs = build_hybrid_leg_specs(expr, &policy.tokens, request.filters.as_ref());
+    let mut specs = if phase_one {
+        vec![LegSpec {
+            label: "bm25".to_string(),
+            rank_by: json!([expr.field, "BM25", expr.input]),
+            filter: request.filters.clone(),
+        }]
+    } else {
+        build_hybrid_leg_specs(expr, &policy.tokens, request.filters.as_ref())
+    };
     if let Some(extra) = extra_leg {
         specs.push(extra);
     }
@@ -1439,7 +1465,7 @@ pub(crate) async fn run_hybrid_text(
     // queries never reach this branch — the fallback is purely additive.
     // An all-stop-word query has no fuzzy tokens to surface on; the BM25-only
     // fusion result stands.
-    let surfaced = rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
+    let surfaced = !phase_one && rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
     if surfaced {
         let surfacing = build_surfacing_leg_specs(expr, &policy.tokens, request.filters.as_ref());
         effective_leg_count = surfacing.len();
@@ -1462,7 +1488,7 @@ pub(crate) async fn run_hybrid_text(
         .skip(offset as usize)
         .take(request.top_k as usize)
         .collect();
-    let next_cursor = if has_more && page_end < FUSED_CURSOR_MAX_OFFSET {
+    let next_cursor = if !phase_one && has_more && page_end < FUSED_CURSOR_MAX_OFFSET {
         Some(FusedCursor::next(page_end).encode())
     } else {
         None
@@ -1496,6 +1522,7 @@ pub(crate) async fn run_hybrid_text(
         echo["fuzziness_clamped"] = json!(true);
     }
 
+    restore_native_query_ids(state, namespace, &mut rows);
     Ok(HybridOutcome {
         rows,
         echo,
@@ -1503,6 +1530,22 @@ pub(crate) async fn run_hybrid_text(
         watermark,
         next_cursor,
     })
+}
+
+/// Native SQL adapters encode wire IDs in the trait's string slot while RRF
+/// groups candidates. Restore the original JSON type only after fusion.
+pub(crate) fn restore_native_query_ids(state: &AppState, namespace: &str, rows: &mut [Value]) {
+    if state.turbopuffer().requires_native_wire(namespace) {
+        for row in rows {
+            if let Some(id) = row
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| serde_json::from_str::<Value>(id).ok())
+            {
+                row["id"] = id;
+            }
+        }
+    }
 }
 
 pub(crate) fn log_hybrid_history(

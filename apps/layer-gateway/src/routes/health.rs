@@ -48,5 +48,13 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     }
 
+    if let Err(error) = state.turbopuffer().check_readiness().await {
+        tracing::warn!(%error, "VectorStore readiness failed");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status":"store_unavailable"})),
+        )
+            .into_response();
+    }
     health(State(state)).await.into_response()
 }

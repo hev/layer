@@ -1544,6 +1544,14 @@ struct MetricsTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for MetricsTurbopufferClient {
+    async fn check_readiness(&self) -> Result<(), TurbopufferError> {
+        self.inner.check_readiness().await
+    }
+
+    fn requires_native_wire(&self, namespace: &str) -> bool {
+        self.inner.requires_native_wire(namespace)
+    }
+
     async fn passthrough(
         &self,
         method: &str,

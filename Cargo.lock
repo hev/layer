@@ -8654,6 +8654,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "hevsearch-core",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

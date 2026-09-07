@@ -147,6 +147,21 @@ fn any_unindexed_bytes_nonzero(value: &Value) -> bool {
 
 #[async_trait]
 pub trait TurbopufferClient: Send + Sync {
+    /// Adapters that must see the complete wire request before gateway parsing
+    /// (including unknown options and numeric IDs) opt out of portable writes
+    /// and parsed single queries. Gateway-owned hybrid orchestration still uses legs.
+    /// These adapters encode ranked-query IDs as serialized JSON in the trait's
+    /// string ID slot; the gateway restores the wire type after grouping/fusion.
+    fn requires_native_wire(&self, _namespace: &str) -> bool {
+        false
+    }
+
+    /// Local adapters may fail readiness when their required database or
+    /// extensions disappear. Remote proxy backends keep their existing policy.
+    async fn check_readiness(&self) -> Result<(), TurbopufferError> {
+        Ok(())
+    }
+
     /// Raw Turbopuffer-compatible pass-through for API surfaces where
     /// hevlayer does not add cache/history/consistency behavior.
     async fn passthrough(
@@ -439,6 +454,18 @@ impl RoutingTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for RoutingTurbopufferClient {
+    async fn check_readiness(&self) -> Result<(), TurbopufferError> {
+        for client in self.clients.values() {
+            client.check_readiness().await?;
+        }
+        Ok(())
+    }
+
+    fn requires_native_wire(&self, namespace: &str) -> bool {
+        self.client_for_namespace(Some(namespace))
+            .is_ok_and(|client| client.requires_native_wire(namespace))
+    }
+
     async fn passthrough(
         &self,
         method: &str,
@@ -446,7 +473,9 @@ impl TurbopufferClient for RoutingTurbopufferClient {
         query: Option<&str>,
         body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
-        self.client_for_namespace(namespace_from_path(path))?
+        let namespace = namespace_from_path(path)
+            .map(|name| percent_encoding::percent_decode_str(name).decode_utf8_lossy());
+        self.client_for_namespace(namespace.as_deref())?
             .passthrough(method, path, query, body)
             .await
     }
