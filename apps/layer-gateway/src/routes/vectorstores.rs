@@ -105,6 +105,7 @@ fn project_resolved_vectorstore(state: &AppState, store: &ResolvedVectorStore) -
         kind: match store.kind {
             ResolvedVectorStoreKind::Turbopuffer => "turbopuffer".to_string(),
             ResolvedVectorStoreKind::Search => "search".to_string(),
+            ResolvedVectorStoreKind::Pgvector => "pgvector".to_string(),
         },
         default: store.name == state.default_store,
         endpoint: VectorStoreEndpoint {

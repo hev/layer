@@ -5,7 +5,8 @@ edition = "2021"
 autotests = false
 
 [features]
-default = []
+default = ["pgvector"]
+pgvector = ["vectorstore-core/pgvector"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pro"))'] }
@@ -40,7 +41,7 @@ chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1"
 prometheus = "0.14"
 metrics-catalog = { path = "../../crates/metrics-catalog" }
-vectorstore-core = { path = "../../crates/vectorstore-core" }
+vectorstore-core = { path = "../../crates/vectorstore-core", default-features = false }
 base64 = "0.23"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 

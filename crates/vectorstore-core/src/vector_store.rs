@@ -19,6 +19,7 @@ pub struct ResolvedVectorStore {
 pub enum ResolvedVectorStoreKind {
     Turbopuffer,
     Search,
+    Pgvector,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +126,7 @@ impl Default for InboundAuthSpec {
 enum InboundAuthMode {
     #[default]
     DeriveFromStore,
+    Open,
 }
 
 pub async fn resolve_vector_stores_from_json(
@@ -255,6 +257,7 @@ fn resolve_vector_store_specs(
                 ResolvedVectorStoreKind::Turbopuffer
             }
             kind if kind.eq_ignore_ascii_case("search") => ResolvedVectorStoreKind::Search,
+            kind if kind.eq_ignore_ascii_case("pgvector") => ResolvedVectorStoreKind::Pgvector,
             _ => {
                 return Err(VectorStoreError::InvalidSpec {
                     namespace: namespace.to_string(),
@@ -324,8 +327,8 @@ fn resolve_vector_store_specs(
 }
 
 fn resolve_inbound_auth(
-    _namespace: &str,
-    _store_name: &str,
+    namespace: &str,
+    store_name: &str,
     spec: &VectorStoreSpec,
     upstream_api_key: Option<&str>,
 ) -> Result<InboundAuth, VectorStoreError> {
@@ -334,7 +337,22 @@ fn resolve_inbound_auth(
         .as_ref()
         .map(|auth| auth.mode)
         .unwrap_or_default();
+    if spec.kind.eq_ignore_ascii_case("pgvector") {
+        return match mode {
+            InboundAuthMode::Open => Ok(InboundAuth::open()),
+            _ => Err(VectorStoreError::InvalidSpec {
+                namespace: namespace.to_string(),
+                name: store_name.to_string(),
+                message: "pgvector requires explicit inboundAuth.mode: open".to_string(),
+            }),
+        };
+    }
     match mode {
+        InboundAuthMode::Open => Err(VectorStoreError::InvalidSpec {
+            namespace: namespace.to_string(),
+            name: store_name.to_string(),
+            message: "open inbound auth is only supported for pgvector".to_string(),
+        }),
         InboundAuthMode::DeriveFromStore => {
             if let Some(api_key) = upstream_api_key.and_then(trimmed_non_empty) {
                 Ok(InboundAuth::derived_admin_key(api_key.to_string()))
@@ -387,6 +405,24 @@ fn trimmed_non_empty(value: &str) -> Option<&str> {
         None
     } else {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pgvector_requires_explicit_open_auth() {
+        let raw = r#"{"pg":{"kind":"pgvector","endpoint":{"url":"postgresql://localhost/layer"},"inboundAuth":{"mode":"open"}}}"#;
+        let stores = resolve_vector_stores_from_json(raw, "test").await.unwrap();
+        assert_eq!(stores.stores["pg"].kind, ResolvedVectorStoreKind::Pgvector);
+        assert!(stores.inbound_auth.is_open());
+        let implicit = raw.replace(r#","inboundAuth":{"mode":"open"}"#, "");
+        assert!(resolve_vector_stores_from_json(&implicit, "test").await.is_err());
+        for kind in ["turbopuffer", "search", "search-embedded"] {
+            assert!(resolve_vector_stores_from_json(&raw.replace("pgvector", kind), "test").await.is_err());
+        }
     }
 }
 

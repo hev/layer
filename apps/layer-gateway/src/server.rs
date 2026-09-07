@@ -94,6 +94,7 @@ pub async fn run_with_options(options: ServerOptions) {
         .map(|store| match store.kind {
             ResolvedVectorStoreKind::Turbopuffer => "turbopuffer",
             ResolvedVectorStoreKind::Search => "search",
+            ResolvedVectorStoreKind::Pgvector => "pgvector",
         })
         .unwrap_or("turbopuffer");
     metrics.set_store_kind(default_store_kind);
@@ -101,6 +102,7 @@ pub async fn run_with_options(options: ServerOptions) {
     let telemetry_backend_kinds = resolved_stores.stores.values().map(|store| match store.kind {
         ResolvedVectorStoreKind::Turbopuffer => "turbopuffer".to_string(),
         ResolvedVectorStoreKind::Search => "search".to_string(),
+        ResolvedVectorStoreKind::Pgvector => "pgvector".to_string(),
     });
     if config.telemetry_enabled {
         if let Some(telemetry) = Telemetry::new(
@@ -149,6 +151,24 @@ pub async fn run_with_options(options: ServerOptions) {
                 }
                 client
             }
+            #[cfg(feature = "pgvector")]
+            ResolvedVectorStoreKind::Pgvector => Arc::new(
+                vectorstore_core::pgvector::PgvectorClient::connect(
+                    &store.endpoint_url,
+                    &format!("{}/{}", config.vector_store_namespace, store.name),
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to initialize pgvector store {}: {error}",
+                        store.name
+                    )
+                }),
+            ),
+            #[cfg(not(feature = "pgvector"))]
+            ResolvedVectorStoreKind::Pgvector => {
+                panic!("pgvector VectorStore requires a gateway built with the pgvector feature")
+            }
             ResolvedVectorStoreKind::Search => Arc::new(HttpSearchClient::new(
                 store.upstream_api_key.as_deref(),
                 &store.endpoint_url,
@@ -158,7 +178,7 @@ pub async fn run_with_options(options: ServerOptions) {
         info!(
             vector_store = %store.name,
             kind = ?store.kind,
-            endpoint = %store.endpoint_url,
+            endpoint = %if store.kind == ResolvedVectorStoreKind::Pgvector { "postgresql://[redacted]" } else { &store.endpoint_url },
             "VectorStore client initialized"
         );
     }

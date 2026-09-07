@@ -1,7 +1,7 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p hevlayer-gateway --bin hevlayer-gateway
+RUN cargo build --release -p hevlayer-gateway --bin hevlayer-gateway --features pgvector
 
 FROM debian:bookworm-slim
 RUN apt-get update \
