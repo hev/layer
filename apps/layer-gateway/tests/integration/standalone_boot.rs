@@ -13,6 +13,7 @@ async fn boots_without_kubernetes_when_store_json_is_unset() {
     drop(listener);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_hevlayer-gateway"))
+        .env("TURBOPUFFER_API_KEY", "test-token")
         .env("KUBECONFIG", "/dev/null")
         .env("PORT", port.to_string())
         .env("LAYER_AWS_COST_EXPLORER_ENABLED", "false")

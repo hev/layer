@@ -4,16 +4,38 @@
 name: hevlayer-ce
 
 services:
+  postgres:
+    # Unmodified ParadeDB Community server (pg_search 0.18.0 + vector 0.8.0).
+    # Source/notices: https://github.com/paradedb/paradedb/tree/v0.18.0
+    image: paradedb/paradedb:0.18.0@sha256:fe7c2638af33e6c3b3821bc8c7fab18629e5f43eb6ea3ad86a2966aca855dbb2
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: layer
+      POSTGRES_PASSWORD: local-layer
+      POSTGRES_DB: layer
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U layer -d layer"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
   gateway:
     image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:latest}
     restart: unless-stopped
     ports:
-      - "${GATEWAY_PORT:-8080}:8080"
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     environment:
       PORT: "8080"
       LAYER_LICENSE: ${HEVLAYER_LICENSE:-}
-      LAYER_SECRET_LOCAL_API_KEY: ${TURBOPUFFER_API_KEY:?set your Turbopuffer key}
+      TURBOPUFFER_API_KEY: ${TURBOPUFFER_API_KEY:-}
+      PGVECTOR_URL: postgresql://layer:local-layer@postgres:5432/layer
+      LAYER_TELEMETRY: "off"
+      AWS_EC2_METADATA_DISABLED: "true"
       TPUF_URL: ${TPUF_URL:-https://api.turbopuffer.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -23,3 +45,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+volumes:
+  postgres:

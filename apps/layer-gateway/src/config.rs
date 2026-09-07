@@ -351,8 +351,9 @@ fn stores_json_from_env() -> Option<String> {
         eprintln!("warning: LAYER_STORES_JSON is deprecated; use LAYER_STORE_JSON");
         return Some(stores_json.to_string());
     }
-    // TPUF_URL alone configures the default store — the turbopuffer region is
+    // In Pro, TPUF_URL alone configures the default store — the region is
     // already encoded in the endpoint host, so no region field is synthesized.
+    #[cfg(feature = "pro")]
     if let Some(url) = env::var("TPUF_URL").ok().and_then(trimmed_non_empty) {
         return Some(
             serde_json::json!({
@@ -378,23 +379,55 @@ fn default_store_json() -> Option<String> {
 
 #[cfg(not(feature = "pro"))]
 fn default_store_json() -> Option<String> {
-    let region = env::var("TURBOPUFFER_REGION")
-        .ok()
-        .and_then(trimmed_non_empty)
-        .unwrap_or_else(|| DEFAULT_TURBOPUFFER_REGION.to_string());
     Some(
-        serde_json::json!({
-            "default": {
-                "kind": "turbopuffer",
-                "endpoint": {
-                    "url": "https://api.turbopuffer.com",
-                    "region": region
-                },
-                "inboundAuth": {"mode": "deriveFromStore"}
-            }
-        })
+        ce_default_store_json(
+            env::var("TURBOPUFFER_API_KEY").ok().as_deref(),
+            env::var("TPUF_URL").ok().as_deref(),
+            env::var("TURBOPUFFER_REGION").ok().as_deref(),
+            env::var("PGVECTOR_URL").ok().as_deref(),
+        )
         .to_string(),
     )
+}
+
+#[cfg(not(feature = "pro"))]
+fn ce_default_store_json(
+    api_key: Option<&str>,
+    tpuf_url: Option<&str>,
+    region: Option<&str>,
+    pgvector_url: Option<&str>,
+) -> serde_json::Value {
+    let non_empty = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    if let Some(key) = non_empty(api_key) {
+        // Selection depends only on presence, never on upstream authentication
+        // success: a rejected key must not switch the user's data store.
+        let mut endpoint = serde_json::json!({
+            "url": non_empty(tpuf_url).unwrap_or_else(|| "https://api.turbopuffer.com".into())
+        });
+        if non_empty(tpuf_url).is_none() {
+            endpoint["region"] = non_empty(region)
+                .unwrap_or_else(|| DEFAULT_TURBOPUFFER_REGION.into())
+                .into();
+        }
+        serde_json::json!({"default": {
+            "kind": "turbopuffer",
+            "endpoint": endpoint,
+            "credential": {"apiKey": key},
+            "inboundAuth": {"mode": "deriveFromStore"}
+        }})
+    } else {
+        serde_json::json!({"default": {
+            "kind": "pgvector",
+            "endpoint": {"url": non_empty(pgvector_url)
+                .unwrap_or_else(|| "postgresql://layer:local-layer@postgres:5432/layer".into())},
+            "inboundAuth": {"mode": "open"}
+        }})
+    }
 }
 
 fn telemetry_enabled(layer_telemetry: Option<&str>, do_not_track: Option<&str>) -> bool {
@@ -432,23 +465,37 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_store_json, telemetry_enabled, trimmed_non_empty};
+    use super::{telemetry_enabled, trimmed_non_empty};
 
     #[cfg(feature = "pro")]
     #[test]
     fn pro_does_not_synthesize_a_standalone_store() {
-        assert_eq!(default_store_json(), None);
+        assert_eq!(super::default_store_json(), None);
     }
 
     #[cfg(not(feature = "pro"))]
     #[test]
-    fn open_gateway_synthesizes_a_standalone_store() {
-        let store: serde_json::Value =
-            serde_json::from_str(&default_store_json().expect("open fallback")).unwrap();
-        assert_eq!(
-            store["default"]["endpoint"]["url"],
-            "https://api.turbopuffer.com"
-        );
+    fn ce_default_store_selection_depends_only_on_key_presence() {
+        for key in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("tpuf-valid"),
+            Some("invalid-but-set"),
+        ] {
+            let store = super::ce_default_store_json(key, Some("http://upstream:8081"), None, None);
+            let set = key.is_some_and(|key| !key.trim().is_empty());
+            assert_eq!(
+                store["default"]["kind"],
+                if set { "turbopuffer" } else { "pgvector" }
+            );
+            if set {
+                assert_eq!(store["default"]["credential"]["apiKey"], key.unwrap());
+                assert_eq!(store["default"]["endpoint"]["url"], "http://upstream:8081");
+            } else {
+                assert_eq!(store["default"]["inboundAuth"]["mode"], "open");
+            }
+        }
     }
 
     #[test]
