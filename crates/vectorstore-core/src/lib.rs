@@ -1,9 +1,11 @@
 pub mod auth;
+pub mod capabilities;
 #[cfg(feature = "embedded-engine")]
 pub mod embedded_search;
 pub mod models;
 #[cfg(feature = "pgvector")]
 pub mod pgvector;
+pub mod pgvector_capabilities;
 pub mod s3;
 pub mod search;
 pub mod turbopuffer;

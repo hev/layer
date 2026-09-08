@@ -1,3 +1,44 @@
+pub const SEARCH_CAPABILITIES: crate::capabilities::Capabilities =
+    crate::capabilities::Capabilities {
+        kind: "search",
+        coverage: search_coverage,
+    };
+
+fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabilities::Coverage {
+    use crate::capabilities::{Coverage, WireFeature::*};
+    match feature {
+                DeleteIds | Fetch | Dense | Fts | Hybrid | Projection
+                | ScalarFilters | ArrayFilters | MultiVector | OrderedScan | Facet
+                | DeleteByFilter | ImportArrow | Warm | NearestToId | Temporal | LegBreakdown
+                | Auto | Threads => Coverage::supported(),
+                UpsertRows | UpsertColumns => Coverage::approximate(
+                    "Requires vector, vectors, or text; reserved attributes are omitted.",
+                ),
+                NamespaceCrud => Coverage::approximate("Namespace delete and metadata reads; native schema CRUD/listing passthrough is unavailable."),
+                Fuzzy => Coverage::approximate("Auto fuzziness is clamped to exact-only; explicit numeric fuzziness is forwarded."),
+                DistanceMetric => Coverage::approximate(
+                    "Single-vector L2; multivector cosine; no per-namespace metric selection.",
+                ),
+                PatchRows => {
+                    Coverage::approximate("Read/merge/upsert; not an atomic upstream patch.")
+                }
+                PatchColumns => {
+                    Coverage::approximate("Read/merge/upsert; not an atomic upstream patch.")
+                }
+                Consistency => Coverage::approximate(
+                    "Row-count settling heuristic; no vendor indexing backlog.",
+                ),
+                Snapshots => {
+                    Coverage::approximate("Facet-based snapshots use heuristic stability.")
+                }
+                Udf => Coverage::approximate("Completion markers remain cache-only."),
+                Embed => Coverage::approximate(
+                    "Gateway-resolved embedding only; native schema passthrough is unavailable.",
+                ),
+                _ => Coverage::unsupported(),
+            }
+}
+
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
@@ -47,6 +88,10 @@ impl MockSearchClient {
 
 #[async_trait]
 impl TurbopufferClient for MockSearchClient {
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        SEARCH_CAPABILITIES
+    }
+
     async fn passthrough(
         &self,
         _method: &str,
@@ -54,10 +99,17 @@ impl TurbopufferClient for MockSearchClient {
         _query: Option<&str>,
         _body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        let rejection = self
+            .capabilities()
+            .require(crate::capabilities::WireFeature::Passthrough)
+            .expect_err("search passthrough must be declared unsupported");
         Ok(TurbopufferPassthroughResponse {
             status: 422,
             content_type: Some("application/json".to_string()),
-            body: br#"{"error":"UnsupportedByStore","message":"mock search does not support turbopuffer passthrough"}"#.to_vec(),
+            body: serde_json::to_vec(
+                &json!({"error": "UnsupportedByStore", "message": rejection.to_string()}),
+            )
+            .expect("error serializes"),
         })
     }
 
@@ -147,7 +199,8 @@ impl TurbopufferClient for MockSearchClient {
         _legs: &[Value],
         _rerank_by: Option<&Value>,
     ) -> Result<Value, TurbopufferError> {
-        Err(HttpSearchClient::unsupported("multi_ranked_query"))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::MultiQuery)
     }
 
     async fn fetch(
@@ -292,6 +345,10 @@ impl HttpSearchClient {
 
 #[async_trait]
 impl TurbopufferClient for HttpSearchClient {
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        SEARCH_CAPABILITIES
+    }
+
     async fn passthrough(
         &self,
         _method: &str,
@@ -299,10 +356,17 @@ impl TurbopufferClient for HttpSearchClient {
         _query: Option<&str>,
         _body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        let rejection = self
+            .capabilities()
+            .require(crate::capabilities::WireFeature::Passthrough)
+            .expect_err("search passthrough must be declared unsupported");
         Ok(TurbopufferPassthroughResponse {
             status: 422,
             content_type: Some("application/json".to_string()),
-            body: br#"{"error":"UnsupportedByStore","message":"search backend does not support turbopuffer passthrough"}"#.to_vec(),
+            body: serde_json::to_vec(
+                &json!({"error": "UnsupportedByStore", "message": rejection.to_string()}),
+            )
+            .expect("error serializes"),
         })
     }
 
@@ -310,6 +374,8 @@ impl TurbopufferClient for HttpSearchClient {
         &self,
         namespace: &str,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::NamespaceCrud)?;
         let resp = self
             .client
             .delete(format!("{}/ns/{namespace}", self.base_url))
@@ -320,6 +386,8 @@ impl TurbopufferClient for HttpSearchClient {
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Warm)?;
         self.post_json(
             &format!("/ns/{namespace}/warmup"),
             &json!({ "queries": [] }),
@@ -333,6 +401,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         docs: &[UpsertDoc],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::UpsertRows)?;
         let rows = docs
             .iter()
             .map(|doc| {
@@ -399,6 +469,8 @@ impl TurbopufferClient for HttpSearchClient {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::ImportArrow)?;
         let resp = self
             .client
             .post(format!("{}/ns/{namespace}/import", self.base_url))
@@ -415,6 +487,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         docs: &[PatchDoc],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::PatchRows)?;
         let mut upserts = Vec::with_capacity(docs.len());
         for doc in docs {
             let mut row = self
@@ -436,6 +510,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         columns: &PatchColumns,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::PatchColumns)?;
         let docs = (0..columns.ids.len())
             .map(|idx| {
                 let attributes = columns
@@ -459,6 +535,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::DeleteIds)?;
         let body = self
             .post_json(&format!("/ns/{namespace}/delete"), &json!({ "ids": ids }))
             .await?;
@@ -472,6 +550,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         filters: &Value,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::DeleteByFilter)?;
         let filter = turbolisp_to_sql(filters)?;
         let body = self
             .post_json(
@@ -492,6 +572,8 @@ impl TurbopufferClient for HttpSearchClient {
         filters: Option<&Value>,
         include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Dense)?;
         let filter = filters.map(turbolisp_to_sql).transpose()?;
         let body = json!({
             "vector": vector.iter().map(|v| *v as f32).collect::<Vec<_>>(),
@@ -516,6 +598,9 @@ impl TurbopufferClient for HttpSearchClient {
         filters: Option<&Value>,
         include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
+        if let Some(feature) = crate::capabilities::WireFeature::for_rank(rank_by) {
+            self.capabilities().require(feature)?;
+        }
         let (filter, fuzzy) = filters
             .map(search_filter_and_fuzzy)
             .transpose()?
@@ -600,7 +685,8 @@ impl TurbopufferClient for HttpSearchClient {
         _legs: &[Value],
         _rerank_by: Option<&Value>,
     ) -> Result<Value, TurbopufferError> {
-        Err(Self::unsupported("multi_ranked_query"))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::MultiQuery)
     }
 
     async fn fetch(
@@ -608,6 +694,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Fetch)?;
         Ok(self
             .fetch_full_row(namespace, id)
             .await?
@@ -622,6 +710,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Fetch)?;
         let mut out = HashMap::new();
         for chunk in ids.chunks(500) {
             let wanted = chunk.iter().cloned().collect::<HashSet<_>>();
@@ -650,6 +740,8 @@ impl TurbopufferClient for HttpSearchClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<Vec<f64>>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::NearestToId)?;
         Ok(self
             .fetch_full_row(namespace, id)
             .await?
@@ -664,6 +756,8 @@ impl TurbopufferClient for HttpSearchClient {
         filters: Option<&Value>,
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::OrderedScan)?;
         let page_size = page_size.min(SEARCH_SCAN_PAGE_SIZE_MAX);
         let filter = filters.map(turbolisp_to_sql).transpose()?;
         let page = self
@@ -690,6 +784,8 @@ impl TurbopufferClient for HttpSearchClient {
         field: &str,
         top: usize,
     ) -> Result<Vec<FieldValueResult>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Facet)?;
         let filter = filters.map(turbolisp_to_sql).transpose()?;
         let body = json!({
             "filter": filter,
@@ -723,6 +819,8 @@ impl TurbopufferClient for HttpSearchClient {
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::NamespaceCrud)?;
         let body = self.get_json(&format!("/ns/{namespace}")).await?;
         let row_count = body.get("row_count").and_then(Value::as_u64).unwrap_or(0);
         Ok(NamespaceMeta {
@@ -979,9 +1077,20 @@ pub(crate) fn turbolisp_to_sql(filter: &Value) -> Result<String, TurbopufferErro
                 .collect::<Result<Vec<_>, TurbopufferError>>()?;
             Ok(format!("({})", parts.join(" OR ")))
         }
-        other => Err(TurbopufferError::Other(format!(
-            "UnsupportedByStore: filter op {other} is not translatable to search SQL"
-        ))),
+        other => {
+            use crate::capabilities::WireFeature;
+            let feature = match other {
+                "NotIn" | "notIn" | "Not" | "not" => WireFeature::NotFilters,
+                "Regex" | "regex" => WireFeature::RegexFilters,
+                _ => WireFeature::AdvancedFilters,
+            };
+            SEARCH_CAPABILITIES
+                .require(feature)
+                .map_err(|error| TurbopufferError::Other(format!("{error}: filter op {other}")))?;
+            Err(TurbopufferError::Other(format!(
+                "declared filter op {other} has no SQL translation"
+            )))
+        }
     }
 }
 

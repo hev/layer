@@ -108,3 +108,34 @@ async fn pgvector_live_isolation_atomicity_and_filtered_hnsw() {
     }
     result.unwrap();
 }
+
+#[tokio::test]
+async fn adapter_capabilities_match_matrix_and_default_rejections() {
+    use crate::capabilities::{Support, WireFeature};
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "capabilities-test".into(),
+    };
+    let declared = crate::pgvector_capabilities::capabilities();
+    assert_eq!(client.capabilities().kind, declared.kind);
+    for &feature in WireFeature::ALL {
+        assert_eq!(
+            client.capabilities().get(feature).support,
+            declared.get(feature).support
+        );
+    }
+    assert_eq!(
+        client.capabilities().get(WireFeature::Fts).support,
+        Support::Supported
+    );
+    assert!(client.requires_native_wire("unused"));
+    let error = client
+        .delete_by_filter("unused", &json!({}))
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("UnsupportedByStore: pgvector: delete_by_filter"));
+}

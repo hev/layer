@@ -1,3 +1,28 @@
+pub const TURBOPUFFER_CAPABILITIES: crate::capabilities::Capabilities =
+    crate::capabilities::Capabilities {
+        kind: "turbopuffer",
+        coverage: turbopuffer_coverage,
+    };
+
+fn turbopuffer_coverage(
+    feature: crate::capabilities::WireFeature,
+) -> crate::capabilities::Coverage {
+    use crate::capabilities::{Coverage, WireFeature::*};
+    match feature {
+        NamespaceCrud | UpsertRows | UpsertColumns | DeleteIds | Fetch | Dense | DistanceMetric
+        | Fts | Hybrid | Projection | ScalarFilters | NotFilters | ArrayFilters | RegexFilters
+        | AdvancedFilters | Fuzzy | AdvancedText | MultiVector | MultipleFields | MultiQuery
+        | Pagination | OrderedScan | Aggregate | PatchRows | PatchColumns | ConditionalWrites
+        | Copy | Branch | Encryption | Export | Warm | Consistency | Snapshots | Udf
+        | Passthrough | Embed | NearestToId | Temporal | LegBreakdown | Auto | Threads
+        | VectorEncoding => Coverage::supported(),
+        DeleteByFilter | Facet => Coverage::approximate(
+            "Native wire request only; the optional portable adapter primitive is unavailable.",
+        ),
+        _ => Coverage::unsupported(),
+    }
+}
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -162,6 +187,10 @@ pub trait TurbopufferClient: Send + Sync {
         Ok(())
     }
 
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        crate::capabilities::UNDECLARED
+    }
+
     /// Raw Turbopuffer-compatible pass-through for API surfaces where
     /// hevlayer does not add cache/history/consistency behavior.
     async fn passthrough(
@@ -220,9 +249,8 @@ pub trait TurbopufferClient: Send + Sync {
         _namespace: &str,
         _filters: &Value,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
-        Err(TurbopufferError::Other(
-            "UnsupportedByStore: delete_by_filter".to_string(),
-        ))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::DeleteByFilter)
     }
 
     async fn import_arrow(
@@ -231,9 +259,8 @@ pub trait TurbopufferClient: Send + Sync {
         _content_type: &str,
         _body: Vec<u8>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
-        Err(TurbopufferError::Other(
-            "UnsupportedByStore: import_arrow".to_string(),
-        ))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::ImportArrow)
     }
 
     async fn query(
@@ -309,9 +336,8 @@ pub trait TurbopufferClient: Send + Sync {
         _field: &str,
         _top: usize,
     ) -> Result<Vec<FieldValueResult>, TurbopufferError> {
-        Err(TurbopufferError::Other(
-            "UnsupportedByStore: facet".to_string(),
-        ))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::Facet)
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError>;
@@ -749,6 +775,10 @@ fn rows_from_query_body(resp_body: &Value) -> Vec<QueryResult> {
 
 #[async_trait]
 impl TurbopufferClient for HttpTurbopufferClient {
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        TURBOPUFFER_CAPABILITIES
+    }
+
     async fn passthrough(
         &self,
         method: &str,
@@ -807,6 +837,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Warm)?;
         let url = format!(
             "{}/v1/namespaces/{}/hint_cache_warm",
             self.base_url, namespace
@@ -828,6 +860,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         docs: &[UpsertDoc],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::UpsertRows)?;
         // Build row-oriented payload for Turbopuffer v2 API
         let rows: Vec<Value> = docs
             .iter()
@@ -876,6 +910,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         docs: &[PatchDoc],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::PatchRows)?;
         let rows: Vec<Value> = docs
             .iter()
             .map(|d| {
@@ -914,6 +950,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         columns: &PatchColumns,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::PatchColumns)?;
         let mut patch_columns = serde_json::Map::new();
         patch_columns.insert(
             "id".to_string(),
@@ -948,6 +986,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::DeleteIds)?;
         let body = serde_json::json!({
             "deletes": ids,
         });
@@ -979,6 +1019,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         filters: Option<&Value>,
         include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Dense)?;
         let mut body = serde_json::json!({
             "rank_by": ["vector", "ANN", vector],
             "top_k": top_k,
@@ -1021,6 +1063,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
         filters: Option<&Value>,
         include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
+        if let Some(feature) = crate::capabilities::WireFeature::for_rank(rank_by) {
+            self.capabilities().require(feature)?;
+        }
         let mut body = serde_json::json!({
             "rank_by": rank_by.clone(),
             "top_k": top_k,
@@ -1061,6 +1106,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         legs: &[Value],
         rerank_by: Option<&Value>,
     ) -> Result<Value, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::MultiQuery)?;
         let mut body = serde_json::json!({
             "queries": legs,
         });
@@ -1088,6 +1135,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Fetch)?;
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": 1,
@@ -1143,6 +1192,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Fetch)?;
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1205,6 +1256,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<Vec<f64>>, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::NearestToId)?;
         // Ask for the `vector` column explicitly — Turbopuffer omits it from
         // query rows unless requested. This is the *only* place the gateway
         // pulls a vector out of upstream; everywhere else, `is_system_column`
@@ -1260,6 +1313,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
         filters: Option<&Value>,
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::OrderedScan)?;
         // Build filter: Id > cursor AND any user filters
         let cursor_filter = cursor.map(|c| serde_json::json!(["id", "Gt", c]));
 
@@ -1342,6 +1397,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::NamespaceCrud)?;
         let url = format!("{}/v2/namespaces/{}/metadata", self.base_url, namespace);
         let resp = self
             .authorize(self.client.get(&url))?
@@ -1691,6 +1748,10 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        TURBOPUFFER_CAPABILITIES
+    }
+
     async fn passthrough(
         &self,
         method: &str,

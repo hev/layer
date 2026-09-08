@@ -331,3 +331,34 @@ impl IntoResponse for AppError {
         response
     }
 }
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use vectorstore_core::capabilities::WireFeature;
+    use vectorstore_core::pgvector_capabilities::PGVECTOR_CAPABILITIES;
+
+    #[tokio::test]
+    async fn declared_unsupported_feature_keeps_the_existing_422_wire_shape() {
+        let error = PGVECTOR_CAPABILITIES
+            .require(WireFeature::MultiQuery)
+            .unwrap_err();
+        assert!(AppError::is_store_support_error(&error));
+        let response = AppError::from_store_support_error(
+            error,
+            Some("pgvector".into()),
+            Some("batchQueryNamespace".into()),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "UnsupportedByStore");
+        assert_eq!(body["store"], "pgvector");
+        assert_eq!(body["route"], "batchQueryNamespace");
+        assert!(body["message"].as_str().unwrap().contains("multi_query"));
+        assert!(body.get("feature").is_none());
+    }
+}

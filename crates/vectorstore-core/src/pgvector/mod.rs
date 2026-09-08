@@ -542,6 +542,10 @@ fn doc(mut value: Value) -> DocumentResponse {
 
 #[async_trait]
 impl TurbopufferClient for PgvectorClient {
+    fn capabilities(&self) -> crate::capabilities::Capabilities {
+        crate::pgvector_capabilities::PGVECTOR_CAPABILITIES
+    }
+
     async fn check_readiness(&self) -> Result<()> {
         let versions: Vec<(String, String)> = sqlx::query_as(
             "SELECT extname, extversion FROM pg_extension WHERE extname IN ('vector','pg_search')",
