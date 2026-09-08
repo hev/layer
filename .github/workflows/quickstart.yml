@@ -1,0 +1,45 @@
+name: CE quickstart
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: paradedb/paradedb:0.18.0@sha256:fe7c2638af33e6c3b3821bc8c7fab18629e5f43eb6ea3ad86a2966aca855dbb2
+        env:
+          POSTGRES_USER: layer
+          POSTGRES_PASSWORD: local-layer
+          POSTGRES_DB: layer
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U layer -d layer"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - name: Start gateway
+        env:
+          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          docker run -d --name gateway --network host \
+            -e "PGVECTOR_URL=postgresql://layer:local-layer@127.0.0.1:$PG_PORT/layer" \
+            -e TURBOPUFFER_API_KEY= -e LAYER_TELEMETRY=off \
+            -e AWS_EC2_METADATA_DISABLED=true \
+            hevlayer/layer-gateway:edge
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://localhost:8080/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs gateway
+          exit 1
+      - name: Write and query
+        run: |
+          curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products \
+            -H 'Content-Type: application/json' \
+            -d '{"distance_metric":"cosine_distance","upsert_rows":[{"id":"earbuds","vector":[1,0,0]}]}'
+          curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products/query \
+            -H 'Content-Type: application/json' \
+            -d '{"rank_by":["vector","ANN",[1,0,0]],"top_k":1}' | \
+            python3 -c 'import json,sys; assert json.load(sys.stdin)["rows"][0]["id"] == "earbuds"'
+      - name: Stop gateway
+        if: always()
+        run: docker rm -f gateway
