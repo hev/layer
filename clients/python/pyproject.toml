@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hevlayer"
+version = "0.6.0-dev"
+description = "Typed async Python client for the hevlayer gateway"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hevlayer"]

@@ -21,7 +21,7 @@ services:
       timeout: 3s
       retries: 30
   gateway:
-    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:latest}
+    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:edge}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
@@ -45,6 +45,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  clients:
+    profiles: [acceptance]
+    build:
+      # The public checkout is its own context; layer-pro sets this to its root.
+      context: ${ACCEPTANCE_CONTEXT:-.}
+      dockerfile: infra/compose/pgvector/Dockerfile.clients
+    environment:
+      PGVECTOR_GATEWAY_URL: http://gateway:8080
+      PGVECTOR_TEST_PREFIX: ${PGVECTOR_TEST_PREFIX:-scratch-lyr-35}
+    depends_on:
+      gateway:
+        condition: service_healthy
 
 volumes:
   postgres:

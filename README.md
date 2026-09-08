@@ -145,13 +145,24 @@ See `docs/telemetry.md`.
 
 ## Docker Compose
 
-The repo ships a `docker-compose.yml` for the same gateway with a restart
-policy and health check. Copy `.env.example` to `.env`, fill in your
-turbopuffer API key, and:
+The bundle pulls `hevlayer/layer-gateway:edge` and pinned ParadeDB; no Rust
+toolchain is required. Leave `TURBOPUFFER_API_KEY` unset or blank for local
+pgvector, or set it to use Turbopuffer.
 
 ```sh
-docker compose up
+docker compose up --wait
 ```
+
+Run the optional Python and TypeScript acceptance suites against local pgvector:
+
+```sh
+docker compose --profile acceptance run --build --rm clients
+docker compose down -v --remove-orphans
+```
+
+Only the clients harness builds locally. See the
+[Postgres acceptance README](infra/compose/pgvector/README.md) for image and port
+overrides and the layer-pro checkout commands.
 
 ## Install on AWS
 

@@ -1,0 +1,26 @@
+{
+  "name": "@hevlayer/sdk-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "harness": "tsx src/cli.ts",
+    "test": "npm run typecheck && npm run test:clients",
+    "test:namespace-cleanup": "python3 test/namespace_cleanup_test.py -v",
+    "test:clients": "npm run test:namespace-cleanup && npm run harness -- validate --lang python && npm run harness -- validate --lang go && npm run harness -- validate --lang typescript && npm run harness -- examples test && npm run harness -- turbopuffer-e2e --skip-doc-fetch --skip-doc-python",
+    "test:clients:full": "npm run harness -- all --lang python && npm run harness -- all --lang go && npm run harness -- all --lang typescript && npm run harness -- turbopuffer-e2e",
+    "examples:test": "npm run harness -- examples test",
+    "typecheck": "tsc --noEmit",
+    "lint:openapi": "redocly lint ../../apps/layer-gateway/openapi.yaml ../../apps/layer-dashboard/openapi.yaml --extends=minimal"
+  },
+  "dependencies": {
+    "@redocly/cli": "latest",
+    "commander": "latest",
+    "yaml": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

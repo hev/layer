@@ -1,0 +1,1614 @@
+[
+  {
+    "name": "schema and full row upsert",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true
+        }
+      },
+      "distance_metric": "euclidean_squared",
+      "upsert_rows": [
+        {
+          "id": "a",
+          "vector": [
+            1,
+            0
+          ],
+          "text": "database database postgres",
+          "n": 1,
+          "tag": "x'; DROP TABLE nope;--",
+          "active": true
+        },
+        {
+          "id": "b",
+          "vector": [
+            0,
+            1
+          ],
+          "text": "database vector",
+          "n": 2,
+          "tag": null,
+          "active": false
+        },
+        {
+          "id": "c",
+          "vector": [
+            -1,
+            0
+          ],
+          "text": "forest trees",
+          "n": null
+        },
+        {
+          "id": "d",
+          "vector": [
+            0,
+            -1
+          ],
+          "text": "ocean water"
+        },
+        {
+          "id": 7,
+          "vector": [
+            0.7,
+            0.3
+          ],
+          "text": "numeric identity",
+          "n": 7
+        },
+        {
+          "id": "7",
+          "vector": [
+            0.6,
+            0.4
+          ],
+          "text": "string identity",
+          "n": 8
+        }
+      ]
+    },
+    "count": 6
+  },
+  {
+    "name": "schema read",
+    "op": "schema",
+    "field": "text"
+  },
+  {
+    "name": "metadata has real count and no fabricated backlog",
+    "op": "metadata",
+    "count": 6
+  },
+  {
+    "name": "dense distance uses squared euclidean",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "first": "a",
+    "dist": 0
+  },
+  {
+    "name": "squared L2 score conversion",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        "b"
+      ]
+    },
+    "ids": [
+      "b"
+    ],
+    "dist": 2
+  },
+  {
+    "name": "string ID remains distinct",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        "7"
+      ]
+    },
+    "ids": [
+      "7"
+    ]
+  },
+  {
+    "name": "numeric ID remains distinct",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        7
+      ]
+    },
+    "ids": [
+      7
+    ]
+  },
+  {
+    "name": "scalar equality",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Eq",
+        2
+      ]
+    },
+    "ids": [
+      "b"
+    ]
+  },
+  {
+    "name": "null equals missing",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Eq",
+        null
+      ]
+    },
+    "ids": [
+      "c",
+      "d"
+    ]
+  },
+  {
+    "name": "not-null excludes missing",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "NotEq",
+        null
+      ]
+    },
+    "ids": [
+      "a",
+      "b",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "not-equal includes missing",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "NotEq",
+        2
+      ]
+    },
+    "ids": [
+      "a",
+      "c",
+      "d",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "Gt",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Gt",
+        2
+      ]
+    },
+    "ids": [
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "Gte",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Gte",
+        2
+      ]
+    },
+    "ids": [
+      "b",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "Lt",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Lt",
+        2
+      ]
+    },
+    "ids": [
+      "a"
+    ]
+  },
+  {
+    "name": "Lte",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Lte",
+        2
+      ]
+    },
+    "ids": [
+      "a",
+      "b"
+    ]
+  },
+  {
+    "name": "In including null",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "In",
+        [
+          1,
+          null
+        ]
+      ]
+    },
+    "ids": [
+      "a",
+      "c",
+      "d"
+    ]
+  },
+  {
+    "name": "NotIn including null",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "NotIn",
+        [
+          1,
+          null
+        ]
+      ]
+    },
+    "ids": [
+      "b",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "empty In",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "In",
+        []
+      ]
+    },
+    "ids": []
+  },
+  {
+    "name": "empty NotIn",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "NotIn",
+        []
+      ]
+    },
+    "ids": [
+      "a",
+      "b",
+      "c",
+      "d",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "boolean filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "active",
+        "Eq",
+        false
+      ]
+    },
+    "ids": [
+      "b"
+    ]
+  },
+  {
+    "name": "SQL text is bound",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "tag",
+        "Eq",
+        "x'; DROP TABLE nope;--"
+      ]
+    },
+    "ids": [
+      "a"
+    ]
+  },
+  {
+    "name": "composed predicates",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "And",
+        [
+          [
+            "Or",
+            [
+              [
+                "n",
+                "Eq",
+                1
+              ],
+              [
+                "n",
+                "Eq",
+                2
+              ]
+            ]
+          ],
+          [
+            "Not",
+            [
+              "active",
+              "Eq",
+              false
+            ]
+          ]
+        ]
+      ]
+    },
+    "ids": [
+      "a"
+    ]
+  },
+  {
+    "name": "Not handles missing explicitly",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "Not",
+        [
+          "n",
+          "Gt",
+          2
+        ]
+      ]
+    },
+    "ids": [
+      "a",
+      "b",
+      "c",
+      "d"
+    ]
+  },
+  {
+    "name": "explicit attributes projection",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": [
+        "text"
+      ],
+      "filters": [
+        "id",
+        "Eq",
+        "a"
+      ]
+    },
+    "ids": [
+      "a"
+    ],
+    "fields": [
+      "id",
+      "$dist",
+      "text"
+    ]
+  },
+  {
+    "name": "false projection",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": false,
+      "filters": [
+        "id",
+        "Eq",
+        "a"
+      ]
+    },
+    "ids": [
+      "a"
+    ],
+    "fields": [
+      "id",
+      "$dist"
+    ]
+  },
+  {
+    "name": "explicit vector projection",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": [
+        "vector"
+      ],
+      "filters": [
+        "id",
+        "Eq",
+        "a"
+      ]
+    },
+    "ids": [
+      "a"
+    ],
+    "fields": [
+      "id",
+      "$dist",
+      "vector"
+    ]
+  },
+  {
+    "name": "native limit alias",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "limit": 1
+    },
+    "ids": [
+      "a"
+    ]
+  },
+  {
+    "name": "BM25 ranked leg",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "database"
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "ids": [
+      "a",
+      "b"
+    ],
+    "first": "a"
+  },
+  {
+    "name": "BM25 scalar filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "database"
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Eq",
+        2
+      ]
+    },
+    "ids": [
+      "b"
+    ]
+  },
+  {
+    "name": "BM25 input is text, not SQL",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "zzzz'; DROP TABLE nope;--"
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "ids": []
+  },
+  {
+    "name": "single fetch",
+    "op": "fetch",
+    "body": {
+      "id": "a"
+    },
+    "text": "database database postgres"
+  },
+  {
+    "name": "batch fetch",
+    "op": "fetch_many",
+    "body": {
+      "ids": [
+        "a",
+        "b",
+        "missing"
+      ]
+    },
+    "ids": [
+      "a",
+      "b"
+    ]
+  },
+  {
+    "name": "hybrid preserves numeric and string IDs",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "Auto",
+        "identity",
+        {
+          "route": "fused",
+          "vector": [
+            1,
+            0
+          ],
+          "fuzziness": 0
+        }
+      ],
+      "filters": [
+        "n",
+        "Gte",
+        7
+      ],
+      "top_k": 10
+    },
+    "ids": [
+      7,
+      "7"
+    ],
+    "hybrid": true
+  },
+  {
+    "name": "reject mixed patch_rows",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "patch_rows": [
+        {
+          "id": "a",
+          "n": 99
+        }
+      ]
+    },
+    "status": 422,
+    "feature": "patch_rows"
+  },
+  {
+    "name": "reject mixed patch_columns",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "patch_columns": {
+        "id": [
+          "a"
+        ],
+        "n": [
+          99
+        ]
+      }
+    },
+    "status": 422,
+    "feature": "patch_columns"
+  },
+  {
+    "name": "reject mixed delete_by_filter",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "delete_by_filter": [
+        "n",
+        "Eq",
+        1
+      ]
+    },
+    "status": 422,
+    "feature": "delete_by_filter"
+  },
+  {
+    "name": "reject mixed upsert_condition",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "upsert_condition": [
+        "n",
+        "Eq",
+        1
+      ]
+    },
+    "status": 422,
+    "feature": "upsert_condition"
+  },
+  {
+    "name": "reject mixed copy_from_namespace",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "copy_from_namespace": "other"
+    },
+    "status": 422,
+    "feature": "copy_from_namespace"
+  },
+  {
+    "name": "reject mixed distance_metric",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "distance_metric": "dot_product"
+    },
+    "status": 422,
+    "feature": "distance_metric"
+  },
+  {
+    "name": "schema DDL rolled back with unsupported option",
+    "op": "write",
+    "body": {
+      "schema": {
+        "new_field": "string"
+      },
+      "patch_rows": []
+    },
+    "status": 422,
+    "feature": "patch_rows"
+  },
+  {
+    "name": "schema unchanged after rejection",
+    "op": "schema",
+    "absent": "new_field"
+  },
+  {
+    "name": "rejected writes unchanged count",
+    "op": "metadata",
+    "count": 6
+  },
+  {
+    "name": "original row unchanged",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        "a"
+      ]
+    },
+    "ids": [
+      "a"
+    ],
+    "n": 1
+  },
+  {
+    "name": "reject query searchAfter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "searchAfter": "cursor"
+    },
+    "status": 422,
+    "feature": "searchAfter"
+  },
+  {
+    "name": "reject query cursor",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "cursor": "cursor"
+    },
+    "status": 422,
+    "feature": "cursor"
+  },
+  {
+    "name": "reject query delete_by_filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "delete_by_filter": true
+    },
+    "status": 422,
+    "feature": "delete_by_filter"
+  },
+  {
+    "name": "reject query queries",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "queries": [
+        {
+          "rank_by": [
+            "vector",
+            "ANN",
+            [
+              1,
+              0
+            ]
+          ],
+          "top_k": 20,
+          "include_attributes": true
+        },
+        {
+          "rank_by": [
+            "vector",
+            "ANN",
+            [
+              1,
+              0
+            ]
+          ],
+          "top_k": 20,
+          "include_attributes": true
+        }
+      ]
+    },
+    "status": 422,
+    "feature": "queries"
+  },
+  {
+    "name": "reject query aggregate_by",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "aggregate_by": {
+        "n": [
+          "Sum",
+          "n"
+        ]
+      }
+    },
+    "status": 422,
+    "feature": "aggregate_by"
+  },
+  {
+    "name": "reject query group_by",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "group_by": [
+        "n"
+      ]
+    },
+    "status": 422,
+    "feature": "group_by"
+  },
+  {
+    "name": "reject query exclude_attributes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "exclude_attributes": [
+        "text"
+      ]
+    },
+    "status": 422,
+    "feature": "exclude_attributes"
+  },
+  {
+    "name": "reject query consistency",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "consistency": {
+        "level": "strong"
+      }
+    },
+    "status": 422,
+    "feature": "consistency"
+  },
+  {
+    "name": "reject query vector_encoding",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "vector_encoding": "base64"
+    },
+    "status": 422,
+    "feature": "vector_encoding"
+  },
+  {
+    "name": "reject Contains",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "Contains",
+        "database"
+      ]
+    },
+    "status": 422,
+    "feature": "Contains"
+  },
+  {
+    "name": "reject ContainsAny",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "ContainsAny",
+        "database"
+      ]
+    },
+    "status": 422,
+    "feature": "ContainsAny"
+  },
+  {
+    "name": "reject Fuzzy",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "Fuzzy",
+        "database"
+      ]
+    },
+    "status": 422,
+    "feature": "Fuzzy"
+  },
+  {
+    "name": "unsupported filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "Regex",
+        ".*"
+      ]
+    },
+    "status": 422,
+    "feature": "Regex"
+  },
+  {
+    "name": "schema mismatch is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Eq",
+        "wrong"
+      ]
+    },
+    "status": 400
+  },
+  {
+    "name": "dimension mismatch is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "status": 400
+  },
+  {
+    "name": "type change rejected",
+    "op": "write",
+    "body": {
+      "schema": {
+        "n": "string"
+      }
+    },
+    "status": 400
+  },
+  {
+    "name": "dimension change rejected",
+    "op": "write",
+    "body": {
+      "schema": {
+        "vector": "[3]f32"
+      }
+    },
+    "status": 400
+  },
+  {
+    "name": "multiple text fields rejected",
+    "op": "write",
+    "body": {
+      "schema": {
+        "title": {
+          "type": "string",
+          "full_text_search": true
+        }
+      }
+    },
+    "status": 422,
+    "feature": "multiple full_text_search"
+  },
+  {
+    "name": "column upsert replaces full row",
+    "op": "write",
+    "body": {
+      "upsert_columns": {
+        "id": [
+          "a"
+        ],
+        "vector": [
+          [
+            1,
+            0
+          ]
+        ],
+        "text": [
+          "updated database"
+        ],
+        "n": [
+          10
+        ]
+      }
+    },
+    "count": 1
+  },
+  {
+    "name": "fetch reflects replacement",
+    "op": "fetch",
+    "body": {
+      "id": "a"
+    },
+    "text": "updated database",
+    "absent": "tag"
+  },
+  {
+    "name": "delete missing ID counts zero",
+    "op": "write",
+    "body": {
+      "deletes": [
+        "missing"
+      ]
+    },
+    "count": 0
+  },
+  {
+    "name": "delete numeric id only",
+    "op": "write",
+    "body": {
+      "deletes": [
+        7
+      ]
+    },
+    "count": 1
+  },
+  {
+    "name": "string ID survives numeric deletion",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        "7"
+      ]
+    },
+    "ids": [
+      "7"
+    ]
+  },
+  {
+    "name": "numeric ID deleted",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "id",
+        "Eq",
+        7
+      ]
+    },
+    "ids": []
+  },
+  {
+    "name": "malformed columns atomic",
+    "op": "write",
+    "body": {
+      "upsert_columns": {
+        "id": [
+          "z",
+          "y"
+        ],
+        "n": [
+          1
+        ]
+      }
+    },
+    "status": 400
+  },
+  {
+    "name": "new nullable schema attribute",
+    "op": "write",
+    "body": {
+      "schema": {
+        "added": "string"
+      }
+    },
+    "count": 0
+  },
+  {
+    "name": "new schema attribute readable",
+    "op": "schema",
+    "field": "added"
+  },
+  {
+    "name": "warm hint explicitly unsupported",
+    "op": "warm",
+    "status": 422,
+    "feature": "hint_cache_warm"
+  },
+  {
+    "name": "gateway BM25+dense RRF",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "Auto",
+        "database",
+        {
+          "route": "fused",
+          "vector": [
+            1,
+            0
+          ],
+          "fuzziness": 0
+        }
+      ],
+      "top_k": 3,
+      "include_attributes": [
+        "text"
+      ]
+    },
+    "first": "a",
+    "hybrid": true
+  },
+  {
+    "name": "fuzzy hybrid rejected",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "HybridText",
+        "database"
+      ],
+      "top_k": 3
+    },
+    "status": 422,
+    "feature": "Fuzzy"
+  },
+  {
+    "name": "hybrid unknown field rejected",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "Auto",
+        "database",
+        {
+          "route": "fused",
+          "vector": [
+            1,
+            0
+          ],
+          "fuzziness": 0
+        }
+      ],
+      "searchAfter": "later"
+    },
+    "status": 422,
+    "feature": "searchAfter"
+  },
+  {
+    "name": "disable scalar filtering",
+    "op": "write",
+    "body": {
+      "schema": {
+        "n": {
+          "type": "int",
+          "filterable": false
+        }
+      }
+    },
+    "count": 0
+  },
+  {
+    "name": "nonfilterable scalar rejected",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "n",
+        "Eq",
+        10
+      ]
+    },
+    "status": 400
+  }
+]
