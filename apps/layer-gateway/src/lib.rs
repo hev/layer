@@ -62,6 +62,9 @@ pub const SCAN_THREADS_MAX: u32 = 32;
 
 #[derive(Debug, Clone)]
 pub struct RestoreRunState;
+/// Operator ceiling: half of the FDE-confirmed pinned concurrency budget.
+pub const PINNED_THREADS_MAX: u32 = 512;
+pub const DEFAULT_PINNED_SCAN_THREADS: u32 = 32;
 pub struct AppState {
     /// Set by SIGTERM handling or by the Kubernetes preStop drain marker before
     /// the pod is removed from Service/ALB endpoints.
@@ -123,7 +126,8 @@ pub struct AppState {
     pub facet_fields: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Per-namespace default origin scan fan-out width loaded from
     /// `Index.spec.scan.threads`. Absent namespace falls back to
-    /// `DEFAULT_SCAN_THREADS`; values are clamped before storage.
+    /// the readiness-dependent default; storage is bounded at 512 and
+    /// the applicable namespace cap is enforced when scheduling.
     pub scan_threads: Arc<RwLock<HashMap<String, u32>>>,
     /// Minimum interval between snapshots per namespace. Cloned from
     /// `Config::snapshot_min_interval_ms`.
@@ -191,6 +195,7 @@ pub struct AppState {
     pub federated_query_max_namespaces: usize,
     /// Maximum namespace legs run concurrently by one federated `/v2/query`.
     pub federated_query_namespace_threads: usize,
+    pub pinned_federated_query_namespace_threads: usize,
     /// Namespaces known to have completed shard migration. Query and scan
     /// fan-out only uses `_hevlayer_shard` after this map is populated from
     /// the durable S3 shard manifest.
@@ -288,14 +293,28 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = facet_fields;
     }
 
+    pub fn scan_threads_max_for(&self, namespace: &str) -> u32 {
+        if self.consistency.is_pinned_ready(namespace) {
+            PINNED_THREADS_MAX
+        } else {
+            SCAN_THREADS_MAX
+        }
+    }
+
     pub fn scan_threads_for(&self, namespace: &str) -> u32 {
         self.scan_threads
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(namespace)
             .copied()
-            .unwrap_or(DEFAULT_SCAN_THREADS)
-            .clamp(1, SCAN_THREADS_MAX)
+            .unwrap_or_else(|| {
+                if self.consistency.is_pinned_ready(namespace) {
+                    DEFAULT_PINNED_SCAN_THREADS
+                } else {
+                    DEFAULT_SCAN_THREADS
+                }
+            })
+            .clamp(1, self.scan_threads_max_for(namespace))
     }
 
     pub fn replace_scan_threads(&self, scan_threads: HashMap<String, u32>) {

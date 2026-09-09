@@ -37,7 +37,9 @@ use crate::routes::query::{
 use crate::shards::active_shard_count;
 use crate::AppState;
 
-/// 15 fuzzy legs + 1 BM25 leg = 16, the upstream multi-query subquery cap.
+/// Bound query expansion to 15 fuzzy tokens plus the BM25 anchor.
+/// This is a ranking policy, not the pinned upstream concurrency budget;
+/// run_hybrid_text executes and fuses these legs in the gateway.
 pub(crate) const MAX_QUERY_TOKENS: usize = 15;
 const MIN_TOKEN_CHARS: usize = 2;
 /// Turbopuffer's index-time `max_token_length` default — mirrored at query

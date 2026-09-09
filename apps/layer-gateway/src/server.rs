@@ -338,6 +338,7 @@ pub async fn run_with_options(options: ServerOptions) {
         shard_count: config.shard_count,
         federated_query_max_namespaces: config.federated_query_max_namespaces,
         federated_query_namespace_threads: config.federated_query_namespace_threads,
+        pinned_federated_query_namespace_threads: config.pinned_federated_query_namespace_threads,
         sharded_namespaces: Arc::new(DashMap::new()),
         init_tasks: Arc::new(DashMap::new()),
         init_backfill_batch_size: config.init_backfill_batch_size,

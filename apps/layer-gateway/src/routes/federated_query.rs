@@ -153,10 +153,30 @@ pub(crate) async fn execute_federated_query(
     per_namespace_body.remove("fusion");
     per_namespace_body.insert("top_k".to_string(), Value::from(per_namespace_limit));
 
-    let outputs = stream::iter(namespaces.into_iter().map(|namespace| {
+    let (pinned, ordinary): (Vec<_>, Vec<_>) = namespaces
+        .into_iter()
+        .partition(|namespace| state.consistency.is_pinned_ready(namespace));
+    // Mixed requests retain the ordinary lane's existing limit. A shared
+    // permit also bounds total namespace work whenever the pinned lane runs.
+    let total = (!pinned.is_empty()).then(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            crate::PINNED_THREADS_MAX as usize,
+        ))
+    });
+    let run = |namespace: String| {
         let state = Arc::clone(&state);
         let body = per_namespace_body.clone();
+        let total = total.clone();
         async move {
+            let _permit = match total {
+                Some(total) => Some(
+                    total
+                        .acquire_owned()
+                        .await
+                        .expect("local semaphore is open"),
+                ),
+                None => None,
+            };
             let result =
                 match validate_federated_filter_schema(&state, &namespace, body.get("filters"))
                     .await
@@ -166,10 +186,15 @@ pub(crate) async fn execute_federated_query(
                 };
             (namespace, result)
         }
-    }))
-    .buffer_unordered(state.federated_query_namespace_threads)
-    .collect::<Vec<_>>()
-    .await;
+    };
+    let pinned = stream::iter(pinned.into_iter().map(&run)).buffer_unordered(
+        state
+            .pinned_federated_query_namespace_threads
+            .clamp(1, crate::PINNED_THREADS_MAX as usize),
+    );
+    let ordinary = stream::iter(ordinary.into_iter().map(&run))
+        .buffer_unordered(state.federated_query_namespace_threads);
+    let outputs = stream::select(pinned, ordinary).collect::<Vec<_>>().await;
 
     let mut successes = Vec::new();
     let mut errors = Vec::new();

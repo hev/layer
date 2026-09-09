@@ -10,7 +10,7 @@ use xxhash_rust::xxh64::xxh64;
 use crate::clients::s3::S3Client;
 use crate::clients::turbopuffer::{TurbopufferClient, TurbopufferError, UpsertDoc};
 use crate::models::{IncludeAttributes, QueryResult};
-use crate::{AppState, SCAN_THREADS_MAX};
+use crate::AppState;
 
 pub const DEFAULT_SHARD_COUNT: u64 = 16;
 pub const SHARD_ATTR: &str = "_hevlayer_shard";
@@ -128,7 +128,10 @@ where
     };
 
     let shard_cap = u32::try_from(shard_count).unwrap_or(u32::MAX).max(1);
-    let width = threads.min(SCAN_THREADS_MAX).min(shard_cap).max(1);
+    let width = threads
+        .min(state.scan_threads_max_for(namespace))
+        .min(shard_cap)
+        .max(1);
     let per_shard = &per_shard;
     stream::iter(0..shard_count)
         .map(|shard| per_shard(Some(shard_filter(shard))))

@@ -2376,8 +2376,10 @@ components:
           minimum: 1
           description: 'Maximum concurrent upstream requests used by this scan''s
             origin scatter/gather. Omit to use `Index.spec.scan.threads`, then the
-            gateway default. Values above the server cap are clamped and echoed in
-            the response/job; ignored on snapshot and cache reads.
+            gateway default (32 for pinned and ready namespaces, 8 otherwise). The
+            server cap is 512 for pinned and ready namespaces and 32 otherwise. Values
+            above the server cap are clamped and echoed in the response/job; ignored
+            on snapshot and cache reads.
 
             '
         page_size:

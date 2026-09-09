@@ -42,6 +42,7 @@ pub async fn get_namespace_metadata(
     let result = state.turbopuffer().head_namespace(&namespace).await;
     let meta = match result {
         Ok(meta) => {
+            state.consistency.observe_pinning(&namespace, &meta.raw);
             state.metrics.observe_head(
                 DIRECT_PIPELINE_ID,
                 &namespace,
@@ -51,6 +52,7 @@ pub async fn get_namespace_metadata(
             meta
         }
         Err(e) => {
+            state.consistency.invalidate_pinning(&namespace);
             state.metrics.observe_head(
                 DIRECT_PIPELINE_ID,
                 &namespace,

@@ -42,7 +42,7 @@ use crate::snapshots::{
     latest_snapshot_key, persist_snapshot_body, FieldSummary, SkipReason, SnapshotBody,
     SnapshotFieldSkipped, ValueCount, MAX_FACET_VALUES,
 };
-use crate::{AppState, SCAN_THREADS_MAX};
+use crate::AppState;
 
 fn is_valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
@@ -372,7 +372,10 @@ pub(crate) fn resolve_scan_threads_with_active(
         .and_then(|count| u32::try_from(count).ok())
         .unwrap_or(u32::MAX)
         .max(1);
-    configured.min(SCAN_THREADS_MAX).min(shard_cap).max(1)
+    configured
+        .min(state.scan_threads_max_for(namespace))
+        .min(shard_cap)
+        .max(1)
 }
 
 async fn create_scan_ids(

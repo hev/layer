@@ -29,6 +29,7 @@ pub trait SnapshotTrigger: Send + Sync {
 ///     overhead; we still retry with the filter on a 429 race.
 pub struct ConsistencyWatcher {
     watermarks: DashMap<String, u64>,
+    pinned_ready: DashMap<String, Instant>,
     current_status: DashMap<String, IndexStatus>,
     last_settle_counts: DashMap<String, u64>,
     registered: DashMap<String, ()>,
@@ -45,6 +46,7 @@ impl ConsistencyWatcher {
     pub fn new() -> Self {
         Self {
             watermarks: DashMap::new(),
+            pinned_ready: DashMap::new(),
             current_status: DashMap::new(),
             last_settle_counts: DashMap::new(),
             registered: DashMap::new(),
@@ -79,6 +81,34 @@ impl ConsistencyWatcher {
         }
     }
 
+    /// A positive metadata observation is a short-lived scheduling hint.
+    /// Missing, malformed, zero, failed, or stale observations fail closed.
+    pub fn observe_pinning(&self, namespace: &str, raw: &serde_json::Value) {
+        self.register(namespace);
+        if raw
+            .pointer("/pinning/ready_replicas")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|replicas| replicas > 0)
+        {
+            self.pinned_ready
+                .insert(namespace.to_string(), Instant::now());
+        } else {
+            self.pinned_ready.remove(namespace);
+        }
+    }
+
+    /// Failed reads revoke readiness without discovering a namespace to poll.
+    pub fn invalidate_pinning(&self, namespace: &str) {
+        self.pinned_ready.remove(namespace);
+    }
+
+    pub fn is_pinned_ready(&self, namespace: &str) -> bool {
+        self.register(namespace);
+        self.pinned_ready
+            .get(namespace)
+            .is_some_and(|observed| observed.elapsed() < Duration::from_secs(120))
+    }
+
     pub fn get(&self, namespace: &str) -> Option<u64> {
         self.watermarks.get(namespace).map(|r| *r.value())
     }
@@ -104,6 +134,7 @@ impl ConsistencyWatcher {
     }
 
     pub fn forget_namespace(&self, namespace: &str) {
+        self.pinned_ready.remove(namespace);
         self.watermarks.remove(namespace);
         self.current_status.remove(namespace);
         self.last_settle_counts.remove(namespace);
@@ -187,6 +218,7 @@ impl ConsistencyWatcher {
         let poll_start_ms = now_ms();
         match tpuf.head_namespace(namespace).await {
             Ok(meta) => {
+                self.observe_pinning(namespace, &meta.raw);
                 if meta.is_stable() {
                     if let Some(count) = meta.count_settle {
                         let settled = self
@@ -233,6 +265,7 @@ impl ConsistencyWatcher {
                 }
             }
             Err(e) => {
+                self.invalidate_pinning(namespace);
                 warn!(
                     namespace = %namespace,
                     error = %e,
@@ -278,6 +311,41 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::clients::turbopuffer::MockTurbopufferClient;
+
+    #[tokio::test]
+    async fn pinning_readiness_is_observed_and_revoked_by_mock_metadata() {
+        let tpuf = MockTurbopufferClient::new();
+        let watcher = ConsistencyWatcher::new();
+        assert!(!watcher.is_pinned_ready("ns"));
+        for raw in [
+            serde_json::json!({"pinning": {"ready_replicas": 1}}),
+            serde_json::json!({"pinning": {"ready_replicas": 0}}),
+            serde_json::json!({"pinning": {"replicas": 1}}),
+            serde_json::json!({}),
+            serde_json::json!({"pinning": {"ready_replicas": null}}),
+            serde_json::json!({"pinning": {"ready_replicas": -1}}),
+            serde_json::json!({"pinning": {"ready_replicas": "1"}}),
+        ] {
+            let expected = raw.pointer("/pinning/ready_replicas") == Some(&serde_json::json!(1));
+            tpuf.set_metadata_override("ns", raw).await;
+            watcher.poll_once(&tpuf, Duration::ZERO).await;
+            assert_eq!(watcher.is_pinned_ready("ns"), expected);
+        }
+        tpuf.set_metadata_override("ns", serde_json::json!({"pinning": {"ready_replicas": 2}}))
+            .await;
+        watcher.poll_once(&tpuf, Duration::ZERO).await;
+        assert!(watcher.is_pinned_ready("ns"));
+        tpuf.arm_head_failure("ns", "metadata unavailable").await;
+        watcher.poll_once(&tpuf, Duration::ZERO).await;
+        assert!(!watcher.is_pinned_ready("ns"));
+        watcher
+            .pinned_ready
+            .insert("ns".into(), Instant::now() - Duration::from_secs(120));
+        assert!(!watcher.is_pinned_ready("ns"));
+        watcher.observe_pinning("ns", &serde_json::json!({"pinning": {"ready_replicas": 1}}));
+        watcher.forget_namespace("ns");
+        assert!(!watcher.is_pinned_ready("ns"));
+    }
 
     #[tokio::test]
     async fn watermark_advances_when_index_status_is_up_to_date() {

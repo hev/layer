@@ -383,8 +383,12 @@ async fn fetch_one(
 
     let metadata_started_ms = now_ms();
     let meta = state.turbopuffer().head_namespace(&namespace).await;
+    if meta.is_err() {
+        state.consistency.invalidate_pinning(&namespace);
+    }
     match meta {
         Ok(meta) => {
+            state.consistency.observe_pinning(&namespace, &meta.raw);
             state
                 .consistency
                 .register_from_metadata(&namespace, meta.index_status);

@@ -93,6 +93,8 @@ pub struct Config {
     pub federated_query_max_namespaces: usize,
     /// Maximum namespace legs run concurrently by one federated `/v2/query`.
     pub federated_query_namespace_threads: usize,
+    /// Pinned and ready namespace legs; hard-clamped to the operator ceiling.
+    pub pinned_federated_query_namespace_threads: usize,
     /// TTL (ms) for the `GET /v2/namespaces` response cache. Defaults to
     /// 10s — short enough to feel live, long enough to absorb dashboard
     /// polling without fanning out a per-namespace metadata call per row
@@ -292,6 +294,11 @@ impl Config {
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|count| *count > 0)
                 .unwrap_or(16),
+            pinned_federated_query_namespace_threads: pinned_federated_threads(
+                env::var("LAYER_PINNED_FEDERATED_QUERY_NAMESPACE_THREADS")
+                    .ok()
+                    .as_deref(),
+            ),
             namespace_list_cache_ttl_ms: env::var("NAMESPACE_LIST_CACHE_TTL_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -326,6 +333,13 @@ impl Config {
                 .or_else(default_telemetry_state_path),
         }
     }
+}
+
+fn pinned_federated_threads(value: Option<&str>) -> usize {
+    value
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(64)
+        .clamp(1, crate::PINNED_THREADS_MAX as usize)
 }
 
 fn stores_json_from_env() -> Option<String> {
@@ -465,6 +479,21 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_federated_configuration_has_independent_default_and_hard_ceiling() {
+        for (raw, expected) in [
+            (None, 64),
+            (Some("bad"), 64),
+            (Some("0"), 1),
+            (Some("37"), 37),
+            (Some("512"), 512),
+            (Some("513"), 512),
+            (Some("18446744073709551615"), 512),
+        ] {
+            assert_eq!(super::pinned_federated_threads(raw), expected);
+        }
+    }
+
     use super::{telemetry_enabled, trimmed_non_empty};
 
     #[cfg(feature = "pro")]
