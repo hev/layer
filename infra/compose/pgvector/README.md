@@ -1,9 +1,10 @@
 # Postgres acceptance bundle
 
-`docker compose up --wait` pulls `hevlayer/layer-gateway:edge` and the
-pinned ParadeDB image. Docker with Compose is the only host prerequisite;
-no Rust, Python, or Node toolchain is required. The clients image builds only
-the Python and TypeScript test harness.
+The acceptance commands below pull the gateway and pinned ParadeDB image.
+Docker with Compose is the only host prerequisite; no Rust, Python, or Node
+toolchain is required. The clients image builds only the Python and TypeScript
+test harness. Namespace deletion works without object storage. The optional
+`purge-storage.yaml` override is for configured-S3 recovery tests.
 
 From the layer-pro repository root:
 
@@ -18,9 +19,10 @@ docker compose --profile acceptance run --build --rm clients
 docker compose down -v --remove-orphans
 ```
 
-From the public `hev/layer` checkout, use the same commands without the
-`COMPOSE_FILE` and `ACCEPTANCE_CONTEXT` exports: its root contains both the
-Compose definition and acceptance inputs. Ensure `.env` also leaves
+From the public `hev/layer` checkout, omit `ACCEPTANCE_CONTEXT` and export
+`COMPOSE_FILE=docker-compose.yml`
+before running the commands. Its root contains the Compose definition and
+acceptance inputs. Ensure `.env` also leaves
 `TURBOPUFFER_API_KEY` empty. An absent or blank key selects local pgvector;
 a nonblank key selects Turbopuffer. The acceptance suite requires pgvector.
 

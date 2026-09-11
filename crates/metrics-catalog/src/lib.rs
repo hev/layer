@@ -86,6 +86,24 @@ pub fn metric(name: &str) -> Option<&'static MetricDoc> {
 
 const CATALOG: &[MetricDoc] = &[
     MetricDoc {
+        name: "layer_namespace_purge_pending",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Storage,
+        labels: &["namespace"],
+        description: "Outstanding namespace purges known to this gateway; durable when S3 is configured.",
+        example_promql: "sum(layer_namespace_purge_pending)",
+        alert: Some(MetricAlert { summary: "Namespace cleanup has not drained", expr: "sum(layer_namespace_purge_pending) > 0", for_duration: "10m" }),
+    },
+    MetricDoc {
+        name: "layer_namespace_purge_discovery_ready",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Storage,
+        labels: &[],
+        description: "Whether purge discovery is ready; always ready without S3, otherwise zero means backlog may be incomplete.",
+        example_promql: "layer_namespace_purge_discovery_ready == 0",
+        alert: None,
+    },
+    MetricDoc {
         name: "hevlayer_license_valid",
         kind: MetricKind::Gauge,
         family: MetricFamily::License,

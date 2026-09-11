@@ -12,6 +12,7 @@ pub mod index_gc;
 pub mod keys;
 pub mod metrics;
 pub mod models;
+pub mod namespace_purge;
 pub mod pipeline;
 #[cfg(feature = "pro")]
 pub mod pipeline_segments;
@@ -66,6 +67,7 @@ pub struct RestoreRunState;
 pub const PINNED_THREADS_MAX: u32 = 512;
 pub const DEFAULT_PINNED_SCAN_THREADS: u32 = 32;
 pub struct AppState {
+    pub namespace_purges: Arc<namespace_purge::NamespacePurges>,
     /// Set by SIGTERM handling or by the Kubernetes preStop drain marker before
     /// the pod is removed from Service/ALB endpoints.
     pub draining: Arc<AtomicBool>,

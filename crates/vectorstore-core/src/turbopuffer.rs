@@ -341,6 +341,24 @@ pub trait TurbopufferClient: Send + Sync {
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError>;
+
+    /// Pin durable cleanup to its original store even after Index routing changes.
+    /// Single-store clients already represent that store; routers override this.
+    async fn head_namespace_in_store(
+        &self,
+        namespace: &str,
+        _store: &str,
+    ) -> Result<NamespaceMeta, TurbopufferError> {
+        self.head_namespace(namespace).await
+    }
+
+    async fn delete_namespace_in_store(
+        &self,
+        namespace: &str,
+        _store: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.delete_namespace(namespace).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +498,34 @@ impl RoutingTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for RoutingTurbopufferClient {
+    async fn head_namespace_in_store(
+        &self,
+        namespace: &str,
+        store: &str,
+    ) -> Result<NamespaceMeta, TurbopufferError> {
+        self.clients
+            .get(store)
+            .ok_or_else(|| {
+                TurbopufferError::Other(format!("VectorStore client {store:?} is not configured"))
+            })?
+            .head_namespace(namespace)
+            .await
+    }
+
+    async fn delete_namespace_in_store(
+        &self,
+        namespace: &str,
+        store: &str,
+    ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        self.clients
+            .get(store)
+            .ok_or_else(|| {
+                TurbopufferError::Other(format!("VectorStore client {store:?} is not configured"))
+            })?
+            .delete_namespace(namespace)
+            .await
+    }
+
     async fn check_readiness(&self) -> Result<(), TurbopufferError> {
         for client in self.clients.values() {
             client.check_readiness().await?;

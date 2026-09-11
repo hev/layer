@@ -156,6 +156,8 @@ docker compose up --wait
 Run the optional Python and TypeScript acceptance suites against local pgvector:
 
 ```sh
+export COMPOSE_FILE=docker-compose.yml
+docker compose up -d --wait
 docker compose --profile acceptance run --build --rm clients
 docker compose down -v --remove-orphans
 ```

@@ -117,6 +117,8 @@ impl LabelLimiter {
 }
 
 pub struct LayerMetrics {
+    namespace_purge_pending: IntGaugeVec,
+    namespace_purge_discovery_ready: IntGauge,
     registry: Registry,
     labels: LabelLimiter,
     store_kind: Mutex<String>,
@@ -207,6 +209,17 @@ impl Default for LayerMetrics {
 impl LayerMetrics {
     pub fn new() -> Self {
         let registry = Registry::new();
+        let namespace_purge_pending = gauge_vec(
+            &registry,
+            "layer_namespace_purge_pending",
+            "Outstanding namespace purges known to this gateway; durable when S3 is configured.",
+            &["namespace"],
+        );
+        let namespace_purge_discovery_ready = gauge(
+            &registry,
+            "layer_namespace_purge_discovery_ready",
+            "Whether purge discovery is ready; always ready without S3, otherwise zero means backlog may be incomplete.",
+        );
 
         let query_duration = histogram(
             &registry,
@@ -610,6 +623,8 @@ impl LayerMetrics {
         );
 
         Self {
+            namespace_purge_pending,
+            namespace_purge_discovery_ready,
             registry,
             labels: LabelLimiter::default(),
             store_kind: Mutex::new("turbopuffer".to_string()),
@@ -677,6 +692,19 @@ impl LayerMetrics {
             aerospike_connection_state,
             tpuf_inflight,
         }
+    }
+
+    pub fn set_namespace_purges(&self, counts: &std::collections::HashMap<String, i64>) {
+        self.namespace_purge_pending.reset();
+        for (namespace, count) in counts {
+            self.namespace_purge_pending
+                .with_label_values(&[namespace])
+                .set(*count);
+        }
+    }
+
+    pub fn set_namespace_purge_discovery_ready(&self, ready: bool) {
+        self.namespace_purge_discovery_ready.set(i64::from(ready));
     }
 
     pub fn encode(&self) -> Result<String, String> {

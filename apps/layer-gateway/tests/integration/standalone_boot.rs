@@ -151,6 +151,19 @@ async fn no_object_store_profile_serves_instantly_and_degrades_deliberately() {
     use axum::http::StatusCode as UpstreamStatus;
     use axum::response::IntoResponse;
 
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let delete_calls = Arc::new(AtomicUsize::new(0));
+    let recorded = delete_calls.clone();
+    let delete_handler = move || {
+        let recorded = recorded.clone();
+        async move {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"status": "OK"}))
+        }
+    };
     // Local mock Turbopuffer upstream: accepts writes/queries/deletes.
     let upstream = axum::Router::new()
         .route(
@@ -163,11 +176,11 @@ async fn no_object_store_profile_serves_instantly_and_degrades_deliberately() {
                     "billing": {"billable_logical_bytes_written": 4137}
                 }))
             })
-            .delete(|| async { axum::Json(json!({"status": "OK"})) }),
+            .delete(delete_handler.clone()),
         )
         .route(
             "/v1/namespaces/{namespace}",
-            axum::routing::delete(|| async { axum::Json(json!({"status": "OK"})) }),
+            axum::routing::delete(delete_handler),
         )
         .route(
             "/v2/namespaces/{namespace}/query",
@@ -365,7 +378,7 @@ spec:
         &mut failures,
     );
 
-    // Namespace delete runs the S3 purge sweep, which must no-op instantly.
+    // The default no-S3 profile still deletes upstream promptly.
     let started = Instant::now();
     let delete = client
         .delete(format!("{base}/v2/namespaces/no-s3"))
@@ -380,6 +393,10 @@ spec:
         reqwest::StatusCode::OK,
         &mut failures,
     );
+
+    if delete_calls.load(Ordering::SeqCst) != 1 {
+        failures.push("namespace delete must reach upstream once without S3".into());
+    }
 
     let _ = child.kill();
     let _ = child.wait();

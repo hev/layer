@@ -90,9 +90,11 @@ pub async fn delete_namespace(
         return Err(AppError::Validation("namespace is required".to_string()));
     }
 
+    let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
+
     let upstream = state
         .turbopuffer()
-        .delete_namespace(&namespace)
+        .delete_namespace_in_store(&namespace, &store)
         .await
         .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
 
@@ -106,37 +108,24 @@ pub async fn delete_namespace(
     // Keep in-memory invalidation on the request path, before any local I/O
     // cleanup that may later run in the background.
     purge_in_memory_namespace_state(&state, &namespace);
-    let cleanup = cleanup_namespace_state(&state, &namespace).await;
-    if !cleanup.errors.is_empty() {
-        return Err(AppError::Upstream(format!(
-            "namespace '{}' deleted upstream but local cleanup was incomplete: {}",
-            namespace,
-            cleanup.errors.join("; ")
-        )));
-    }
-
+    state.namespace_purges.upstream_deleted(&state, &intent);
     let response = StatusResponse {
-        message: Some(format!(
-            "namespace deleted; purged {} S3 object{}",
-            cleanup.s3_objects_deleted,
-            if cleanup.s3_objects_deleted == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )),
+        message: Some(crate::namespace_purge::DELETE_MESSAGE.into()),
         ..Default::default()
     };
     Ok(Json(response))
 }
 
 #[derive(Debug, Default)]
-struct NamespaceCleanupOutcome {
+pub(crate) struct NamespaceCleanupOutcome {
     s3_objects_deleted: u64,
-    errors: Vec<String>,
+    pub(crate) errors: Vec<String>,
 }
 
-async fn cleanup_namespace_state(state: &AppState, namespace: &str) -> NamespaceCleanupOutcome {
+pub(crate) async fn cleanup_namespace_state(
+    state: &AppState,
+    namespace: &str,
+) -> NamespaceCleanupOutcome {
     let mut outcome = NamespaceCleanupOutcome::default();
 
     // Generation 0 means no cache client has ever been part of this process
@@ -176,8 +165,14 @@ async fn cleanup_namespace_state(state: &AppState, namespace: &str) -> Namespace
         }
     }
 
-    for prefix in namespace_s3_prefixes(namespace) {
-        match delete_s3_prefix(state, &prefix).await {
+    let purges = namespace_s3_prefixes(namespace)
+        .into_iter()
+        .map(|prefix| async move {
+            let result = delete_s3_prefix(state, &prefix).await;
+            (prefix, result)
+        });
+    for (prefix, result) in futures::future::join_all(purges).await {
+        match result {
             Ok(deleted) => outcome.s3_objects_deleted += deleted,
             Err(e) => outcome
                 .errors
@@ -215,24 +210,27 @@ fn namespace_s3_prefixes(namespace: &str) -> [String; 5] {
 }
 
 async fn delete_s3_prefix(state: &AppState, prefix: &str) -> Result<u64, String> {
+    if !state.s3.is_configured() {
+        return Ok(0);
+    }
     let keys = state
         .s3
         .list_keys(prefix)
         .await
         .map_err(|e| e.to_string())?;
     let mut deleted = 0;
-    for key in keys {
+    for batch in keys.chunks(1000) {
         state
             .s3
-            .delete_key(&key)
+            .delete_keys(batch)
             .await
-            .map_err(|e| format!("{key}: {e}"))?;
-        deleted += 1;
+            .map_err(|e| e.to_string())?;
+        deleted += batch.len() as u64;
     }
     Ok(deleted)
 }
 
-fn purge_in_memory_namespace_state(state: &AppState, namespace: &str) {
+pub(crate) fn purge_in_memory_namespace_state(state: &AppState, namespace: &str) {
     let job_ids: Vec<String> = state
         .jobs
         .iter()

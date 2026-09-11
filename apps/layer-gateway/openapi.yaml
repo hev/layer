@@ -953,14 +953,20 @@ paths:
         search: supported
       x-turbopuffer-key: DELETE /v2/namespaces/{namespace}
       summary: Delete a namespace
-      description: 'Hard-delete the upstream Turbopuffer namespace, then purge gateway-owned
-        namespace state: Aerospike document rows and snapshot mirrors, S3 snapshots/search
-        history/clickstream/shard metadata, in-memory job/cache/consistency state,
-        and the operator-discovered Index CR when Index garbage collection is enabled.
-        Turbopuffer 404 is treated as idempotent success and still triggers local
-        cleanup. Other Turbopuffer failures return 502 before local cleanup runs.
-        Local cleanup failures after the upstream delete return 502 so callers can
-        retry the same delete.
+      description: 'Delete the upstream namespace even when object storage is not
+        configured. When S3 is configured, persist a durable cleanup intent first;
+        if that write fails, return 503 without deleting upstream. After upstream
+        deletion and synchronous in-memory invalidation, return 200 with a message
+        that snapshot and cache purge continues in the background and may take a few
+        minutes. Aerospike rows and snapshot mirrors, S3 namespace objects, and the
+        operator-discovered Index CR are cleaned up with retries. With S3 configured,
+        intent records survive gateway restarts and are removed only after cleanup
+        succeeds. Without S3, cleanup retries are in memory and do not survive restart.
+        Recovery verifies upstream absence; an intent whose upstream delete failed
+        remains pending until the client retries. Turbopuffer 404 is idempotent success;
+        other upstream failures return 502. Do not reuse namespace names until pending
+        cleanup drains. The existing /metrics scrape exposes layer_namespace_purge_pending
+        labeled by namespace for outstanding intents discovered by the gateway.
 
         '
       tags:
@@ -969,13 +975,21 @@ paths:
       - "$ref": "#/components/parameters/namespace"
       responses:
         '200':
-          description: Namespace deleted and local cleanup completed
+          description: Namespace deleted; snapshot and cache purge continues in the
+            background
           content:
             application/json:
               schema:
                 "$ref": "#/components/schemas/StatusResponse"
         '502':
-          description: Turbopuffer delete failed or local cleanup was incomplete
+          description: Upstream namespace delete failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: Cleanup intent could not be persisted; upstream namespace was
+            not deleted
           content:
             application/json:
               schema:

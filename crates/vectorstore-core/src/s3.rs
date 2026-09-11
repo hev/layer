@@ -39,6 +39,18 @@ pub trait S3Client: Send + Sync {
     /// Delete an object by key. Missing keys are treated as success.
     async fn delete_key(&self, key: &str) -> Result<(), S3Error>;
 
+    /// Delete at most 1,000 keys. Missing keys succeed; any per-object error
+    /// fails the batch so callers can safely retry the idempotent operation.
+    async fn delete_keys(&self, keys: &[String]) -> Result<(), S3Error> {
+        if keys.len() > 1000 {
+            return Err(S3Error("delete batch exceeds 1000 keys".into()));
+        }
+        for key in keys {
+            self.delete_key(key).await?;
+        }
+        Ok(())
+    }
+
     /// Whether this client is backed by a real object store. Callers use this
     /// to skip S3-backed work entirely (background writers) or fail fast with
     /// a clear error (feature endpoints) instead of surfacing per-op failures.
@@ -186,6 +198,45 @@ impl S3Client for AwsS3Client {
         Ok(keys)
     }
 
+    async fn delete_keys(&self, keys: &[String]) -> Result<(), S3Error> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+        if keys.len() > 1000 {
+            return Err(S3Error("delete batch exceeds 1000 keys".into()));
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let objects = keys
+            .iter()
+            .map(|key| {
+                ObjectIdentifier::builder()
+                    .key(key)
+                    .build()
+                    .map_err(|e| S3Error(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let delete = Delete::builder()
+            .set_objects(Some(objects))
+            .quiet(true)
+            .build()
+            .map_err(|e| S3Error(e.to_string()))?;
+        let response = self
+            .client
+            .delete_objects()
+            .bucket(&self.bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(|e| S3Error(format!("{}", e.into_service_error())))?;
+        if !response.errors().is_empty() {
+            return Err(S3Error(format!(
+                "DeleteObjects failed: {:?}",
+                response.errors()
+            )));
+        }
+        Ok(())
+    }
+
     async fn delete_key(&self, key: &str) -> Result<(), S3Error> {
         self.client
             .delete_object()
@@ -289,5 +340,62 @@ impl S3Client for MockS3Client {
     async fn delete_key(&self, key: &str) -> Result<(), S3Error> {
         self.store.write().await.remove(key);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batch_delete_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn aws_batch_delete_sends_one_request_and_reports_partial_errors() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().route(
+            "/bucket/",
+            axum::routing::post(move |body: String| {
+                let captured = captured.clone();
+                async move {
+                    let mut requests = captured.lock().unwrap();
+                    requests.push(body);
+                    if requests.len() > 1 {
+                        return ([("content-type", "application/xml")],
+                            "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>");
+                    }
+                    ([("content-type", "application/xml")],
+                     "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Error><Key>denied</Key><Code>AccessDenied</Code><Message>denied</Message></Error></DeleteResult>")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(format!("http://{address}"))
+            .force_path_style(true)
+            .build();
+        let client = AwsS3Client {
+            client: aws_sdk_s3::Client::from_conf(config),
+            bucket: "bucket".into(),
+        };
+        client.delete_keys(&[]).await.unwrap();
+        assert!(client.delete_keys(&vec!["key".into(); 1001]).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
+        let keys = (0..1000).map(|i| format!("key-{i}")).collect::<Vec<_>>();
+        let error = client.delete_keys(&keys).await.unwrap_err();
+        assert!(error.to_string().contains("AccessDenied"), "{error}");
+        client.delete_keys(&keys).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for body in requests.iter() {
+            assert_eq!(body.matches("<Object>").count(), 1000);
+        }
+        server.abort();
     }
 }

@@ -344,6 +344,7 @@ pub async fn run_with_options(options: ServerOptions) {
         init_backfill_batch_size: config.init_backfill_batch_size,
         init_backfill_rps: config.init_backfill_rps,
         namespace_list_cache: Arc::new(DashMap::new()),
+        namespace_purges: Arc::new(Default::default()),
         namespace_list_cache_ttl: std::time::Duration::from_millis(
             config.namespace_list_cache_ttl_ms,
         ),
@@ -371,6 +372,7 @@ pub async fn run_with_options(options: ServerOptions) {
         });
     }
 
+    let _purge_worker = crate::namespace_purge::spawn_worker(&state);
     let app = build_router(state);
 
     info!(addr = %addr, "Hevlayer gateway starting");
