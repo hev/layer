@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -937,6 +939,10 @@ func (m Model) loadIndexDetail() tea.Cmd {
 		}
 		history, err := client.ListNamespaceHistory(context.Background(), name, &hevlayer.ListNamespaceHistoryParams{Limit: historyLimit})
 		if err != nil {
+			var apiErr *hevlayer.HevlayerError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return indexDetailLoadedMsg{}
+			}
 			return indexDetailLoadedMsg{err: err}
 		}
 		return indexDetailLoadedMsg{history: history, moreThan: len(history) >= historyLimit}

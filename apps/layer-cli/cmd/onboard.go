@@ -26,13 +26,13 @@ Supply credentials in one of these ways:
 
 Run layer from an interactive terminal to be walked through setup.`
 
-// ensureCredentials guarantees the resolved config carries an API key. When one
-// is missing and a terminal is attached, it walks the operator through
+// ensureCredentials accepts configured environments and explicit keys, including
+// empty keys for keyless CE. Without either, an attached terminal walks through
 // supplying a gateway URL and API key, saves them as a named environment, and
 // returns the updated resolution. Without a terminal it returns an actionable
 // usage error instead of letting the request fail later with an opaque 401.
 func (app App) ensureCredentials(cmd *cobra.Command, resolved config.Resolved) (config.Resolved, error) {
-	if strings.TrimSpace(resolved.APIKey) != "" {
+	if strings.TrimSpace(resolved.APIKey) != "" || resolved.ConfigUsed || flagChanged(cmd, "api-key") {
 		return resolved, nil
 	}
 	if !app.opts.StdinIsTerminal || !app.opts.StdoutIsTerminal {

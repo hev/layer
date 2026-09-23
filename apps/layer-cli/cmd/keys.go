@@ -362,7 +362,7 @@ func newKeysRevokeCommand(app App, flags *globalFlags) *cobra.Command {
 func newKeysRmCommand(app App, flags *globalFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm KEY_OR_ID",
-		Short: "Hard-delete an API key record",
+		Short: "Hard-delete a revoked API key record",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, format, err := app.resolve(cmd, flags, runFlags{})
@@ -372,6 +372,9 @@ func newKeysRmCommand(app App, flags *globalFlags) *cobra.Command {
 			key, err := resolveKey(cmd.Context(), app.keysClientFor(resolved), args[0])
 			if err != nil {
 				return err
+			}
+			if key.Phase != "Revoked" {
+				return fmt.Errorf("key %q is in the %s phase; revoke it before hard delete", args[0], key.Phase)
 			}
 			if _, err := app.clientFor(resolved).DeleteKey(cmd.Context(), key.KeyID); err != nil {
 				return err

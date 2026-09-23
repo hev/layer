@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,8 @@ func TestIndexGetShowsSnapshotHistory(t *testing.T) {
 		requireAuth(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.URL.Path == "/metrics":
+			_, _ = w.Write([]byte("layer_namespace_purge_discovery_ready 1\n"))
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/namespaces":
 			if r.URL.Query().Get("prefix") != "shop-products" {
 				t.Fatalf("missing prefix: %s", r.URL.RawQuery)
@@ -390,5 +393,48 @@ func TestEmitPipelineDetailIncludesQueue(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "No gateway queue registered yet") {
 		t.Fatalf("expected no-queue hint: %s", buf.String())
+	}
+}
+
+func TestIndexGetReportsPendingPurgeForDeletedNamespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireAuth(t, r)
+		switch r.URL.Path {
+		case "/metrics":
+			_, _ = w.Write([]byte("layer_namespace_purge_pending{namespace=\"gone\"} 1\nlayer_namespace_purge_discovery_ready 1\n"))
+		case "/v2/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":[]}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	stdout, stderr, code := runTestCLI(t, server.URL, []string{"index", "get", "gone"})
+	if code != ExitOK || !strings.Contains(stdout, "PURGE") || !strings.Contains(stdout, "pending") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	stdout, stderr, code = runTestCLI(t, server.URL, []string{"index", "get", "gone", "-o", "json"})
+	if code != ExitOK || !strings.Contains(stdout, `"purge": "pending"`) {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+}
+
+func TestPurgeScrapeDoesNotClaimEmptyBacklogWhenDiscoveryIsUnavailable(t *testing.T) {
+	for _, test := range []struct{ body, want string }{
+		{"layer_namespace_purge_discovery_ready 1\n", "none"},
+		{"layer_namespace_purge_discovery_ready 0\n", "unknown"},
+		{"old gateway with no purge metrics", "unknown"},
+		{"layer_namespace_purge_pending{namespace=\"other\"} 1\nlayer_namespace_purge_discovery_ready 1\n", "none"},
+		{"layer_namespace_purge_pending{namespace=\"target\"} 1\nlayer_namespace_purge_discovery_ready 0\n", "pending"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(test.body))
+		}))
+		got := readNamespacePurge(context.Background(), server.URL, "key", "target")
+		server.Close()
+		if got != test.want {
+			t.Errorf("body=%q got=%q want=%q", test.body, got, test.want)
+		}
 	}
 }

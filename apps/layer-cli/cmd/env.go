@@ -184,7 +184,7 @@ func (app App) readEnvAdd(cmd *cobra.Command, flags *globalFlags, kubeContext st
 		if baseURL == "" {
 			return config.EnvConfig{}, usagef("usage: layer env add NAME --base-url URL --api-key KEY [--kube-context CONTEXT] [--kube-namespace NAMESPACE]")
 		}
-		if apiKey == "" {
+		if !flagChanged(cmd, "api-key") {
 			return config.EnvConfig{}, usagef("usage: layer env add NAME --base-url URL --api-key KEY [--kube-context CONTEXT] [--kube-namespace NAMESPACE]")
 		}
 		return config.EnvConfig{
@@ -207,15 +207,12 @@ func (app App) readEnvAdd(cmd *cobra.Command, flags *globalFlags, kubeContext st
 			baseURL = hevlayer.DefaultBaseURL
 		}
 	}
-	if apiKey == "" {
-		answer, err := promptLine(cmd, reader, "API key: ")
+	if !flagChanged(cmd, "api-key") {
+		answer, err := promptLine(cmd, reader, "API key (empty for keyless CE): ")
 		if err != nil {
 			return config.EnvConfig{}, err
 		}
 		apiKey = strings.TrimSpace(answer)
-	}
-	if apiKey == "" {
-		return config.EnvConfig{}, usagef("api key is required")
 	}
 	if kubeContext == "" {
 		answer, err := promptLine(cmd, reader, "Kube context (optional): ")

@@ -441,8 +441,10 @@ func TestKeysRmDeletesByID(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/keys":
+			payload := apiKeyPayload()
+			payload["phase"] = "Revoked"
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"keys": []map[string]interface{}{apiKeyPayload()},
+				"keys": []map[string]interface{}{payload},
 			})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/keys/0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9":
 			deleted = true
@@ -462,6 +464,37 @@ func TestKeysRmDeletesByID(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "deleted") {
 		t.Fatalf("unexpected stdout: %q", stdout)
+	}
+}
+
+func TestKeysRmRefusesActiveKey(t *testing.T) {
+	deleteCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireAuth(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/keys":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"keys": []map[string]interface{}{apiKeyPayload()},
+			})
+		case r.Method == http.MethodDelete:
+			deleteCalled = true
+			t.Fatal("DELETE must not be called for an Active key")
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	stdout, stderr, code := runTestCLI(t, server.URL, []string{"keys", "rm", "cohort-reader"})
+	if code != ExitFailed {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if deleteCalled {
+		t.Fatal("DELETE was called for an Active key")
+	}
+	if !strings.Contains(stderr, "revoke it before hard delete") {
+		t.Fatalf("unexpected stderr: %q", stderr)
 	}
 }
 

@@ -3,9 +3,13 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hev/layer/apps/layer-cli/internal/output"
@@ -34,6 +38,7 @@ type indexListRow struct {
 // history (count, whether the fetch hit its cap, the latest watermark, and the
 // recent tail).
 type indexDetail struct {
+	Purge string `json:"purge"`
 	hevlayer.NamespaceListEntry
 	Snapshots        int                             `json:"snapshots"`
 	SnapshotsAtLimit bool                            `json:"snapshots_at_limit"`
@@ -106,7 +111,8 @@ func newIndexGetCommand(app App, flags *globalFlags) *cobra.Command {
 				return err
 			}
 			client := app.clientFor(resolved)
-			detail, err := getIndexDetail(cmd.Context(), client, args[0])
+			purge := readNamespacePurge(cmd.Context(), resolved.BaseURL, resolved.APIKey, args[0])
+			detail, err := getIndexDetail(cmd.Context(), client, args[0], purge)
 			if err != nil {
 				return err
 			}
@@ -133,6 +139,14 @@ func newIndexSnapshotCommand(app App, flags *globalFlags) *cobra.Command {
 			if field == "" {
 				return usagef("index snapshot requires --field")
 			}
+			if source == "snapshot" {
+				source = "stored"
+			}
+			switch source {
+			case "auto", "stored", "cache", "origin":
+			default:
+				return usagef("invalid snapshot source %q: use auto, stored, cache, or origin (snapshot aliases stored)", source)
+			}
 			client := app.clientFor(resolved)
 			job, err := client.CreateSnapshot(cmd.Context(), args[0], &hevlayer.CreateSnapshotRequest{
 				Field:  field,
@@ -149,7 +163,7 @@ func newIndexSnapshotCommand(app App, flags *globalFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&field, "field", "", "Facet field to materialize")
-	cmd.Flags().StringVar(&source, "source", "origin", "Snapshot source: auto, snapshot, cache, or origin")
+	cmd.Flags().StringVar(&source, "source", "origin", "Snapshot source: auto, stored, cache, or origin (snapshot aliases stored)")
 	cmd.Flags().DurationVar(&pollInterval, "poll-interval", time.Second, "Polling interval while the snapshot job runs")
 	return cmd
 }
@@ -307,7 +321,7 @@ func lastSnapshots(ctx context.Context, client *hevlayer.Client) map[string]int6
 	return out
 }
 
-func getIndexDetail(ctx context.Context, client *hevlayer.Client, name string) (indexDetail, error) {
+func getIndexDetail(ctx context.Context, client *hevlayer.Client, name string, purge string) (indexDetail, error) {
 	// ListNamespaces with the exact name as prefix is the only path to the
 	// summary fields (rows, size, stability, cache); filter to the exact match.
 	entries, err := listNamespaces(ctx, client, name, 0)
@@ -322,11 +336,19 @@ func getIndexDetail(ctx context.Context, client *hevlayer.Client, name string) (
 		}
 	}
 	if entry == nil {
+		if purge == "pending" {
+			return indexDetail{NamespaceListEntry: hevlayer.NamespaceListEntry{Name: name}, Purge: purge}, nil
+		}
 		return indexDetail{}, fmt.Errorf("index %q not found", name)
 	}
-	detail := indexDetail{NamespaceListEntry: *entry}
+	detail := indexDetail{NamespaceListEntry: *entry, Purge: purge}
 	history, err := client.ListNamespaceHistory(ctx, name, &hevlayer.ListNamespaceHistoryParams{Limit: historyLimit})
 	if err != nil {
+		var apiErr *hevlayer.HevlayerError
+		// Standalone CE has metadata, but no managed history route.
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return detail, nil
+		}
 		return indexDetail{}, err
 	}
 	detail.RecentSnapshots = history
@@ -471,6 +493,7 @@ func emitIndexDetail(out io.Writer, format string, detail indexDetail) error {
 		}
 		rows := [][]string{
 			{"NAME", detail.Name},
+			{"PURGE", detail.Purge},
 			{"ROWS", output.FormatInt(detail.RowCount)},
 			{"SIZE_BYTES", output.FormatInt(detail.SizeBytes)},
 			{"SCHEMA", schema},
@@ -519,28 +542,78 @@ func stableLagMs(entry hevlayer.NamespaceListEntry) int64 {
 
 func deleteNamespaces(ctx context.Context, out io.Writer, errOut io.Writer, client *hevlayer.Client, format string, names []string) error {
 	type result struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+		Message string `json:"message,omitempty"`
 	}
 	results := make([]result, 0, len(names))
+	var failures []error
 	for _, name := range names {
-		if _, err := client.DeleteNamespace(ctx, name); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+		response, err := client.DeleteNamespace(ctx, name)
+		if retryableNamespaceDelete(err) {
+			response, err = client.DeleteNamespace(ctx, name)
 		}
-		results = append(results, result{Name: name, Status: "deleted"})
+		row := result{Name: name, Status: "deleted"}
+		if err != nil {
+			// A proxy timeout can lose the response after the upstream delete
+			// commits. Only a complete, successful list can confirm absence.
+			entries, listErr := listNamespaces(ctx, client, name, 0)
+			found := false
+			for _, entry := range entries {
+				if entry.Name == name {
+					found = true
+				}
+			}
+			if listErr != nil || found {
+				if listErr != nil {
+					err = fmt.Errorf("%w (list verification failed: %v)", err, listErr)
+				}
+				row.Status = "failed: " + err.Error()
+				failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			} else {
+				row.Message = "confirmed absent by list; delete response unavailable"
+			}
+		} else if response != nil {
+			row.Message = response.Message
+		}
+		results = append(results, row)
 	}
+	var writeErr error
 	if format == output.JSON {
-		return output.WriteJSON(out, results)
-	}
-	for _, result := range results {
-		if format == output.Names {
-			fmt.Fprintln(out, result.Name)
-		} else {
-			fmt.Fprintf(out, "%s\t%s\n", result.Name, result.Status)
+		writeErr = output.WriteJSON(out, results)
+	} else {
+		for _, row := range results {
+			destination := out
+			if format == output.Names {
+				_, err := fmt.Fprintln(out, row.Name)
+				writeErr = errors.Join(writeErr, err)
+				destination = errOut
+			}
+			line := row.Name + "\t" + row.Status
+			if row.Message != "" {
+				line += "\t" + row.Message
+			}
+			_, err := fmt.Fprintln(destination, line)
+			writeErr = errors.Join(writeErr, err)
+			if row.Status == "deleted" {
+				_, err = fmt.Fprintf(errOut, "If Index CR garbage collection is disabled, delete or inspect the Index CR separately: %s\n", row.Name)
+				writeErr = errors.Join(writeErr, err)
+			}
 		}
-		fmt.Fprintf(errOut, "If Index CR garbage collection is disabled, delete or inspect the Index CR separately: %s\n", result.Name)
+	}
+	if err := errors.Join(append(failures, writeErr)...); err != nil {
+		// Batch failures must retain a nonzero exit, including errors that
+		// single-feature commands translate into informational nudges.
+		return cliError{message: err.Error(), code: ExitFailed}
 	}
 	return nil
+}
+
+func retryableNamespaceDelete(err error) bool {
+	var apiErr *hevlayer.HevlayerError
+	return errors.Is(err, syscall.ECONNRESET) ||
+		(errors.As(err, &apiErr) &&
+			(apiErr.StatusCode == http.StatusBadGateway || apiErr.StatusCode == http.StatusGatewayTimeout))
 }
 
 func confirmed(stdin io.Reader) bool {
@@ -550,4 +623,48 @@ func confirmed(stdin io.Reader) bool {
 	}
 	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
 	return answer == "y" || answer == "yes"
+}
+
+// The existing Prometheus scrape provides current gateway backlog without
+// requiring an external metrics backend or adding a namespace response field.
+func readNamespacePurge(ctx context.Context, baseURL, apiKey, name string) string {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/metrics", nil)
+	if err != nil {
+		return "unknown"
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "unknown"
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "unknown"
+	}
+	escaped := strings.NewReplacer("\\", "\\\\", "\n", "\\n", "\"", "\\\"").Replace(name)
+	sample := "layer_namespace_purge_pending{namespace=\"" + escaped + "\"}"
+	ready := false
+	limited := &io.LimitedReader{R: response.Body, N: 8 << 20}
+	scanner := bufio.NewScanner(limited)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "layer_namespace_purge_discovery_ready 1" {
+			ready = true
+		}
+		if value, ok := strings.CutPrefix(line, sample+" "); ok {
+			count, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || count < 0 {
+				return "unknown"
+			}
+			if count > 0 {
+				return "pending"
+			}
+		}
+	}
+	if scanner.Err() != nil || limited.N == 0 || !ready {
+		return "unknown"
+	}
+	return "none"
 }
