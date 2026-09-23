@@ -9,7 +9,13 @@ use tokio::sync::RwLock;
 
 /// Cache calls are best-effort and must not occupy request tasks long enough
 /// to starve the PostgreSQL-backed pipeline paths during an Aerospike outage.
+/// `LAYER_CACHE_OPERATION_TIMEOUT_MS` overrides it.
 pub const CACHE_OPERATION_TIMEOUT: Duration = Duration::from_millis(200);
+/// Whole-set work (scans, set counts, set deletes) reads every record in a
+/// namespace set, so it runs on its own budget. A namespace of a few thousand
+/// documents cannot stream back inside the point-op timeout.
+/// `LAYER_CACHE_BULK_TIMEOUT_MS` overrides it.
+pub const CACHE_BULK_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// One timeout/connect failure is enough to treat Aerospike as unavailable.
 pub const CACHE_BREAKER_FAILURE_THRESHOLD: u64 = 1;
 /// Open-circuit window before a single half-open cache probe is allowed.
@@ -132,6 +138,17 @@ pub struct AerospikeRuntime {
     generation: AtomicU64,
     consecutive_failures: AtomicU64,
     half_open_probe_inflight: AtomicBool,
+    operation_timeout: Duration,
+    bulk_timeout: Duration,
+}
+
+fn timeout_from_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
 }
 
 impl AerospikeRuntime {
@@ -145,7 +162,22 @@ impl AerospikeRuntime {
             generation: AtomicU64::new(generation),
             consecutive_failures: AtomicU64::new(0),
             half_open_probe_inflight: AtomicBool::new(false),
+            operation_timeout: timeout_from_env(
+                "LAYER_CACHE_OPERATION_TIMEOUT_MS",
+                CACHE_OPERATION_TIMEOUT,
+            ),
+            bulk_timeout: timeout_from_env(
+                "LAYER_CACHE_BULK_TIMEOUT_MS",
+                CACHE_BULK_OPERATION_TIMEOUT,
+            ),
         }
+    }
+
+    /// Overrides both budgets; tests use it to keep bulk timeouts short.
+    pub fn with_timeouts(mut self, operation: Duration, bulk: Duration) -> Self {
+        self.operation_timeout = operation;
+        self.bulk_timeout = bulk;
+        self
     }
 
     pub async fn set_connected(&self, client: Arc<dyn AerospikeClient>) -> bool {
@@ -223,6 +255,26 @@ impl AerospikeRuntime {
         Ok(client)
     }
 
+    /// Bulk work honours an open breaker but never takes the half-open probe:
+    /// a scan is too slow to be a health check, so point reads decide recovery.
+    async fn current_for_bulk(&self) -> Result<Arc<dyn AerospikeClient>, AerospikeError> {
+        let client = self
+            .client
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| AerospikeError::other("cache cold: Aerospike unavailable"))?;
+        if let Some(opened_at) = *self.breaker_opened_at.read().await {
+            if opened_at.elapsed() < CACHE_BREAKER_OPEN_FOR {
+                return Err(AerospikeError::other(
+                    "cache cold: Aerospike circuit breaker open",
+                ));
+            }
+        }
+        Ok(client)
+    }
+
     async fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.half_open_probe_inflight.store(false, Ordering::SeqCst);
@@ -245,11 +297,11 @@ impl AerospikeRuntime {
     where
         Fut: std::future::Future<Output = Result<T, AerospikeError>>,
     {
-        let result = match tokio::time::timeout(CACHE_OPERATION_TIMEOUT, fut).await {
+        let result = match tokio::time::timeout(self.operation_timeout, fut).await {
             Ok(result) => result,
             Err(_) => Err(AerospikeError::other(format!(
                 "Aerospike operation timed out after {}ms",
-                CACHE_OPERATION_TIMEOUT.as_millis()
+                self.operation_timeout.as_millis()
             ))),
         };
 
@@ -260,6 +312,32 @@ impl AerospikeRuntime {
             }
             Err(error) => {
                 self.record_failure(error.to_string()).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Runs whole-set work on the bulk budget. Success still proves the cache
+    /// is reachable, but a failure or timeout only fails this call: one slow
+    /// scan must not open the breaker every namespace's point reads rely on.
+    async fn call_bulk<T, Fut>(&self, fut: Fut) -> Result<T, AerospikeError>
+    where
+        Fut: std::future::Future<Output = Result<T, AerospikeError>>,
+    {
+        let result = match tokio::time::timeout(self.bulk_timeout, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(AerospikeError::other(format!(
+                "Aerospike bulk operation timed out after {}ms",
+                self.bulk_timeout.as_millis()
+            ))),
+        };
+        match result {
+            Ok(value) => {
+                self.record_success().await;
+                Ok(value)
+            }
+            Err(error) => {
+                *self.last_error.write().await = Some(error.to_string());
                 Err(error)
             }
         }
@@ -338,8 +416,9 @@ impl AerospikeClient for AerospikeRuntime {
         namespace: &str,
         include_attributes: Option<&[String]>,
     ) -> Result<Vec<(String, HashMap<String, Value>)>, AerospikeError> {
-        let client = self.current().await?;
-        self.call(client.scan(namespace, include_attributes)).await
+        let client = self.current_for_bulk().await?;
+        self.call_bulk(client.scan(namespace, include_attributes))
+            .await
     }
 
     async fn put_raw(&self, namespace: &str, key: &str, data: &[u8]) -> Result<(), AerospikeError> {
@@ -353,13 +432,13 @@ impl AerospikeClient for AerospikeRuntime {
     }
 
     async fn delete_set(&self, namespace: &str) -> Result<(), AerospikeError> {
-        let client = self.current().await?;
-        self.call(client.delete_set(namespace)).await
+        let client = self.current_for_bulk().await?;
+        self.call_bulk(client.delete_set(namespace)).await
     }
 
     async fn count_set(&self, namespace: &str) -> Result<u64, AerospikeError> {
-        let client = self.current().await?;
-        self.call(client.count_set(namespace)).await
+        let client = self.current_for_bulk().await?;
+        self.call_bulk(client.count_set(namespace)).await
     }
 }
 
@@ -660,7 +739,13 @@ mod tests {
             _namespace: &str,
             _include_attributes: Option<&[String]>,
         ) -> Result<Vec<(String, HashMap<String, Value>)>, AerospikeError> {
-            unimplemented!()
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.sleep_for).await;
+            if self.fail.load(Ordering::SeqCst) {
+                Err(AerospikeError::other("simulated cache outage"))
+            } else {
+                Ok(vec![("doc".to_string(), HashMap::new())])
+            }
         }
 
         async fn put_raw(
@@ -737,5 +822,69 @@ mod tests {
         runtime.put("ns", "doc", &doc).await.unwrap();
         assert!(runtime.is_connected_now());
         assert!(runtime.status().await.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn slow_scan_runs_on_bulk_budget_without_tripping_breaker() {
+        // Slower than the point-op timeout, well inside the bulk budget.
+        let slow = Arc::new(SleepingAerospikeClient::new(Duration::from_millis(80)));
+        slow.fail.store(false, Ordering::SeqCst);
+        let runtime = AerospikeRuntime::new(Some(slow.clone()))
+            .with_timeouts(Duration::from_millis(20), Duration::from_secs(5));
+
+        let rows = runtime.scan("ns", None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(runtime.is_connected_now());
+    }
+
+    #[tokio::test]
+    async fn bulk_timeout_does_not_open_breaker_for_point_reads() {
+        let slow = Arc::new(SleepingAerospikeClient::new(Duration::from_millis(200)));
+        slow.fail.store(false, Ordering::SeqCst);
+        let runtime = AerospikeRuntime::new(Some(slow.clone()))
+            .with_timeouts(Duration::from_secs(1), Duration::from_millis(20));
+
+        let err = runtime.scan("ns", None).await.unwrap_err();
+        assert!(err.to_string().contains("bulk operation timed out"));
+        assert!(
+            runtime.is_connected_now(),
+            "a slow scan must not mark the cache unavailable"
+        );
+
+        // A point op right after still reaches the client instead of failing fast.
+        runtime.put("ns", "doc", &HashMap::new()).await.unwrap();
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn bulk_failure_leaves_breaker_to_point_ops() {
+        let slow = Arc::new(SleepingAerospikeClient::new(Duration::from_millis(1)));
+        let runtime = AerospikeRuntime::new(Some(slow.clone()));
+
+        runtime.scan("ns", None).await.unwrap_err();
+        assert!(runtime.is_connected_now());
+        assert!(runtime.status().await.last_error.is_some());
+
+        // Once a point op opens the breaker, bulk work fails fast too.
+        runtime.put("ns", "doc", &HashMap::new()).await.unwrap_err();
+        let err = runtime.scan("ns", None).await.unwrap_err();
+        assert!(err.to_string().contains("circuit breaker open"));
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn scanned_id_prefers_user_key_then_document_id() {
+        let mut doc = HashMap::new();
+        assert_eq!(scanned_id(Some("k".into()), &doc).as_deref(), Some("k"));
+        assert_eq!(scanned_id(None, &doc), None);
+        doc.insert("id".to_string(), Value::String("doc-1".into()));
+        assert_eq!(scanned_id(None, &doc).as_deref(), Some("doc-1"));
+        assert_eq!(scanned_id(Some("k".into()), &doc).as_deref(), Some("k"));
+        doc.insert("id".to_string(), Value::from(7));
+        assert_eq!(
+            scanned_id(None, &doc),
+            None,
+            "non-string ids are not document ids"
+        );
     }
 }
