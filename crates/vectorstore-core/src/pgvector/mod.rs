@@ -253,6 +253,27 @@ impl PgvectorClient {
     }
 
     async fn query_wire(&self, namespace: &str, body: &Value) -> Result<Value> {
+        // Name both the declared feature and the submitted wire key so clients
+        // can correlate the rejection with either contract.
+        if let Some(route) = crate::capabilities::HybridRoute::for_query_body(body) {
+            self.capabilities()
+                .require(route.feature())
+                .map_err(|error| {
+                    let key = if body.get("queries").is_some() {
+                        "queries"
+                    } else if body.get("rerank_by").is_some() {
+                        "rerank_by"
+                    } else {
+                        "rank_by"
+                    };
+                    match error {
+                        TurbopufferError::Other(message) => {
+                            TurbopufferError::Other(format!("{message} (wire key: {key})"))
+                        }
+                        error => error,
+                    }
+                })?;
+        }
         keys(
             body,
             &[
@@ -679,7 +700,8 @@ impl TurbopufferClient for PgvectorClient {
         })
     }
     async fn multi_ranked_query(&self, _: &str, _: &[Value], _: Option<&Value>) -> Result<Value> {
-        Err(unsupported("multi_query"))
+        self.capabilities()
+            .unimplemented(crate::capabilities::WireFeature::MultiQuery)
     }
     async fn fetch(&self, ns: &str, id: &str) -> Result<Option<DocumentResponse>> {
         Ok(self

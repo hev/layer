@@ -34,7 +34,7 @@ wire_features! {
     DistanceMetric => ("distance_metric", "Cosine / squared-Euclidean distance", "api/query"),
     Fts => ("fts", "Single-field BM25 text rank", "api/query"),
     NativeText => ("native_text", "Explicit native Postgres text fallback", "api/query"),
-    Hybrid => ("hybrid", "Gateway dense + text RRF", "api/query"),
+    Hybrid => ("hybrid", "HybridText rank operator (gateway dense + text RRF)", "api/query"),
     Projection => ("include_attributes", "Attribute projection", "api/query"),
     ScalarFilters => ("scalar_filters", "Eq / NotEq / Gt / Gte / Lt / Lte / In; And / Or", "api/query"),
     NotFilters => ("not_filters", "Not / NotIn filters", "api/query"),
@@ -46,7 +46,7 @@ wire_features! {
     MultiVector => ("multivector", "Multi-vector ANN", "api/query"),
     Sparse => ("sparse", "Sparse rank", "api/query"),
     MultipleFields => ("multiple_fields", "Multiple vector/text fields", "api/query"),
-    MultiQuery => ("multi_query", "Raw multi-query / rerank_by", "api/query"),
+    MultiQuery => ("multi_query", "Multi-query queries body / rerank_by (client-composed hybrid)", "api/query"),
     Pagination => ("search_after", "Ranked cursor / searchAfter", "api/query"),
     OrderedScan => ("ordered_scan", "Ordered scans", "api/scans"),
     Facet => ("facet", "Facets", "api/scans"),
@@ -97,6 +97,44 @@ impl WireFeature {
     }
 }
 
+/// The two query routes that express hybrid retrieval. Each is governed by
+/// exactly one wire feature, so a store's declaration answers per route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HybridRoute {
+    /// `rank_by: [field, "HybridText", ...]`; the gateway issues one ranked
+    /// query per leg and fuses with RRF.
+    HybridText,
+    /// A `queries` body: independent legs, fused by the store when
+    /// `rerank_by` is set.
+    MultiQuery,
+}
+impl HybridRoute {
+    pub const ALL: &'static [Self] = &[Self::HybridText, Self::MultiQuery];
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::HybridText => "hybrid_text",
+            Self::MultiQuery => "multi_query",
+        }
+    }
+    /// The wire feature whose declared coverage governs this route.
+    pub fn feature(self) -> WireFeature {
+        match self {
+            Self::HybridText => WireFeature::Hybrid,
+            Self::MultiQuery => WireFeature::MultiQuery,
+        }
+    }
+    /// Classify a query body; `None` is a single, non-hybrid query.
+    pub fn for_query_body(body: &serde_json::Value) -> Option<Self> {
+        if body.get("queries").is_some() || body.get("rerank_by").is_some() {
+            return Some(Self::MultiQuery);
+        }
+        let op = body.get("rank_by")?.get(1)?.as_str()?;
+        // Exact, like the gateway's HybridText interception.
+        (op == "HybridText").then_some(Self::HybridText)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Coverage {
     pub support: Support,
@@ -121,7 +159,17 @@ impl Coverage {
             note: "",
         }
     }
+    pub const fn unsupported_because(note: &'static str) -> Self {
+        Self {
+            support: Support::Unsupported,
+            note,
+        }
+    }
 }
+
+/// Cell note for a store that serves hybrid only through `HybridText`.
+pub const MULTI_QUERY_USE_HYBRID_TEXT: &str =
+    "422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator";
 
 #[derive(Clone, Copy)]
 pub struct Capabilities {
@@ -131,6 +179,10 @@ pub struct Capabilities {
 impl Capabilities {
     pub fn get(self, feature: WireFeature) -> Coverage {
         (self.coverage)(feature)
+    }
+    /// Whether this store accepts a hybrid route; enumerate `HybridRoute::ALL`.
+    pub fn hybrid_route(self, route: HybridRoute) -> Coverage {
+        self.get(route.feature())
     }
     /// Preserve the existing string-sniffed UnsupportedByStore dispatch.
     pub fn require(self, feature: WireFeature) -> Result<(), TurbopufferError> {
@@ -234,14 +286,23 @@ mod tests {
             NotFilters,
         ];
         for &feature in WireFeature::ALL {
+            let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(
-                PGVECTOR_CAPABILITIES.get(feature).support,
-                if allowed.contains(&feature) {
+                coverage.support,
+                if feature == Hybrid {
+                    // HybridText is served, with the limits stated in the cell.
+                    Support::Approximate
+                } else if allowed.contains(&feature) {
                     Support::Supported
                 } else {
                     Support::Unsupported
                 },
                 "{}",
+                feature.id()
+            );
+            assert!(
+                coverage.support != Support::Approximate || !coverage.note.is_empty(),
+                "{}: approximate coverage states its limits",
                 feature.id()
             );
             assert_eq!(

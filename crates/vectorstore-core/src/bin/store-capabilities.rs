@@ -1,6 +1,6 @@
 //! Regenerate with scripts/generate-store-capabilities; CI checks the diff.
 use serde_json::{json, Value};
-use vectorstore_core::capabilities::{WireFeature, SCHEMA_FIELDS};
+use vectorstore_core::capabilities::{HybridRoute, WireFeature, SCHEMA_FIELDS};
 use vectorstore_core::pgvector_capabilities;
 use vectorstore_core::search::HttpSearchClient;
 use vectorstore_core::turbopuffer::{HttpTurbopufferClient, TurbopufferClient};
@@ -42,11 +42,29 @@ fn main() {
         }).collect();
         json!({"id": feature.id(), "label": feature.label(), "page": feature.page(), "schema_fields": SCHEMA_FIELDS.iter().flat_map(|(schema, fields)| fields.iter().filter(move |(_, owner)| *owner == feature).map(move |(name, _)| format!("{schema}.{name}"))).collect::<Vec<_>>(), "stores": coverage})
     }).collect();
+    // Projection of Capabilities::hybrid_route: which hybrid route a store accepts.
+    let hybrid_routes: Vec<Value> = HybridRoute::ALL
+        .iter()
+        .map(|&route| {
+            let coverage: serde_json::Map<String, Value> = stores
+                .iter()
+                .map(|store| {
+                    (
+                        store.kind.to_string(),
+                        serde_json::to_value(store.hybrid_route(route))
+                            .expect("coverage serializes"),
+                    )
+                })
+                .collect();
+            json!({"route": route.id(), "feature": route.feature().id(), "stores": coverage})
+        })
+        .collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "generated_by": "scripts/generate-store-capabilities",
             "fts_ranking_note": "BM25-class scoring; tokenization differs; fused order may differ across backends",
+        "hybrid_routes": hybrid_routes,
         "features": features
         }))
         .expect("artifact serializes")

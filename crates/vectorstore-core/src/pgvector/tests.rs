@@ -139,3 +139,126 @@ async fn adapter_capabilities_match_matrix_and_default_rejections() {
         .to_string()
         .contains("UnsupportedByStore: pgvector: delete_by_filter"));
 }
+
+/// The two hybrid bodies clients actually send: kit's multi-query + RRF, and
+/// the legs the gateway issues for a `HybridText` expansion.
+fn hybrid_route_body(route: crate::capabilities::HybridRoute) -> Value {
+    use crate::capabilities::HybridRoute;
+    match route {
+        HybridRoute::HybridText => json!({"rank_by":["text","HybridText","database"],"top_k":5}),
+        HybridRoute::MultiQuery => json!({
+            "queries":[
+                {"rank_by":["vector","ANN",[1,0]],"top_k":5},
+                {"rank_by":["text","BM25","database"],"top_k":5}
+            ],
+            "rerank_by":["RRF"]
+        }),
+    }
+}
+
+/// LYR-85: the declared per-route hybrid answer must equal what the adapter
+/// does with the request. No database: a route the adapter accepts gets as far
+/// as the (unreachable) pool; a route it rejects is a 422 before any SQL.
+#[tokio::test]
+async fn declared_hybrid_route_coverage_matches_adapter_behavior() {
+    use crate::capabilities::{HybridRoute, Support};
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr85-route-test".into(),
+    };
+    for &route in HybridRoute::ALL {
+        let body = hybrid_route_body(route);
+        assert_eq!(HybridRoute::for_query_body(&body), Some(route));
+        let declared = client.capabilities().hybrid_route(route);
+        // What the gateway sends the store for this route.
+        let rejection = match route {
+            HybridRoute::MultiQuery => {
+                let response = client
+                    .passthrough("POST", "/v2/namespaces/ns/query", None, Some(body))
+                    .await
+                    .expect("wire failures are responses");
+                assert_eq!(response.status, 422);
+                let body: Value = serde_json::from_slice(&response.body).unwrap();
+                assert_eq!(body["error"], "UnsupportedByStore");
+                Some(body["message"].as_str().unwrap().to_owned())
+            }
+            HybridRoute::HybridText => {
+                let mut rejected = None;
+                for leg in [
+                    json!(["text", "BM25", "database"]),
+                    json!(["vector", "ANN", [1, 0]]),
+                ] {
+                    let error = client
+                        .ranked_query("ns", &leg, 5, None, None)
+                        .await
+                        .unwrap_err()
+                        .to_string();
+                    if error.contains("UnsupportedByStore") {
+                        rejected = Some(error);
+                    } else {
+                        assert!(error.contains("database operation failed"), "{error}");
+                    }
+                }
+                rejected
+            }
+        };
+        assert_eq!(
+            declared.support == Support::Unsupported,
+            rejection.is_some(),
+            "{}: declared {:?}, runtime rejection {rejection:?}",
+            route.id(),
+            declared.support
+        );
+        if declared.support == Support::Approximate {
+            // The limit the gateway enforces must be readable from the cell.
+            assert!(
+                declared.note.contains("fuzziness"),
+                "{}: note must name the fuzziness limit: {:?}",
+                route.id(),
+                declared.note
+            );
+        }
+        if let Some(message) = rejection {
+            assert!(
+                message.contains(route.feature().id()),
+                "422 must name the declared feature {}: {message}",
+                route.feature().id()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn multi_query_rejection_names_capability_and_wire_key() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr85-wire-key-test".into(),
+    };
+    for (body, key) in [
+        (json!({"queries": []}), "queries"),
+        (json!({"rerank_by": ["RRF"]}), "rerank_by"),
+        (
+            hybrid_route_body(crate::capabilities::HybridRoute::MultiQuery),
+            "queries",
+        ),
+    ] {
+        let response = client
+            .passthrough("POST", "/v2/namespaces/ns/query", None, Some(body))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 422);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"], "UnsupportedByStore");
+        assert!(
+            body["message"].as_str().unwrap().ends_with(&format!(
+                "UnsupportedByStore: pgvector: multi_query (wire key: {key})"
+            )),
+            "{body}"
+        );
+    }
+}
