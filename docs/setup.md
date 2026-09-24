@@ -42,7 +42,7 @@ jobs:
             -e "PGVECTOR_URL=postgresql://layer:local-layer@127.0.0.1:$PG_PORT/layer" \
             -e TURBOPUFFER_API_KEY= -e LAYER_TELEMETRY=off \
             -e AWS_EC2_METADATA_DISABLED=true \
-            hevlayer/layer-gateway:edge
+            hevlayer/layer-gateway:0.6.0
           for _ in $(seq 1 60); do
             if curl --fail --silent http://localhost:8080/health; then exit 0; fi
             sleep 2

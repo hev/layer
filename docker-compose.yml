@@ -21,7 +21,7 @@ services:
       timeout: 3s
       retries: 30
   gateway:
-    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:edge}
+    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:0.6.0}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"

@@ -9,9 +9,9 @@ API key; no license, compiler, or client build.
 ## Start
 
 ```sh
-git clone --branch v0.6 https://github.com/hev/layer.git
+git clone --branch v0.6.0 https://github.com/hev/layer.git
 cd layer
-export GATEWAY_IMAGE=hevlayer/layer-gateway:edge
+export GATEWAY_IMAGE=hevlayer/layer-gateway:0.6.0
 export TURBOPUFFER_API_KEY="tpuf_..."
 docker compose up -d --wait
 export LAYER_GATEWAY_URL="http://localhost:${GATEWAY_PORT:-8080}"
@@ -20,9 +20,10 @@ curl --fail "$LAYER_GATEWAY_URL/health"
 ```
 
 
-Replace `tpuf_...` with your key. The `v0.6` branch and `edge` image track
-development. See the [CE quickstart](https://hevlayer.com/docs/ce/quickstart)
-for SDK examples and fixed release coordinates.
+Replace `tpuf_...` with your key. `v0.6.0` and the `0.6.0` image are the
+release; set `GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt into the
+development build. See the [CE quickstart](https://hevlayer.com/docs/ce/quickstart)
+for SDK examples.
 
 > **Preview:** started without a key, Compose runs on a local Postgres store.
 

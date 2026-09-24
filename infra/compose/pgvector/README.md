@@ -27,15 +27,16 @@ acceptance inputs. Ensure `.env` also leaves
 a nonblank key selects Turbopuffer. The acceptance suite requires pgvector.
 
 The single service definition lives in `public/ce/docker-compose.yml` and is
-copied unchanged to the public repository. `GATEWAY_IMAGE` overrides the
-published pre-release `edge` tag, for example with a released version or a
-locally staged PR image. `GATEWAY_PORT` changes the default host port 8080.
-The database has no published host port. `down -v` deletes local database data.
+copied unchanged to the public repository. It defaults to the released
+`0.6.0` image; `GATEWAY_IMAGE` overrides it, for example with the `edge`
+development tag or a locally staged PR image. `GATEWAY_PORT` changes the
+default host port 8080. The database has no published host port. `down -v`
+deletes local database data.
 
 Both suites run 76 cases using the committed generated clients, delete their
 scratch namespaces in a `finally` block, and verify cleanup. CI uses a Docker
 artifact from the existing gateway mirror job for PRs, and pulls the published
-image for main and manual runs. Compose never builds the gateway.
+`edge` image for main and manual runs. Compose never builds the gateway.
 
 ParadeDB is pinned to the `0.18.0` multi-architecture digest in the shared
 Compose file. The gateway requires `vector 0.8.0` and `pg_search 0.18.0`.
