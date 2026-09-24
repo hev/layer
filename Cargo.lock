@@ -1932,7 +1932,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hevlayer-gateway"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "alyze",
  "async-trait",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "metrics-catalog"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4835,7 +4835,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vectorstore-core"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -5296,18 +5296,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
+checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
+checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
 dependencies = [
  "proc-macro2",
  "quote",
