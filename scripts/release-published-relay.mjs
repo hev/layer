@@ -5,13 +5,15 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
-const SOURCE_MARKER = /<!--\s*source=([0-9a-f]{40})\s+base=[^>]+-->/i;
+const SOURCE_MARKER = /<!--\s*source=([0-9a-f]{40})\s+base=[^>]+-->/gi;
 
 export const notesSha256 = (body) =>
 	createHash("sha256").update(body ?? "", "utf8").digest("hex");
 
+// The generated marker is always the last one in the body; a marker pasted
+// into the curated notes above it must never win.
 export const sourceShaFromNotes = (body) => {
-	const match = (body ?? "").match(SOURCE_MARKER);
+	const match = [...(body ?? "").matchAll(SOURCE_MARKER)].at(-1);
 	if (!match) throw new Error("published release notes are missing the layer-pro source marker");
 	return match[1].toLowerCase();
 };
@@ -75,7 +77,7 @@ const githubRequest = async ({ token, repository, path, method = "GET", body }) 
 	return response.status === 204 ? null : response.json();
 };
 
-const resolveTagCommit = async ({ token, repository, tagName }) => {
+export const resolveTagCommit = async ({ token, repository, tagName }) => {
 	let object = (await githubRequest({
 		token,
 		repository,
@@ -93,6 +95,22 @@ const resolveTagCommit = async ({ token, repository, tagName }) => {
 	}
 	return object.sha;
 };
+
+// The dispatch the relay sends for a release object (webhook or REST API; both
+// carry the raw notes body). layer-pro's release-watch.yml reuses this.
+export const relayDispatch = async ({ token, repository, release }) => {
+	const tagSha = await resolveTagCommit({ token, repository, tagName: release?.tag_name });
+	return buildDispatch({ repository, release, tagSha });
+};
+
+export const sendDispatch = ({ token, dispatch }) =>
+	githubRequest({
+		token,
+		repository: "hev/layer-pro",
+		path: "/dispatches",
+		method: "POST",
+		body: dispatch,
+	});
 
 const parseArgs = (argv) => {
 	const args = { dryRun: false, eventPath: process.env.GITHUB_EVENT_PATH, tagSha: undefined };
@@ -116,28 +134,23 @@ export const main = async (argv = process.argv.slice(2), env = process.env) => {
 	const repository = event.repository?.full_name ?? env.GITHUB_REPOSITORY;
 	const readToken = env.GITHUB_TOKEN ?? env.GH_TOKEN;
 	const dispatchToken = env.LAYER_PRO_DISPATCH_TOKEN;
-	let tagSha = args.tagSha;
-	if (!tagSha) {
+	let dispatch;
+	if (args.tagSha) {
+		dispatch = buildDispatch({ repository, release: event.release, tagSha: args.tagSha });
+	} else {
 		if (args.dryRun) throw new Error("--tag-sha is required with --dry-run");
 		if (!readToken) throw new Error("GITHUB_TOKEN is required to resolve the published tag");
-		tagSha = await resolveTagCommit({ token: readToken, repository, tagName: event.release?.tag_name });
+		dispatch = await relayDispatch({ token: readToken, repository, release: event.release });
 	}
-	const dispatch = buildDispatch({ repository, release: event.release, tagSha });
 	console.log(JSON.stringify(dispatch, null, 2));
 	if (args.dryRun) return dispatch;
 	if (!dispatchToken) throw new Error("LAYER_PRO_DISPATCH_TOKEN is required");
-	await githubRequest({
-		token: dispatchToken,
-		repository: "hev/layer-pro",
-		path: "/dispatches",
-		method: "POST",
-		body: dispatch,
-	});
+	await sendDispatch({ token: dispatchToken, dispatch });
 	console.error(`relayed ${dispatch.client_payload.tag} to hev/layer-pro`);
 	return dispatch;
 };
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	main().catch((error) => {
 		console.error(error.message);
 		process.exit(1);

@@ -1,6 +1,6 @@
 {
   "name": "hevlayer",
-  "version": "0.6.0",
+  "version": "0.7.0-dev",
   "description": "Typed TypeScript client for the hevlayer gateway",
   "license": "Apache-2.0",
   "type": "module",
