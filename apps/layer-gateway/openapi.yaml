@@ -26,6 +26,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: Fetch a single document by ID
       description: |
         Retrieve a document by ID. On Aerospike cache miss, Hevlayer fetches the document from the namespace's configured VectorStore, writes it into Aerospike, and returns it.
@@ -86,6 +87,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: Fetch multiple documents by ID
       description: |
         Batch retrieve documents by ID. On Aerospike cache miss, Hevlayer fetches missing documents from the namespace's configured VectorStore, writes them into Aerospike, and returns found documents plus a list of true upstream misses.
@@ -137,6 +139,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       x-turbopuffer-key: GET /v1/namespaces/{namespace}/hint_cache_warm
       summary: Warm namespace caches
       description: 'Turbopuffer-compatible warm-cache endpoint. With no query parameters,
@@ -236,6 +239,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       x-turbopuffer-key: GET /v1/namespaces
       summary: List Turbopuffer namespaces
       description: Raw Turbopuffer-compatible namespace listing passthrough.
@@ -279,6 +283,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       x-turbopuffer-key: GET /v1/namespaces/{namespace}/schema
       summary: Get Turbopuffer namespace schema
       tags:
@@ -304,6 +309,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       x-turbopuffer-key: POST /v1/namespaces/{namespace}/schema
       summary: Update Turbopuffer namespace schema
       tags:
@@ -336,6 +342,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       x-turbopuffer-key: GET /v1/namespaces/{namespace}/metadata
       summary: Get Turbopuffer v1 namespace metadata
       tags:
@@ -361,6 +368,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       x-turbopuffer-key: PATCH /v1/namespaces/{namespace}/metadata
       summary: Update Turbopuffer namespace metadata
       description: Raw passthrough for upstream metadata configuration, currently
@@ -395,6 +403,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       x-turbopuffer-key: POST /v1/namespaces/{namespace}/_debug/recall
       summary: Evaluate Turbopuffer recall
       tags:
@@ -427,6 +436,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Materialize a snapshot for a field
       description: 'Create an on-demand snapshot job for one field. Jobs that resolve
         to `source: origin` use the same bounded shard fan-out as origin scans, with
@@ -472,6 +482,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Get snapshot policy
       description: 'Return the API-managed snapshot policy for a namespace. The JSON
         shape mirrors `Index.spec.snapshot`: `facetFields`, `interval`, and `retention`.
@@ -499,6 +510,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Set snapshot policy
       description: 'Set the API-managed snapshot policy for a namespace. This is the
         shared-gateway/API-only entry point for the same policy shape carried by `Index.spec.snapshot`.
@@ -542,6 +554,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: List snapshot jobs
       tags:
       - snapshots
@@ -560,6 +573,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Get snapshot job status
       tags:
       - snapshots
@@ -585,6 +599,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Warm the Aerospike cache
       description: 'Starts an asynchronous warm job that pages through Turbopuffer
         and batch-populates the Aerospike cache.
@@ -627,6 +642,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: List warm jobs
       tags:
       - cache
@@ -645,6 +661,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Get warm job status
       tags:
       - cache
@@ -670,6 +687,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Create a scan (filter, full-text, or radius)
       description: |
         On-demand row selection over a namespace. A scan picks rows by one of three selectors and returns their IDs (`mode: ids`, async job), their count (`mode: count`, synchronous), or the distinct values of one attribute `field` with per-value counts (`mode: values`, async job):
@@ -753,6 +771,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: List ID and values scan jobs
       tags:
       - scans
@@ -771,6 +790,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Get scan status
       tags:
       - scans
@@ -795,6 +815,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Delete scan state
       tags:
       - scans
@@ -820,6 +841,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Get scan IDs or values
       tags:
       - scans
@@ -865,6 +887,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: approximate
       x-turbopuffer-key: POST /v2/namespaces/{namespace}
       x-hevlayer-client-aliases:
       - operationId: branchNamespace
@@ -951,6 +974,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       x-turbopuffer-key: DELETE /v2/namespaces/{namespace}
       summary: Delete a namespace
       description: 'Delete the upstream namespace even when object storage is not
@@ -1000,6 +1024,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       summary: Bulk import Arrow IPC rows
       description: 'Forward an Arrow IPC stream to a backend bulk import path. Search-backed
         VectorStores map this to `POST /ns/{namespace}/import` and return the backend''s
@@ -1065,6 +1090,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: approximate
       x-turbopuffer-key: POST /v2/namespaces/{namespace}/query
       summary: Query a namespace with a raw Turbopuffer request
       description: 'Passthrough for upstream Turbopuffer query bodies, including `rank_by`,
@@ -1161,6 +1187,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: approximate
       x-hevlayer-client-aliases:
       - operationId: batchQueryNamespace
         upstreamKey: POST /v2/namespaces/{namespace}/query?stainless_overload=multiQuery
@@ -1260,6 +1287,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: unsupported
       x-turbopuffer-key: POST /v2/namespaces/{namespace}/explain_query
       summary: Explain a Turbopuffer query plan
       description: Raw Turbopuffer-compatible query-plan explanation passthrough.
@@ -1293,6 +1321,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: List namespaces
       description: List namespaces with optional prefix filter and cursor pagination.
       tags:
@@ -1337,6 +1366,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       x-turbopuffer-key: GET /v2/namespaces/{namespace}/metadata
       summary: Get namespace metadata
       description: 'Get metadata for a namespace including schema, row counts, byte
@@ -1362,6 +1392,47 @@ paths:
                 "$ref": "#/components/schemas/Error"
         '502':
           description: Upstream error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/capabilities":
+    get:
+      operationId: getNamespaceCapabilities
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Get the capabilities of a namespace's store
+      description: 'Report what the VectorStore behind this namespace supports: every
+        wire feature, both hybrid query routes, and the schema limits the store enforces.
+        The namespace resolves through its Index `storeRef` and falls back to the
+        default store, so the call answers before the namespace exists. The report
+        is built from the running gateway build''s store declarations; it is never
+        a compiled-in matrix of other builds. A store without a declaration returns
+        `declared: false` and `undeclared` cells. Requires read scope. Layer-native:
+        answered by the gateway, never forwarded upstream.
+
+        '
+      tags:
+      - namespaces
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      responses:
+        '200':
+          description: Capabilities report for the resolved store
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/CapabilitiesReport"
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '403':
+          description: Key lacks read scope on this namespace
           content:
             application/json:
               schema:
@@ -1425,6 +1496,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: Read pro license state
       description: 'Returns the pro gateway''s local license projection. This endpoint
         is an oracle for dashboard and release-gate tests; it never phones home and
@@ -1747,6 +1819,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: List VectorStores
       description: 'List declared VectorStore resources from the configured resource
         namespace. The response is a credential-safe projection: it includes Secret
@@ -1774,6 +1847,7 @@ paths:
       x-hevlayer-store-support:
         turbopuffer: supported
         search: supported
+        pgvector: supported
       summary: Get a VectorStore
       description: 'Get one credential-safe VectorStore projection. `turbopufferUrl`
         is present only when `spec.turbopuffer.orgId` is set. Requires read scope.
@@ -1798,6 +1872,35 @@ paths:
                 "$ref": "#/components/schemas/Error"
         '503':
           description: Kubernetes access is unavailable on this gateway
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v2/vectorstores/{name}/capabilities":
+    get:
+      operationId: getVectorStoreCapabilities
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Get the capabilities of a VectorStore
+      description: 'Same report as `GET /v2/namespaces/{namespace}/capabilities`,
+        addressed by VectorStore name. Requires read scope.
+
+        '
+      tags:
+      - vectorstores
+      parameters:
+      - "$ref": "#/components/parameters/vectorstoreName"
+      responses:
+        '200':
+          description: Capabilities report for the named store
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/CapabilitiesReport"
+        '404':
+          description: VectorStore not found
           content:
             application/json:
               schema:
@@ -3628,6 +3731,153 @@ components:
         key:
           type: string
           description: Secret data key. The value is never returned.
+    CapabilitySupport:
+      type: string
+      enum:
+      - supported
+      - approximate
+      - unsupported
+      - undeclared
+      description: "`approximate` means served with the limits stated in `note`. `unsupported`
+        requests return HTTP 422 `UnsupportedByStore`. `undeclared` means the running
+        build has no declaration for this store: the gateway makes no claim, and the
+        client must not read it as `unsupported`.\n"
+    CapabilityCoverage:
+      type: object
+      required:
+      - support
+      - note
+      properties:
+        support:
+          "$ref": "#/components/schemas/CapabilitySupport"
+        note:
+          type: string
+          description: Limits or reason, empty when there is nothing to add.
+    CapabilitiesStore:
+      type: object
+      required:
+      - name
+      - kind
+      properties:
+        name:
+          type: string
+          description: VectorStore resource name the request resolved to.
+        kind:
+          type: string
+          description: 'Configured store kind, for example `turbopuffer`, `search`,
+            `search-embedded`, or `pgvector`. Informational: branch on the report,
+            not on this value.
+
+            '
+    CapabilityFeature:
+      type: object
+      required:
+      - id
+      - label
+      - page
+      - support
+      - note
+      properties:
+        id:
+          type: string
+          description: Stable wire-feature identifier, for example `fts`.
+        label:
+          type: string
+        page:
+          type: string
+          description: Docs page that owns the feature, for example `api/query`.
+        support:
+          "$ref": "#/components/schemas/CapabilitySupport"
+        note:
+          type: string
+    CapabilityHybridRoute:
+      type: object
+      required:
+      - route
+      - feature
+      - support
+      - note
+      properties:
+        route:
+          type: string
+          description: 'Hybrid route identifier: `hybrid_text` (the `HybridText` rank
+            operator) or `multi_query` (a `queries` / `rerank_by` body). Clients ignore
+            identifiers they do not know.
+
+            '
+        feature:
+          type: string
+          description: The wire-feature `id` whose coverage governs this route.
+        support:
+          "$ref": "#/components/schemas/CapabilitySupport"
+        note:
+          type: string
+    CapabilitySchemaLimits:
+      type: object
+      required:
+      - embed
+      - max_gateway_embed_attributes
+      - max_full_text_search_fields
+      - max_vector_fields
+      description: 'Schema-shape limits the store enforces. For each `max_*` field,
+        `null` means the store declares no limit. When the report has `declared: false`
+        every `max_*` is `null` and carries no meaning.
+
+        '
+      properties:
+        embed:
+          "$ref": "#/components/schemas/CapabilityCoverage"
+        max_gateway_embed_attributes:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+          description: 'Most schema attributes per namespace that may declare a gateway-served
+            `embed`.
+
+            '
+        max_full_text_search_fields:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+          description: Most attributes per namespace that may set `full_text_search`.
+        max_vector_fields:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+          description: Most vector attributes per namespace.
+    CapabilitiesReport:
+      type: object
+      required:
+      - store
+      - declared
+      - features
+      - hybrid_routes
+      - schema_limits
+      properties:
+        store:
+          "$ref": "#/components/schemas/CapabilitiesStore"
+        declared:
+          type: boolean
+          description: 'False when the running build has no capability declaration
+            for this store. Every `support` is then `undeclared`.
+
+            '
+        features:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CapabilityFeature"
+        hybrid_routes:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CapabilityHybridRoute"
+        schema_limits:
+          "$ref": "#/components/schemas/CapabilitySchemaLimits"
     VectorStoreEndpoint:
       type: object
       required:
@@ -3699,6 +3949,7 @@ components:
           - turbopuffer
           - search
           - search-embedded
+          - pgvector
           description: 'Store kind. `search-embedded` is available only in the pro
             image and treats `endpoint.url` as a `file://` or `s3://` dataset root.
 

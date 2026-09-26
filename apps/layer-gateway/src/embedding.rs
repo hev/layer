@@ -12,7 +12,9 @@ use crate::clients::turbopuffer::{
     TurbopufferClient, TurbopufferError, TurbopufferPassthroughResponse,
 };
 
+mod http;
 mod local_clip;
+pub use http::{HttpEmbeddingOptions, HttpEmbeddingProvider, ProfilePin};
 pub(crate) use local_clip::is_clip_model;
 pub use local_clip::LocalClipEmbeddingProvider;
 
@@ -33,12 +35,69 @@ pub enum EmbeddingModality {
     Image,
 }
 
+/// Why a vector is being computed. The gateway assigns this: row writes and
+/// chunks are documents; `Embed`, semantic `Auto`, and hybrid query
+/// resolution are queries. Asymmetric models prefix the two differently, so
+/// the purpose is part of the request and of the cache identity, and it is
+/// never a public field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingPurpose {
+    #[default]
+    Document,
+    Query,
+}
+
+impl EmbeddingPurpose {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Query => "query",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EmbeddingRequest<'a> {
     pub model: &'a str,
     pub dims: Option<u64>,
     pub revision: Option<&'a str>,
     pub modality: EmbeddingModality,
+    pub purpose: EmbeddingPurpose,
+    /// Artifact fingerprint the namespace profile was pinned to, when the
+    /// provider advertises one. A provider that serves a different artifact
+    /// for the same model id must reject the request rather than answer from
+    /// a different vector space.
+    pub artifact: Option<&'a str>,
+}
+
+/// Classified provider failure. Routes map each class to one public status:
+/// validation to `422`, unavailable to `503`, timeout to `504`, and upstream
+/// protocol or compute failure to `502`. Providers never fall back or retry.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum EmbeddingError {
+    #[error("{0}")]
+    Validation(String),
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
+    Timeout(String),
+    #[error("{0}")]
+    Upstream(String),
+}
+
+impl From<TurbopufferError> for EmbeddingError {
+    fn from(error: TurbopufferError) -> Self {
+        match &error {
+            TurbopufferError::Other(message)
+                if message.starts_with("failed to decode CLIP image:")
+                    || message == "CLIP image has zero width or height" =>
+            {
+                Self::Validation(format!("embedding provider rejected image input: {error}"))
+            }
+            _ => Self::Upstream(error.to_string()),
+        }
+    }
 }
 
 impl EmbeddingRequest<'_> {
@@ -56,14 +115,14 @@ pub trait EmbeddingProvider: Send + Sync {
         &self,
         request: &EmbeddingRequest<'_>,
         texts: &[String],
-    ) -> Result<EmbeddingBatch, TurbopufferError>;
+    ) -> Result<EmbeddingBatch, EmbeddingError>;
 
     async fn embed_images(
         &self,
         _request: &EmbeddingRequest<'_>,
         _images: &[Vec<u8>],
-    ) -> Result<EmbeddingBatch, TurbopufferError> {
-        Err(TurbopufferError::Other(
+    ) -> Result<EmbeddingBatch, EmbeddingError> {
+        Err(EmbeddingError::Validation(
             "embedding provider does not support image inputs".to_string(),
         ))
     }
@@ -124,30 +183,34 @@ impl EmbeddingProvider for LatticeEmbeddingProvider {
         &self,
         request: &EmbeddingRequest<'_>,
         texts: &[String],
-    ) -> Result<EmbeddingBatch, TurbopufferError> {
+    ) -> Result<EmbeddingBatch, EmbeddingError> {
         if request.model != Self::MODEL {
             return Err(TurbopufferError::Other(format!(
                 "Lattice provider supports only model `{}` (got `{}`)",
                 Self::MODEL,
                 request.model
-            )));
+            ))
+            .into());
         }
         if request.revision.is_some() {
             return Err(TurbopufferError::Other(
                 "Lattice provider does not support model revisions".to_string(),
-            ));
+            )
+            .into());
         }
         if request.modality != EmbeddingModality::Text {
             return Err(TurbopufferError::Other(
                 "Lattice provider supports only text embeddings".to_string(),
-            ));
+            )
+            .into());
         }
         let model_dim = self.model.dim() as u64;
         if request.dims.is_some_and(|dims| dims != model_dim) {
             return Err(TurbopufferError::Other(format!(
                 "Lattice artifact has {model_dim} dimensions, but {} were requested",
                 request.dims.expect("checked Some")
-            )));
+            ))
+            .into());
         }
         if texts.is_empty() {
             return Ok(EmbeddingBatch {
@@ -225,7 +288,7 @@ impl EmbeddingProvider for TurbopufferEmbeddingProvider {
         &self,
         request: &EmbeddingRequest<'_>,
         texts: &[String],
-    ) -> Result<EmbeddingBatch, TurbopufferError> {
+    ) -> Result<EmbeddingBatch, EmbeddingError> {
         if texts.is_empty() {
             return Ok(EmbeddingBatch {
                 vectors: Vec::new(),
@@ -460,6 +523,8 @@ mod tests {
             dims,
             revision,
             modality,
+            purpose: EmbeddingPurpose::Document,
+            artifact: None,
         };
         let base = request(None, None, EmbeddingModality::Text);
         let full = provider_namespace(&base);
@@ -511,6 +576,8 @@ mod tests {
                     dims: Some(4),
                     revision: None,
                     modality: EmbeddingModality::Text,
+                    purpose: EmbeddingPurpose::Document,
+                    artifact: None,
                 },
                 &["hello world".to_string(), "hello world".to_string()],
             )

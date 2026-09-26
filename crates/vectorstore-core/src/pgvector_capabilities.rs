@@ -10,7 +10,8 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
     use crate::capabilities::{Coverage, WireFeature::*};
     match feature {
         NamespaceCrud | UpsertRows | UpsertColumns | DeleteIds | Fetch | Dense | DistanceMetric
-        | Fts | Projection | ScalarFilters | NotFilters => Coverage::supported(),
+        | Fts | Projection | ScalarFilters | NotFilters | OrderedScan => Coverage::supported(),
+        ConditionalWrites => Coverage::approximate(CONDITIONAL_WRITES_UPSERT_AND_DELETE),
         // Mirrors the phase-one gate in the gateway's run_hybrid_text.
         Hybrid => Coverage::approximate(HYBRID_TEXT_FUZZINESS_ZERO_ONLY),
         MultiQuery => {
@@ -22,6 +23,10 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
 
 /// HybridText on phase one: BM25 + dense legs with gateway RRF, nothing else.
 pub const HYBRID_TEXT_FUZZINESS_ZERO_ONLY: &str = "HybridText with fuzziness: 0 only (BM25 + dense legs, gateway RRF); auto/1/2 fuzziness and cursor/temporal_filter return 422";
+
+/// Conditions run in the write's transaction: `INSERT ... ON CONFLICT DO UPDATE
+/// ... WHERE` for upserts, `DELETE ... WHERE` for deletes.
+pub const CONDITIONAL_WRITES_UPSERT_AND_DELETE: &str = "upsert_condition and delete_condition, including $ref_new; patch_condition returns 422 because row and column patches are unsupported";
 
 /// Phase-1 adapter entry point; no database connection is needed for coverage.
 pub fn capabilities() -> crate::capabilities::Capabilities {

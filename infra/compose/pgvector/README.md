@@ -33,7 +33,7 @@ development tag or a locally staged PR image. `GATEWAY_PORT` changes the
 default host port 8080. The database has no published host port. `down -v`
 deletes local database data.
 
-Both suites run 76 cases using the committed generated clients, delete their
+Both suites run 92 cases using the committed generated clients, delete their
 scratch namespaces in a `finally` block, and verify cleanup. CI uses a Docker
 artifact from the existing gateway mirror job for PRs, and pulls the published
 `edge` image for main and manual runs. Compose never builds the gateway.
@@ -47,14 +47,18 @@ and source are at [ParadeDB v0.18.0](https://github.com/paradedb/paradedb/tree/v
 
 Full row/column upserts, deletes by ID, schema updates, namespace listing and
 deletion, document fetch, scalar filters, dense ANN and single-field BM25 are
-implemented. Incompatible schema or vector dimensions are validation errors.
+implemented. Ordered queries (`rank_by` on an attribute or id, and filter-only
+queries ordered by id) and `upsert_condition` / `delete_condition` writes are
+also implemented. Incompatible schema or vector dimensions are validation errors.
 Unknown write/query options and deferred primitives return 422
 `UnsupportedByStore`, naming the feature; mixed rejected writes have no effects.
 
 Dense indexes use HNSW (`m=16`, `ef_construction=64`), with `ef_search=100`,
 strict iterative scans and a 20,000-tuple scan bound. Cosine distances remain
 cosine distances; L2 is squared only in the returned score. HNSW remains
-approximate. BM25 uses the explicit `default` tokenizer and an internal integer key
+approximate. Ordered queries use SQL `ORDER BY`: id and non-string scalar
+attributes read B-tree indexes (`NULLS FIRST`, so both directions scan the
+index), while string attributes sort the filtered rows in byte order. BM25 uses the explicit `default` tokenizer and an internal integer key
 field. Scores are materialized before scalar filtering because the pinned
 extension can otherwise choose a scalar index scan without BM25 scores. This
 preserves filtered results but can materialize many matching documents.

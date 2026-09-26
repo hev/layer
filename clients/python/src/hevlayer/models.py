@@ -1032,6 +1032,48 @@ class SecretKeyRef(BaseModel):
     name: str
     key: str
 
+CapabilitySupport = Literal["supported", "approximate", "unsupported", "undeclared"]
+
+class CapabilityCoverage(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    support: CapabilitySupport
+    note: str
+
+class CapabilitiesStore(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    name: str
+    kind: str
+
+class CapabilityFeature(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    label: str
+    page: str
+    support: CapabilitySupport
+    note: str
+
+class CapabilityHybridRoute(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    route: str
+    feature: str
+    support: CapabilitySupport
+    note: str
+
+class CapabilitySchemaLimits(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    embed: CapabilityCoverage
+    max_gateway_embed_attributes: int | None
+    max_full_text_search_fields: int | None
+    max_vector_fields: int | None
+
+class CapabilitiesReport(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    store: CapabilitiesStore
+    declared: bool
+    features: list[CapabilityFeature]
+    hybrid_routes: list[CapabilityHybridRoute]
+    schema_limits: CapabilitySchemaLimits
+
 class VectorStoreEndpoint(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     url: str
@@ -1058,7 +1100,7 @@ class VectorStoreStatus(BaseModel):
 class VectorStore(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     name: str
-    kind: Literal["turbopuffer", "search", "search-embedded"]
+    kind: Literal["turbopuffer", "search", "search-embedded", "pgvector"]
     default: bool
     endpoint: VectorStoreEndpoint
     turbopuffer: VectorStoreTurbopuffer | None = None

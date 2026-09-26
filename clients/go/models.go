@@ -1018,6 +1018,48 @@ type SecretKeyRef struct {
 	Key string `json:"key"`
 }
 
+type CapabilitySupport string
+
+type CapabilityCoverage struct {
+	Support CapabilitySupport `json:"support"`
+	Note string `json:"note"`
+}
+
+type CapabilitiesStore struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+type CapabilityFeature struct {
+	ID string `json:"id"`
+	Label string `json:"label"`
+	Page string `json:"page"`
+	Support CapabilitySupport `json:"support"`
+	Note string `json:"note"`
+}
+
+type CapabilityHybridRoute struct {
+	Route string `json:"route"`
+	Feature string `json:"feature"`
+	Support CapabilitySupport `json:"support"`
+	Note string `json:"note"`
+}
+
+type CapabilitySchemaLimits struct {
+	Embed CapabilityCoverage `json:"embed"`
+	MaxGatewayEmbedAttributes *int64 `json:"max_gateway_embed_attributes"`
+	MaxFullTextSearchFields *int64 `json:"max_full_text_search_fields"`
+	MaxVectorFields *int64 `json:"max_vector_fields"`
+}
+
+type CapabilitiesReport struct {
+	Store CapabilitiesStore `json:"store"`
+	Declared bool `json:"declared"`
+	Features []CapabilityFeature `json:"features"`
+	HybridRoutes []CapabilityHybridRoute `json:"hybrid_routes"`
+	SchemaLimits CapabilitySchemaLimits `json:"schema_limits"`
+}
+
 type VectorStoreEndpoint struct {
 	Url string `json:"url"`
 	Region string `json:"region"`

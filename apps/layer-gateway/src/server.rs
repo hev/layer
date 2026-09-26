@@ -209,6 +209,48 @@ pub async fn run_with_options(options: ServerOptions) {
         info!(model = %path.display(), "Local CLIP embedding provider initialized");
         Arc::new(provider) as Arc<dyn crate::embedding::EmbeddingProvider>
     });
+    let http_embedding_provider = match config.embed_url.as_deref() {
+        Some(url) => {
+            let options = crate::embedding::HttpEmbeddingOptions {
+                query_budget: std::time::Duration::from_millis(config.embed_query_timeout_ms),
+                write_budget: std::time::Duration::from_millis(config.embed_write_timeout_ms),
+                reserved_models: lattice_embedding_provider
+                    .is_some()
+                    .then(|| crate::embedding::LatticeEmbeddingProvider::MODEL.to_string())
+                    .into_iter()
+                    .collect(),
+                reserved_clip: local_clip_embedding_provider.is_some(),
+            };
+            let provider = crate::embedding::HttpEmbeddingProvider::new(url, options)
+                .unwrap_or_else(|error| {
+                    panic!("failed to configure local embedding provider: {error}")
+                });
+            // Discovery is pinned lazily so a sidecar that is still loading
+            // its models does not block gateway startup or native traffic.
+            // A registry that conflicts with an in-process provider is a
+            // configuration error and stops the gateway now.
+            match provider.registry().await {
+                Ok(registry) => info!(
+                    origin = provider.origin(),
+                    manifest_sha256 = %registry.manifest_sha256,
+                    models = ?registry.models.keys().collect::<Vec<_>>(),
+                    "local embedding provider initialized"
+                ),
+                Err(crate::embedding::EmbeddingError::Unavailable(message))
+                    if message.contains("exactly one") =>
+                {
+                    panic!("failed to configure local embedding provider: {message}")
+                }
+                Err(error) => warn!(
+                    origin = provider.origin(),
+                    %error,
+                    "local embedding provider is not ready; `prefer: local` returns 503 until its registry loads"
+                ),
+            }
+            Some(Arc::new(provider))
+        }
+        None => None,
+    };
 
     let aerospike_runtime = Arc::new(AerospikeRuntime::new(None));
     metrics.set_aerospike_connection_state(false);
@@ -274,6 +316,7 @@ pub async fn run_with_options(options: ServerOptions) {
         telemetry: Arc::clone(&telemetry_counters),
         turbopuffer: turbopuffer.clone(),
         embedding_provider,
+        http_embedding_provider,
         lattice_embedding_provider,
         local_clip_embedding_provider,
         embedding_cache: Arc::new(DashMap::new()),

@@ -1,10 +1,21 @@
 use super::*;
 
+/// What a `{"$ref_new": attribute}` filter value resolves to. Query filters
+/// reject it; an upsert condition reads the proposed row; a delete condition
+/// sees null for every attribute, as on the Turbopuffer wire.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Refs {
+    Rejected,
+    Excluded,
+    Null,
+}
+
 pub(super) fn compile(
     sql: &mut QueryBuilder<'_, Postgres>,
     schema: &Schema,
     value: &Value,
     depth: usize,
+    refs: Refs,
 ) -> Result<()> {
     if depth > 64 {
         return Err(invalid("filter nesting exceeds 64"));
@@ -19,7 +30,7 @@ pub(super) fn compile(
         match op {
             "Not" => {
                 sql.push("NOT (");
-                compile(sql, schema, &a[1], depth + 1)?;
+                compile(sql, schema, &a[1], depth + 1, refs)?;
                 sql.push(")");
             }
             "And" | "Or" => {
@@ -34,7 +45,7 @@ pub(super) fn compile(
                     if i > 0 {
                         sql.push(if op == "And" { " AND " } else { " OR " });
                     }
-                    compile(sql, schema, child, depth + 1)?;
+                    compile(sql, schema, child, depth + 1, refs)?;
                 }
                 sql.push(")");
             }
@@ -73,7 +84,6 @@ pub(super) fn compile(
     if field.is_some_and(|f| !f.filterable()) {
         return Err(invalid(format!("attribute {name} is not filterable")));
     }
-    let col = quoted(&field.map(|f| f.column()).unwrap_or_else(|| "key".into()));
     if ["In", "NotIn"].contains(&op) {
         let values = a[2]
             .as_array()
@@ -89,51 +99,125 @@ pub(super) fn compile(
             if i > 0 {
                 sql.push(" OR ");
             }
-            comparison(sql, field, &col, "Eq", v)?;
+            comparison(sql, schema, field, "Eq", v, refs)?;
         }
         sql.push(")");
     } else {
-        comparison(sql, field, &col, op, &a[2])?;
+        comparison(sql, schema, field, op, &a[2], refs)?;
     }
     Ok(())
 }
+
+/// Resolve `{"$ref_new": attribute}`. `Some(None)` references the id.
+fn reference<'a>(
+    schema: &'a Schema,
+    field: Option<&schema::Field>,
+    v: &Value,
+    refs: Refs,
+) -> Result<Option<Option<&'a schema::Field>>> {
+    let Some(object) = v.as_object() else {
+        return Ok(None);
+    };
+    let name = object
+        .get("$ref_new")
+        .and_then(Value::as_str)
+        .filter(|_| object.len() == 1)
+        .ok_or_else(|| invalid("filter value must be a scalar or {\"$ref_new\": attribute}"))?;
+    if refs == Refs::Rejected {
+        return Err(invalid("$ref_new is only valid in a write condition"));
+    }
+    let target = if name == "id" {
+        None
+    } else {
+        Some(
+            schema
+                .get(name)
+                .ok_or_else(|| invalid(format!("unknown $ref_new attribute {name}")))?,
+        )
+    };
+    let same = match (field, target) {
+        (None, None) => true,
+        (Some(f), Some(t)) => f.same_type(t),
+        _ => false,
+    };
+    if !same {
+        return Err(invalid(format!(
+            "$ref_new {name} must have the compared attribute's type"
+        )));
+    }
+    Ok(Some(target))
+}
+
 fn comparison(
     sql: &mut QueryBuilder<'_, Postgres>,
+    schema: &Schema,
     field: Option<&schema::Field>,
-    col: &str,
     op: &str,
     v: &Value,
+    refs: Refs,
 ) -> Result<()> {
-    if let Some(f) = field {
-        f.validate(v)?;
-    } else if !v.is_null() {
-        id_key(v)?;
+    let reference = reference(schema, field, v, refs)?;
+    if reference.is_none() {
+        if let Some(f) = field {
+            f.validate(v)?;
+        } else if !v.is_null() {
+            id_key(v)?;
+        }
     }
-    if !["Eq", "NotEq"].contains(&op) && field.is_none() {
-        return Err(unsupported("ordered id filter"));
-    }
-    if ["Eq", "NotEq"].contains(&op) {
-        sql.push(col).push(if op == "Eq" {
-            " IS NOT DISTINCT FROM "
-        } else {
-            " IS DISTINCT FROM "
-        });
-    } else {
+    let ordered = !["Eq", "NotEq"].contains(&op);
+    // Ordered comparisons use the same keys as rank_by ordering, so paging by
+    // advancing a filter on the order attribute visits every row once.
+    // An upsert condition qualifies the stored row; `excluded` is the new one.
+    let own = if refs == Refs::Excluded { "cur." } else { "" };
+    let lhs = match field {
+        None if ordered => id_order(&format!("{own}data")),
+        None => format!("{own}key"),
+        Some(f) => f.order_expr(own),
+    };
+    if ordered {
         // Ordering comparisons on missing/null are false; Not then yields true.
-        sql.push("COALESCE(").push(col).push(match op {
+        sql.push("COALESCE(").push(lhs).push(match op {
             "Gt" => " > ",
             "Gte" => " >= ",
             "Lt" => " < ",
             "Lte" => " <= ",
             _ => unreachable!(),
         });
-    }
-    if let Some(f) = field {
-        f.bind(sql, v);
     } else {
-        sql.push_bind(if v.is_null() { None } else { Some(id_key(v)?) });
+        sql.push(lhs).push(if op == "Eq" {
+            " IS NOT DISTINCT FROM "
+        } else {
+            " IS DISTINCT FROM "
+        });
     }
-    if !["Eq", "NotEq"].contains(&op) {
+    match (reference, refs) {
+        (Some(_), Refs::Null) => {
+            sql.push("NULL");
+        }
+        (Some(None), _) => {
+            sql.push(if ordered {
+                id_order("excluded.data")
+            } else {
+                "excluded.key".into()
+            });
+        }
+        (Some(Some(target)), _) => {
+            sql.push(target.order_expr("excluded."));
+        }
+        (None, _) => match field {
+            Some(f) => f.bind(sql, v),
+            None if v.is_null() => {
+                sql.push_bind(None::<String>);
+            }
+            None if ordered => {
+                sql.push_bind(id_order_key(v)?);
+            }
+            None => {
+                sql.push_bind(id_key(v)?);
+            }
+        },
+    }
+    if ordered {
         sql.push(",FALSE)");
     }
     Ok(())
@@ -151,6 +235,7 @@ mod tests {
             &schema,
             &json!(["x'; DROP TABLE t;--", "Eq", "'; SELECT 1;--"]),
             0,
+            Refs::Rejected,
         )
         .unwrap();
         assert!(!q.sql().contains("DROP"));
@@ -165,7 +250,14 @@ mod tests {
             (json!(["n", "Regex", ".*"]), true),
             (json!(["n", "Eq", "oops"]), false),
         ] {
-            let e = compile(&mut QueryBuilder::new(""), &schema, &filter, 0).unwrap_err();
+            let e = compile(
+                &mut QueryBuilder::new(""),
+                &schema,
+                &filter,
+                0,
+                Refs::Rejected,
+            )
+            .unwrap_err();
             assert_eq!(e.to_string().contains("UnsupportedByStore"), unsupported);
         }
     }

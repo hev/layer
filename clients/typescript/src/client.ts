@@ -637,6 +637,19 @@ export class Hevlayer {
   }
 
 
+  async getNamespaceCapabilities(namespace_: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.CapabilitiesReport>;
+  async getNamespaceCapabilities(namespace_: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.CapabilitiesReport>>;
+  async getNamespaceCapabilities(namespace_: string, opts: RequestOptions = {}): Promise<Models.CapabilitiesReport | LayerResponse<Models.CapabilitiesReport>> {
+    return this.requestJson<Models.CapabilitiesReport>({
+      method: "GET",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/capabilities",
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.CapabilitiesReport | LayerResponse<Models.CapabilitiesReport>>;
+  }
+
+
   async getNamespaceMetadata(namespace_: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.NamespaceMetadata>;
   async getNamespaceMetadata(namespace_: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.NamespaceMetadata>>;
   async getNamespaceMetadata(namespace_: string, opts: RequestOptions = {}): Promise<Models.NamespaceMetadata | LayerResponse<Models.NamespaceMetadata>> {
@@ -806,6 +819,19 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.VectorStore | LayerResponse<Models.VectorStore>>;
+  }
+
+
+  async getVectorStoreCapabilities(name: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.CapabilitiesReport>;
+  async getVectorStoreCapabilities(name: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.CapabilitiesReport>>;
+  async getVectorStoreCapabilities(name: string, opts: RequestOptions = {}): Promise<Models.CapabilitiesReport | LayerResponse<Models.CapabilitiesReport>> {
+    return this.requestJson<Models.CapabilitiesReport>({
+      method: "GET",
+      path: "/v2/vectorstores/" + encodeURIComponent(String(name)) + "/capabilities",
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.CapabilitiesReport | LayerResponse<Models.CapabilitiesReport>>;
   }
 
 

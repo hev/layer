@@ -63,6 +63,7 @@ console.log(response.data.rows);
 - `getKey`
 - `getLicense`
 - `getMetricCatalogEntry`
+- `getNamespaceCapabilities`
 - `getNamespaceMetadata`
 - `getNamespaceSnapshot`
 - `getPipelineDocumentChunks`
@@ -76,6 +77,7 @@ console.log(response.data.rows);
 - `getUdf`
 - `getUdfStatus`
 - `getVectorstore`
+- `getVectorStoreCapabilities`
 - `getWarehouse`
 - `getWarmJob`
 - `heartbeatDocuments`

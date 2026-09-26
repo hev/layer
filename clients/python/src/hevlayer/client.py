@@ -78,6 +78,7 @@ class HevlayerProtocol(Protocol):
     async def get_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]: ...
     async def get_license(self, *, with_perf: bool = False) -> LicenseState | LayerResponse[LicenseState]: ...
     async def get_metric_catalog_entry(self, name: str, *, with_perf: bool = False) -> MetricCatalogEntry | LayerResponse[MetricCatalogEntry]: ...
+    async def get_namespace_capabilities(self, namespace: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]: ...
     async def get_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
     async def get_namespace_snapshot(self, namespace: str, sha: str, *, with_perf: bool = False) -> SnapshotBody | LayerResponse[SnapshotBody]: ...
     async def get_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, *, with_perf: bool = False) -> GetChunksResponse | LayerResponse[GetChunksResponse]: ...
@@ -91,6 +92,7 @@ class HevlayerProtocol(Protocol):
     async def get_udf(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]: ...
     async def get_udf_status(self, udf_id: str, *, with_perf: bool = False) -> UdfStatus | LayerResponse[UdfStatus]: ...
     async def get_vectorstore(self, name: str, *, with_perf: bool = False) -> VectorStore | LayerResponse[VectorStore]: ...
+    async def get_vector_store_capabilities(self, name: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]: ...
     async def get_warehouse(self, name: str, *, with_perf: bool = False) -> Warehouse | LayerResponse[Warehouse]: ...
     async def get_warm_job(self, namespace: str, job_id: str, *, with_perf: bool = False) -> WarmJob | LayerResponse[WarmJob]: ...
     async def heartbeat_documents(self, pipeline_id: str, body: HeartbeatDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> DocumentsStageResponse | LayerResponse[DocumentsStageResponse]: ...
@@ -459,6 +461,15 @@ class AsyncHevlayer:
         )
 
 
+    async def get_namespace_capabilities(self, namespace: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]:
+        return await self._request_json(
+            "GET",
+            f"/v2/namespaces/{namespace}/capabilities",
+            result_type=CapabilitiesReport,
+            with_perf=with_perf,
+        )
+
+
     async def get_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
         return await self._request_json(
             "GET",
@@ -572,6 +583,15 @@ class AsyncHevlayer:
             "GET",
             f"/v2/vectorstores/{name}",
             result_type=VectorStore,
+            with_perf=with_perf,
+        )
+
+
+    async def get_vector_store_capabilities(self, name: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]:
+        return await self._request_json(
+            "GET",
+            f"/v2/vectorstores/{name}/capabilities",
+            result_type=CapabilitiesReport,
             with_perf=with_perf,
         )
 

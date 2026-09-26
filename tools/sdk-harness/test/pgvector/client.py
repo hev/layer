@@ -67,6 +67,12 @@ async def main():
                             assert {json.dumps(r["id"]) for r in rows} == {
                                 json.dumps(i) for i in case["ids"]
                             }, (case["name"], rows)
+                        if "order" in case:
+                            assert [r["id"] for r in rows] == case["order"], (
+                                case["name"],
+                                rows,
+                            )
+                            assert all("$dist" not in r for r in rows), case["name"]
                         if "first" in case:
                             assert rows[0]["id"] == case["first"], (case["name"], rows)
                         if "dist" in case:

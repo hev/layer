@@ -102,6 +102,16 @@ pub struct Config {
     pub namespace_list_cache_ttl_ms: u64,
     /// TTL for gateway-resolved query embeddings. Defaults to 60 seconds.
     pub embedding_cache_ttl_ms: u64,
+    /// Origin of the private-protocol embedder (RFC 0120), for example
+    /// `http://embed:8081`. Unset means `prefer: local` serves only the
+    /// in-process Lattice and CLIP artifacts below.
+    pub embed_url: Option<String>,
+    /// Whole-request inference budget for query embeddings through
+    /// `embed_url`, in milliseconds. Defaults to 10 seconds.
+    pub embed_query_timeout_ms: u64,
+    /// Whole-request inference budget for write embeddings through
+    /// `embed_url`, shared by every batch of one write. Defaults to 60 seconds.
+    pub embed_write_timeout_ms: u64,
     /// Lattice deployment artifact. Its sibling `tokenizer.json` is loaded
     /// with it; unset means the `lattice` serving leg is unavailable.
     pub lattice_model_path: Option<PathBuf>,
@@ -306,6 +316,17 @@ impl Config {
             embedding_cache_ttl_ms: env::var("LAYER_EMBED_CACHE_TTL_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
+                .unwrap_or(60_000),
+            embed_url: env::var("LAYER_EMBED_URL").ok().and_then(trimmed_non_empty),
+            embed_query_timeout_ms: env::var("LAYER_EMBED_QUERY_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|ms| *ms > 0)
+                .unwrap_or(10_000),
+            embed_write_timeout_ms: env::var("LAYER_EMBED_WRITE_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|ms| *ms > 0)
                 .unwrap_or(60_000),
             lattice_model_path: env::var("LAYER_LATTICE_MODEL_PATH")
                 .ok()

@@ -129,6 +129,66 @@ q(
     ids=[],
     query={"rank_by": ["text", "BM25", "zzzz'; DROP TABLE nope;--"]},
 )
+# Ordered scans (LYR-112): exact order, not just the id set. Unsigned ids sort
+# before string ids; strings compare in byte order; no $dist is returned.
+add(
+    "filter-only query orders by id",
+    "query",
+    {"top_k": 10},
+    order=[7, "7", "a", "b", "c", "d"],
+    fields=["id"],
+)
+add(
+    "filter-only query with filter",
+    "query",
+    {"filters": ["n", "Gte", 2], "top_k": 10},
+    order=[7, "7", "b"],
+)
+add(
+    "rank_by attribute asc sorts nulls first",
+    "query",
+    {"rank_by": ["n", "asc"], "top_k": 10, "include_attributes": ["n"]},
+    order=["c", "d", "a", "b", 7, "7"],
+)
+add(
+    "rank_by attribute desc sorts nulls last with limit",
+    "query",
+    {"rank_by": ["n", "desc"], "limit": 3, "include_attributes": ["n"]},
+    order=["7", 7, "b"],
+    fields=["id", "n"],
+    n=8,
+)
+add(
+    "rank_by attribute with filter",
+    "query",
+    {"rank_by": ["n", "desc"], "filters": ["n", "Lt", 8], "top_k": 10},
+    order=[7, "b", "a"],
+)
+add(
+    "rank_by multiple attributes",
+    "query",
+    {"rank_by": [["active", "desc"], ["id", "asc"]], "top_k": 10},
+    order=["a", "b", 7, "7", "c", "d"],
+)
+add("rank_by id desc", "query", {"rank_by": ["id", "desc"], "top_k": 2}, order=["d", "c"])
+add(
+    "page by string id filter",
+    "query",
+    {"rank_by": ["id", "asc"], "filters": ["id", "Gt", "7"], "top_k": 2},
+    order=["a", "b"],
+)
+add(
+    "page by numeric id filter",
+    "query",
+    {"rank_by": ["id", "asc"], "filters": ["id", "Gt", 7], "top_k": 2},
+    order=["7", "a"],
+)
+add(
+    "unknown rank_by attribute is validation error",
+    "query",
+    {"rank_by": ["missing", "asc"]},
+    status=400,
+)
 add("single fetch", "fetch", {"id": "a"}, text="database database postgres")
 add("batch fetch", "fetch_many", {"ids": ["a", "b", "missing"]}, ids=["a", "b"])
 add(
@@ -152,7 +212,7 @@ for feature, value in [
     ("patch_rows", [{"id": "a", "n": 99}]),
     ("patch_columns", {"id": ["a"], "n": [99]}),
     ("delete_by_filter", ["n", "Eq", 1]),
-    ("upsert_condition", ["n", "Eq", 1]),
+    ("patch_condition", ["n", "Eq", 1]),
     ("copy_from_namespace", "other"),
     ("distance_metric", "dot_product"),
 ]:
@@ -249,6 +309,60 @@ add(
 )
 add("new nullable schema attribute", "write", {"schema": {"added": "string"}}, count=0)
 add("new schema attribute readable", "schema", field="added")
+# Conditional writes: the condition reads the stored row; $ref_new reads the
+# row being written. A new id always inserts. Rows: a n=10, b n=2, "7" n=8.
+add(
+    "conditional upsert with $ref_new",
+    "write",
+    {
+        "upsert_rows": [
+            {"id": "b", "vector": [0, 1], "text": "database vector", "n": 3},
+            {"id": "7", "vector": [0.6, 0.4], "text": "stale", "n": 1},
+            {"id": "e", "vector": [0.5, 0.5], "text": "new row", "n": 1},
+        ],
+        "upsert_condition": ["n", "Lt", {"$ref_new": "n"}],
+    },
+    count=2,
+)
+add(
+    "failed condition keeps stored row",
+    "query",
+    {
+        "rank_by": ["id", "asc"],
+        "filters": ["id", "In", ["7", "b", "e"]],
+        "include_attributes": ["n"],
+    },
+    order=["7", "b", "e"],
+    n=8,
+)
+add(
+    "passed condition replaced row",
+    "query",
+    {"filters": ["id", "Eq", "b"], "include_attributes": ["n"]},
+    order=["b"],
+    n=3,
+)
+add(
+    "insert-only condition skips existing id",
+    "write",
+    {
+        "upsert_rows": [{"id": "b", "vector": [0, 1], "n": 99}],
+        "upsert_condition": ["id", "Eq", None],
+    },
+    count=0,
+)
+add(
+    "conditional delete",
+    "write",
+    {"deletes": ["e", "b", "missing"], "delete_condition": ["n", "Gte", 3]},
+    count=1,
+)
+add(
+    "conditional writes leave expected rows",
+    "query",
+    {"top_k": 10},
+    order=["7", "a", "c", "d", "e"],
+)
 add("warm hint explicitly unsupported", "warm", status=422, feature="hint_cache_warm")
 add(
     "gateway BM25+dense RRF",

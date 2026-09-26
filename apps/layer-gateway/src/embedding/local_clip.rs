@@ -19,7 +19,9 @@ use sha2::{Digest, Sha256};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 use tokio::sync::Semaphore;
 
-use super::{EmbeddingBatch, EmbeddingModality, EmbeddingProvider, EmbeddingRequest};
+use super::{
+    EmbeddingBatch, EmbeddingError, EmbeddingModality, EmbeddingProvider, EmbeddingRequest,
+};
 use crate::clients::turbopuffer::TurbopufferError;
 
 const CLIP_CONTEXT_LENGTH: usize = 77;
@@ -167,7 +169,7 @@ impl EmbeddingProvider for LocalClipEmbeddingProvider {
         &self,
         request: &EmbeddingRequest<'_>,
         texts: &[String],
-    ) -> Result<EmbeddingBatch, TurbopufferError> {
+    ) -> Result<EmbeddingBatch, EmbeddingError> {
         self.validate_request(request, EmbeddingModality::Text)?;
         if texts.is_empty() {
             return Ok(empty_batch());
@@ -221,7 +223,7 @@ impl EmbeddingProvider for LocalClipEmbeddingProvider {
         &self,
         request: &EmbeddingRequest<'_>,
         images: &[Vec<u8>],
-    ) -> Result<EmbeddingBatch, TurbopufferError> {
+    ) -> Result<EmbeddingBatch, EmbeddingError> {
         self.validate_request(request, EmbeddingModality::Image)?;
         if images.is_empty() {
             return Ok(empty_batch());
@@ -748,6 +750,8 @@ mod tests {
                     dims: Some(2),
                     revision: None,
                     modality: EmbeddingModality::Text,
+                    purpose: crate::embedding::EmbeddingPurpose::Document,
+                    artifact: None,
                 },
                 &["hello world".to_string(), "hello world".to_string()],
             )
@@ -761,6 +765,8 @@ mod tests {
                     dims: Some(2),
                     revision: None,
                     modality: EmbeddingModality::Image,
+                    purpose: crate::embedding::EmbeddingPurpose::Document,
+                    artifact: None,
                 },
                 &[image.clone(), image],
             )

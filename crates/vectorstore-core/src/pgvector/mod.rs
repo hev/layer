@@ -78,6 +78,56 @@ fn id_key(id: &Value) -> Result<String> {
 fn table_name(scope: &str, namespace: &str) -> String {
     identifier("n_", &json!([scope, namespace]).to_string())
 }
+/// The id sort key: unsigned integers numerically, then strings in byte
+/// order. Turbopuffer namespaces hold one id type; pgvector keeps 7 and "7"
+/// distinct, so a mixed namespace needs a total order. Each document table
+/// has an expression index on exactly this text, which the planner matches.
+fn id_order(data: &str) -> String {
+    format!("((CASE WHEN jsonb_typeof({data}->'id')='number' THEN 'n'||lpad({data}->>'id',20,'0') ELSE 's'||({data}->>'id') END) COLLATE \"C\")")
+}
+/// `id_order` for a request id, bound as a filter bound or scan cursor.
+fn id_order_key(id: &Value) -> Result<String> {
+    id_key(id)?;
+    Ok(match id.as_u64() {
+        Some(n) => format!("n{n:020}"),
+        None => format!("s{}", id.as_str().unwrap()),
+    })
+}
+/// `[attribute, "asc"|"desc"]`, as `(attribute, descending)`.
+fn order_key(item: &Value) -> Option<(String, bool)> {
+    let [attribute, direction] = item.as_array()?.as_slice() else {
+        return None;
+    };
+    let descending = match direction.as_str()? {
+        "asc" => false,
+        "desc" => true,
+        _ => return None,
+    };
+    Some((attribute.as_str()?.to_owned(), descending))
+}
+/// Attribute ordering forms of rank_by; `None` for ranking operators.
+fn ordering(rank: &Value) -> Result<Option<Vec<(String, bool)>>> {
+    if let Some(key) = order_key(rank) {
+        return Ok(Some(vec![key]));
+    }
+    let Some(items) = rank
+        .as_array()
+        .filter(|items| items.first().is_some_and(Value::is_array))
+    else {
+        return Ok(None);
+    };
+    if items.len() > 8 {
+        return Err(invalid("rank_by orders by at most 8 attributes"));
+    }
+    items
+        .iter()
+        .map(|item| {
+            order_key(item)
+                .ok_or_else(|| invalid("rank_by order must be [attribute, \"asc\"|\"desc\"]"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
 
 impl PgvectorClient {
     pub async fn connect(url: &str, scope: &str) -> Result<Self> {
@@ -160,6 +210,8 @@ impl PgvectorClient {
                 "upsert_rows",
                 "upsert_columns",
                 "deletes",
+                "upsert_condition",
+                "delete_condition",
             ],
         )?;
         let rows = schema::rows(body)?;
@@ -201,6 +253,18 @@ impl PgvectorClient {
         for row in &rows {
             schema.validate_row(row, metric)?;
         }
+        // Conditions apply per targeted document: an upsert of a new id always
+        // proceeds, a delete of a missing id is a no-op.
+        let upsert_condition = body.get("upsert_condition").filter(|v| !v.is_null());
+        let delete_condition = body.get("delete_condition").filter(|v| !v.is_null());
+        for (condition, refs) in [
+            (upsert_condition, filter::Refs::Excluded),
+            (delete_condition, filter::Refs::Null),
+        ] {
+            if let Some(condition) = condition {
+                filter::compile(&mut QueryBuilder::new(""), &schema, condition, 0, refs)?;
+            }
+        }
         let table = table_name(&self.scope, namespace);
         if previous.is_none() {
             sqlx::query(&format!(
@@ -209,14 +273,23 @@ impl PgvectorClient {
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+            // Serves rank_by id, filter-only queries, ordered id filters and scans.
+            sqlx::query(&format!(
+                "CREATE INDEX ON layer_pgvector.\"{table}\" ({})",
+                id_order("data")
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         }
         schema.install(&mut tx, &table, &old_schema, metric).await?;
         sqlx::query("INSERT INTO layer_pgvector.namespaces (scope,name,table_name,schema,metric) VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope,name) DO UPDATE SET schema=excluded.schema,updated_at=now()")
             .bind(&self.scope).bind(namespace).bind(&table).bind(schema.value()).bind(metric).execute(&mut *tx).await.map_err(db)?;
+        let mut upserted = 0;
         for row in &rows {
             let key = id_key(&row["id"])?;
             let mut sql = QueryBuilder::<Postgres>::new(format!(
-                "INSERT INTO layer_pgvector.\"{table}\" (key,data"
+                "INSERT INTO layer_pgvector.\"{table}\" AS cur (key,data"
             ));
             for field in schema.fields() {
                 sql.push(",").push(quoted(&field.column()));
@@ -236,19 +309,37 @@ impl PgvectorClient {
                     .push("=excluded.")
                     .push(quoted(&field.column()));
             }
-            sql.build().execute(&mut *tx).await.map_err(db)?;
+            if let Some(condition) = upsert_condition {
+                // A failed condition leaves the stored row and affects 0 rows.
+                sql.push(" WHERE (");
+                filter::compile(&mut sql, &schema, condition, 0, filter::Refs::Excluded)?;
+                sql.push(")");
+            }
+            upserted += sql
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?
+                .rows_affected();
         }
-        let deleted = sqlx::query(&format!(
-            "DELETE FROM layer_pgvector.\"{table}\" WHERE key=ANY($1)"
-        ))
-        .bind(&deletes)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?
-        .rows_affected();
+        let mut sql = QueryBuilder::<Postgres>::new(format!(
+            "DELETE FROM layer_pgvector.\"{table}\" WHERE key=ANY("
+        ));
+        sql.push_bind(deletes).push(")");
+        if let Some(condition) = delete_condition {
+            sql.push(" AND (");
+            filter::compile(&mut sql, &schema, condition, 0, filter::Refs::Null)?;
+            sql.push(")");
+        }
+        let deleted = sql
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?
+            .rows_affected();
         tx.commit().await.map_err(db)?;
         Ok(
-            json!({"status":"OK", "message":"write committed", "billing":{}, "rows_affected":rows.len() as u64+deleted, "rows_upserted":rows.len(), "rows_deleted":deleted}),
+            json!({"status":"OK", "message":"write committed", "billing":{}, "rows_affected":upserted+deleted, "rows_upserted":upserted, "rows_deleted":deleted}),
         )
     }
 
@@ -298,11 +389,31 @@ impl PgvectorClient {
             .as_u64()
             .filter(|n| *n > 0 && *n <= 10000)
             .ok_or_else(|| invalid("top_k must be between 1 and 10000"))?;
+        let include: Option<IncludeAttributes> = body
+            .get("include_attributes")
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|_| invalid("invalid include_attributes"))
+            })
+            .transpose()?;
+        // A filter-only query (no rank_by, no vector) is ordered by id ascending.
+        let order = match body.get("rank_by") {
+            Some(rank) => ordering(rank)?,
+            None if body.get("vector").is_none() => Some(vec![("id".into(), false)]),
+            None => None,
+        };
+        if let Some(order) = order {
+            let filters = body.get("filters").filter(|v| !v.is_null());
+            let rows = self
+                .ordered_rows(namespace, &order, k, filters, None, include.as_ref())
+                .await?;
+            // No $dist: Turbopuffer omits it when ordering by an attribute.
+            return Ok(json!({"rows": rows.into_iter().map(|(row, _)| row).collect::<Vec<_>>()}));
+        }
         let rank = body
             .get("rank_by")
             .cloned()
             .or_else(|| body.get("vector").map(|v| json!(["vector", "ANN", v])))
-            .ok_or_else(|| unsupported("ordered_scan"))?;
+            .ok_or_else(|| invalid("rank_by or vector is required"))?;
         let rank = rank
             .as_array()
             .filter(|r| r.len() == 3)
@@ -316,12 +427,6 @@ impl PgvectorClient {
         if !["ANN", "BM25"].contains(&mode) {
             return Err(unsupported(mode));
         }
-        let include: Option<IncludeAttributes> = body
-            .get("include_attributes")
-            .map(|v| {
-                serde_json::from_value(v.clone()).map_err(|_| invalid("invalid include_attributes"))
-            })
-            .transpose()?;
         let mut tx = self.begin(namespace).await?;
         let ns = self.required(&mut tx, namespace).await?;
         let field = ns
@@ -383,7 +488,7 @@ impl PgvectorClient {
         }
         if let Some(filters) = body.get("filters").filter(|v| !v.is_null()) {
             sql.push(" AND (");
-            filter::compile(&mut sql, &ns.schema, filters, 0)?;
+            filter::compile(&mut sql, &ns.schema, filters, 0, filter::Refs::Rejected)?;
             sql.push(")");
         }
         if mode == "ANN" {
@@ -418,6 +523,69 @@ impl PgvectorClient {
             .collect::<Result<Vec<_>>>()?;
         tx.commit().await.map_err(db)?;
         Ok(json!({"rows":rows}))
+    }
+
+    /// Rows in rank_by attribute order, id ascending as the final tiebreaker.
+    /// Nulls sort first ascending and last descending, as on Turbopuffer.
+    /// Each row is returned with its `id_order` key; `after` is exclusive.
+    async fn ordered_rows(
+        &self,
+        namespace: &str,
+        order: &[(String, bool)],
+        limit: u64,
+        filters: Option<&Value>,
+        after: Option<&str>,
+        include: Option<&IncludeAttributes>,
+    ) -> Result<Vec<(Value, String)>> {
+        let mut tx = self.begin(namespace).await?;
+        let ns = self.required(&mut tx, namespace).await?;
+        let id = id_order("data");
+        let mut sql = QueryBuilder::<Postgres>::new(format!(
+            "SELECT data,{id} AS okey FROM layer_pgvector.{} WHERE TRUE",
+            quoted(&ns.table)
+        ));
+        if let Some(after) = after {
+            sql.push(format!(" AND {id} > "))
+                .push_bind(after.to_owned());
+        }
+        if let Some(filters) = filters {
+            sql.push(" AND (");
+            filter::compile(&mut sql, &ns.schema, filters, 0, filter::Refs::Rejected)?;
+            sql.push(")");
+        }
+        sql.push(" ORDER BY ");
+        for (attribute, descending) in order {
+            if attribute == "id" {
+                sql.push(&id);
+                sql.push(if *descending { " DESC," } else { " ASC," });
+                continue;
+            }
+            let field = ns
+                .schema
+                .get(attribute)
+                .ok_or_else(|| invalid(format!("unknown rank_by attribute {attribute}")))?;
+            if !field.scalar() {
+                return Err(invalid("rank_by cannot order by a vector attribute"));
+            }
+            sql.push(field.order_expr("")).push(if *descending {
+                " DESC NULLS LAST,"
+            } else {
+                " ASC NULLS FIRST,"
+            });
+        }
+        sql.push(&id)
+            .push(" ASC LIMIT ")
+            .push_bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        let rows = sql.build().fetch_all(&mut *tx).await.map_err(db)?;
+        tx.commit().await.map_err(db)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut data: Value = r.get("data");
+                project(&mut data, include, &ns.schema);
+                (data, r.get("okey"))
+            })
+            .collect())
     }
 
     async fn metadata(&self, namespace: &str) -> Result<Value> {
@@ -736,13 +904,38 @@ impl TurbopufferClient for PgvectorClient {
     }
     async fn scan_page(
         &self,
-        _: &str,
-        _: Option<&str>,
-        _: u32,
-        _: Option<&Value>,
-        _: Option<&[String]>,
+        ns: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage> {
-        Err(unsupported("ordered_scan"))
+        let include = include_attributes
+            .map(|fields| IncludeAttributes::Fields(fields.to_vec()))
+            .unwrap_or(IncludeAttributes::All(true));
+        let page_size = page_size as usize;
+        // The cursor is the last row's opaque id sort key, so numeric 7 and
+        // string "7" page distinctly.
+        let mut rows = self
+            .ordered_rows(
+                ns,
+                &[("id".into(), false)],
+                page_size as u64 + 1,
+                filters,
+                cursor,
+                Some(&include),
+            )
+            .await?;
+        let next_cursor = if rows.len() > page_size {
+            rows.truncate(page_size);
+            rows.last().map(|(_, key)| key.clone())
+        } else {
+            None
+        };
+        Ok(DocumentPage {
+            documents: rows.into_iter().map(|(row, _)| doc(row)).collect(),
+            next_cursor,
+        })
     }
     async fn head_namespace(&self, ns: &str) -> Result<NamespaceMeta> {
         let raw = self.metadata(ns).await?;

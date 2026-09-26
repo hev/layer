@@ -1162,6 +1162,54 @@ export interface SecretKeyRef {
   key: string;
 }
 
+export type CapabilitySupport = "supported" | "approximate" | "unsupported" | "undeclared";
+
+export interface CapabilityCoverage {
+  [key: string]: unknown;
+  support: CapabilitySupport;
+  note: string;
+}
+
+export interface CapabilitiesStore {
+  [key: string]: unknown;
+  name: string;
+  kind: string;
+}
+
+export interface CapabilityFeature {
+  [key: string]: unknown;
+  id: string;
+  label: string;
+  page: string;
+  support: CapabilitySupport;
+  note: string;
+}
+
+export interface CapabilityHybridRoute {
+  [key: string]: unknown;
+  route: string;
+  feature: string;
+  support: CapabilitySupport;
+  note: string;
+}
+
+export interface CapabilitySchemaLimits {
+  [key: string]: unknown;
+  embed: CapabilityCoverage;
+  max_gateway_embed_attributes: number | null;
+  max_full_text_search_fields: number | null;
+  max_vector_fields: number | null;
+}
+
+export interface CapabilitiesReport {
+  [key: string]: unknown;
+  store: CapabilitiesStore;
+  declared: boolean;
+  features: CapabilityFeature[];
+  hybrid_routes: CapabilityHybridRoute[];
+  schema_limits: CapabilitySchemaLimits;
+}
+
 export interface VectorStoreEndpoint {
   [key: string]: unknown;
   url: string;
@@ -1193,7 +1241,7 @@ export interface VectorStoreStatus {
 export interface VectorStore {
   [key: string]: unknown;
   name: string;
-  kind: "turbopuffer" | "search" | "search-embedded";
+  kind: "turbopuffer" | "search" | "search-embedded" | "pgvector";
   "default": boolean;
   endpoint: VectorStoreEndpoint;
   turbopuffer?: VectorStoreTurbopuffer;

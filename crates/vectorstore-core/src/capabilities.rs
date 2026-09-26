@@ -284,13 +284,15 @@ mod tests {
             Projection,
             ScalarFilters,
             NotFilters,
+            OrderedScan,
+            ConditionalWrites,
         ];
         for &feature in WireFeature::ALL {
             let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(
                 coverage.support,
-                if feature == Hybrid {
-                    // HybridText is served, with the limits stated in the cell.
+                if [Hybrid, ConditionalWrites].contains(&feature) {
+                    // Served, with the limits stated in the cell.
                     Support::Approximate
                 } else if allowed.contains(&feature) {
                     Support::Supported

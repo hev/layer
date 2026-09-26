@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::embedding::{is_clip_model, EmbeddingModality, EmbeddingRequest};
+use crate::embedding::{
+    is_clip_model, EmbeddingError, EmbeddingModality, EmbeddingPurpose, EmbeddingRequest,
+};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -65,6 +67,13 @@ pub struct EmbeddingProfile {
     layer_extensions: bool,
     #[serde(default)]
     materialized: bool,
+    /// Artifact fingerprint of the local embedder model this profile was
+    /// declared against (RFC 0120). Set only for profiles served through
+    /// `LAYER_EMBED_URL`; a later write or query whose embedder serves a
+    /// different artifact for the same model id is rejected until the
+    /// namespace is re-indexed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,26 +177,33 @@ pub(crate) async fn prepare_write(
             }
             has_embed_schema = true;
             let mut parsed = validate_embed(&attribute, embed)?;
-            if parsed.serving == ServingPreference::Local {
-                if parsed.model == crate::embedding::LatticeEmbeddingProvider::MODEL
-                    && state.lattice_embedding_provider.is_none()
-                {
-                    return Err(AppError::Validation(
-                        "local Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
-                            .to_string(),
-                    ));
-                }
-                if is_clip_model(&parsed.model) && state.local_clip_embedding_provider.is_none() {
-                    return Err(AppError::Validation(
-                        "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
-                            .to_string(),
-                    ));
-                }
-            }
             let previous = profiles
                 .iter()
                 .find(|profile| profile.source == attribute)
                 .cloned();
+            if parsed.serving == ServingPreference::Local {
+                match local_leg(state, &parsed.model) {
+                    LocalLeg::Lattice => {
+                        if state.lattice_embedding_provider.is_none() {
+                            return Err(AppError::Validation(
+                                "local Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    LocalLeg::Clip => {
+                        if state.local_clip_embedding_provider.is_none() {
+                            return Err(AppError::Validation(
+                                "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    LocalLeg::Http => {
+                        pin_local_profile(state, &mut parsed, previous.as_ref()).await?;
+                    }
+                }
+            }
             if let Some(previous) = previous.as_ref() {
                 parsed.materialized = previous.materialized;
             }
@@ -204,6 +220,7 @@ pub(crate) async fn prepare_write(
                         && previous.modality == parsed.modality
                         && previous.chunk == parsed.chunk
                         && previous.layer_extensions == parsed.layer_extensions
+                        && previous.artifact_sha256 == parsed.artifact_sha256
                 }) {
                     parsed.materialized = previous
                         .as_ref()
@@ -321,6 +338,7 @@ pub(crate) async fn prepare_write(
             namespace,
             profile,
             profile.modality,
+            EmbeddingPurpose::Document,
             &values,
             &mut performance,
         )
@@ -510,6 +528,7 @@ async fn prepare_rank_by(
                 chunk: None,
                 layer_extensions: false,
                 materialized: true,
+                artifact_sha256: None,
             });
     }
     if let Some(profile) = declared.as_ref() {
@@ -624,6 +643,9 @@ async fn prepare_rank_by(
         materialized: declared
             .as_ref()
             .is_some_and(|profile| profile.materialized),
+        artifact_sha256: declared
+            .as_ref()
+            .and_then(|profile| profile.artifact_sha256.clone()),
     };
     let text = apply_instruction(profile.instructions.query.as_deref(), &text);
     let vectors = resolve_vectors(
@@ -631,6 +653,7 @@ async fn prepare_rank_by(
         namespace,
         &profile,
         EmbeddingModality::Text,
+        EmbeddingPurpose::Query,
         &[text],
         &mut preparation.performance,
     )
@@ -720,6 +743,7 @@ fn validate_embed(attribute: &str, embed: &Value) -> Result<EmbeddingProfile, Ap
                 chunk: None,
                 layer_extensions: false,
                 materialized: false,
+                artifact_sha256: None,
             })
         }
         Value::Object(options) => validate_embed_options(attribute, options),
@@ -826,18 +850,13 @@ fn validate_embed_options(
         }
     }
     let serving = parse_serving_preference(options.get("serving"), attribute)?;
-    if serving == ServingPreference::Local {
-        if model == crate::embedding::LatticeEmbeddingProvider::MODEL {
-            if modality != EmbeddingModality::Text {
-                return Err(AppError::Validation(format!(
-                    "schema attribute `{attribute}` local Lattice embedding supports only text"
-                )));
-            }
-        } else if !is_clip_model(model) {
-            return Err(AppError::Validation(format!(
-                "schema attribute `{attribute}` local embedding requires the Lattice model or a CLIP-family model"
-            )));
-        }
+    if serving == ServingPreference::Local
+        && model == crate::embedding::LatticeEmbeddingProvider::MODEL
+        && modality != EmbeddingModality::Text
+    {
+        return Err(AppError::Validation(format!(
+            "schema attribute `{attribute}` local Lattice embedding supports only text"
+        )));
     }
     Ok(EmbeddingProfile {
         source: attribute.to_string(),
@@ -851,7 +870,78 @@ fn validate_embed_options(
         chunk,
         layer_extensions,
         materialized: false,
+        artifact_sha256: None,
     })
+}
+
+/// Which local implementation serves a model under `prefer: local`.
+/// In-process providers claim their model ids; the embedder behind
+/// `LAYER_EMBED_URL` serves everything else. The split is by model id alone
+/// so it never depends on which providers happen to be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalLeg {
+    Lattice,
+    Clip,
+    Http,
+}
+
+fn local_leg(_state: &AppState, model: &str) -> LocalLeg {
+    if model == crate::embedding::LatticeEmbeddingProvider::MODEL {
+        LocalLeg::Lattice
+    } else if is_clip_model(model) {
+        LocalLeg::Clip
+    } else {
+        LocalLeg::Http
+    }
+}
+
+const LOCAL_EMBED_URL_REQUIRED: &str =
+    "local embedding requires LAYER_EMBED_URL to reference a layer-embed service (or the Lattice / CLIP model ids served in-process)";
+
+/// Pin a `prefer: local` profile to the artifact the configured embedder
+/// serves for its model, before any inference or store write. An existing
+/// materialized profile whose model or artifact differs is rejected: equal
+/// dimensions never make two vector spaces compatible, and the namespace
+/// must be re-indexed instead.
+async fn pin_local_profile(
+    state: &AppState,
+    parsed: &mut EmbeddingProfile,
+    previous: Option<&EmbeddingProfile>,
+) -> Result<(), AppError> {
+    let provider = state
+        .http_embedding_provider
+        .as_ref()
+        .ok_or_else(|| AppError::Validation(LOCAL_EMBED_URL_REQUIRED.to_string()))?;
+    let pin = provider
+        .pin(
+            &parsed.model,
+            parsed.dims,
+            parsed.modality,
+            parsed.revision.as_deref(),
+        )
+        .await
+        .map_err(|error| map_embedding_provider_error(error, &parsed.source))?;
+    if let Some(previous) = previous {
+        let pinned_before = previous.artifact_sha256.is_some();
+        let space_changed = previous.model != parsed.model
+            || previous.artifact_sha256.as_deref() != Some(pin.artifact_sha256.as_str())
+            || previous.dims.is_some_and(|dims| dims != pin.dimensions);
+        if pinned_before && previous.materialized && space_changed {
+            return Err(AppError::Validation(format!(
+                "schema attribute `{}` is already indexed with model `{}` (artifact {}); changing the model or its artifact requires a full re-index into a fresh namespace",
+                parsed.source,
+                previous.model,
+                previous
+                    .artifact_sha256
+                    .as_deref()
+                    .map(|hash| &hash[..hash.len().min(12)])
+                    .unwrap_or("unknown"),
+            )));
+        }
+    }
+    parsed.dims = Some(pin.dimensions);
+    parsed.artifact_sha256 = Some(pin.artifact_sha256);
+    Ok(())
 }
 
 fn consume_serving(embed: &mut Value) {
@@ -1501,6 +1591,7 @@ async fn resolve_vectors(
     namespace: &str,
     profile: &EmbeddingProfile,
     modality: EmbeddingModality,
+    purpose: EmbeddingPurpose,
     texts: &[String],
     performance: &mut Value,
 ) -> Result<Vec<Vec<f64>>, AppError> {
@@ -1509,6 +1600,8 @@ async fn resolve_vectors(
         dims: profile.dims,
         revision: profile.revision.as_deref(),
         modality,
+        purpose,
+        artifact: profile.artifact_sha256.as_deref(),
     };
     let provider_model = request.provider_model();
     let mut vectors = vec![None; texts.len()];
@@ -1523,6 +1616,8 @@ async fn resolve_vectors(
                 &provider_model,
                 profile.dims,
                 modality,
+                purpose,
+                profile.artifact_sha256.as_deref(),
                 text,
             )
         })
@@ -1541,32 +1636,32 @@ async fn resolve_vectors(
     }
 
     if !misses.is_empty() {
-        let provider = match profile.serving {
-            ServingPreference::Local
-                if profile.model == crate::embedding::LatticeEmbeddingProvider::MODEL =>
-            {
-                state.lattice_embedding_provider.as_ref().ok_or_else(|| {
+        let http_provider;
+        let provider: &Arc<dyn crate::embedding::EmbeddingProvider> = match profile.serving {
+            ServingPreference::Local => match local_leg(state, &profile.model) {
+                LocalLeg::Lattice => state.lattice_embedding_provider.as_ref().ok_or_else(|| {
                     AppError::Validation(
                         "local Lattice embedding requires LAYER_LATTICE_MODEL_PATH to reference a deployment artifact"
                             .to_string(),
                     )
-                })?
-            }
-            ServingPreference::Local if is_clip_model(&profile.model) => state
-                .local_clip_embedding_provider
-                .as_ref()
-                .ok_or_else(|| {
-                    AppError::Validation(
-                        "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
-                            .to_string(),
-                    )
                 })?,
-            ServingPreference::Local => {
-                return Err(AppError::Validation(format!(
-                    "local embedding does not support model `{}`",
-                    profile.model
-                )))
-            }
+                LocalLeg::Clip => state
+                    .local_clip_embedding_provider
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AppError::Validation(
+                            "local CLIP embedding requires LAYER_LOCAL_CLIP_MODEL_PATH to reference a model directory"
+                                .to_string(),
+                        )
+                    })?,
+                LocalLeg::Http => {
+                    let provider = state.http_embedding_provider.as_ref().ok_or_else(|| {
+                        AppError::Validation(LOCAL_EMBED_URL_REQUIRED.to_string())
+                    })?;
+                    http_provider = Arc::clone(provider) as Arc<dyn crate::embedding::EmbeddingProvider>;
+                    &http_provider
+                }
+            },
             ServingPreference::Native | ServingPreference::Autoscaler => state
                 .embedding_provider
                 .as_ref()
@@ -1586,7 +1681,7 @@ async fn resolve_vectors(
         } else {
             provider.embed(&request, &misses).await
         }
-        .map_err(|error| map_embedding_provider_error(local_clip_image, error))?;
+        .map_err(|error| map_embedding_provider_error(error, &profile.source))?;
         if batch.vectors.len() != misses.len() {
             return Err(AppError::Upstream(format!(
                 "embedding provider returned {} vectors for {} inputs",
@@ -1623,29 +1718,38 @@ async fn resolve_vectors(
         .collect()
 }
 
-fn map_embedding_provider_error(
-    local_clip_image: bool,
-    error: crate::clients::turbopuffer::TurbopufferError,
-) -> AppError {
-    if local_clip_image
-        && matches!(
-            &error,
-            crate::clients::turbopuffer::TurbopufferError::Other(message)
-                if message.starts_with("failed to decode CLIP image:")
-                    || message == "CLIP image has zero width or height"
-        )
-    {
-        AppError::Validation(format!("embedding provider rejected image input: {error}"))
-    } else {
-        AppError::Upstream(format!("embedding provider failed: {error}"))
+/// Map a classified provider failure to the public error envelope: validation
+/// to `422`, unavailable to `503`, timeout to `504`, and protocol or compute
+/// failure to `502`. Private sidecar errors are never forwarded verbatim.
+fn map_embedding_provider_error(error: EmbeddingError, attribute: &str) -> AppError {
+    match error {
+        EmbeddingError::Validation(message) => {
+            if message.starts_with("embedding provider rejected image input:") {
+                AppError::Validation(message)
+            } else {
+                AppError::Validation(format!("schema attribute `{attribute}`: {message}"))
+            }
+        }
+        EmbeddingError::Unavailable(message) => AppError::ServiceUnavailable(message),
+        EmbeddingError::Timeout(message) => AppError::GatewayTimeout(message),
+        EmbeddingError::Upstream(message) => {
+            AppError::Upstream(format!("embedding provider failed: {message}"))
+        }
     }
 }
 
+/// Cache identity covers serving leg, model, artifact fingerprint,
+/// dimensions, modality, purpose, and the raw input. Purpose selects the
+/// registry prefix and the fingerprint pins the prefix table, so a query and
+/// a document with the same text never share a vector, and a restarted
+/// embedder with new weights never answers from old entries.
 fn cache_key(
     serving: ServingPreference,
     model: &str,
     dims: Option<u64>,
     modality: EmbeddingModality,
+    purpose: EmbeddingPurpose,
+    artifact: Option<&str>,
     text: &str,
 ) -> String {
     let mut hash = Sha256::new();
@@ -1653,12 +1757,16 @@ fn cache_key(
     hash.update([0]);
     hash.update(model.as_bytes());
     hash.update([0]);
+    hash.update(artifact.unwrap_or_default().as_bytes());
+    hash.update([0]);
     hash.update(dims.unwrap_or_default().to_le_bytes());
     hash.update([0]);
     hash.update(match modality {
         EmbeddingModality::Text => b"text".as_slice(),
         EmbeddingModality::Image => b"image".as_slice(),
     });
+    hash.update([0]);
+    hash.update(purpose.label().as_bytes());
     hash.update([0]);
     hash.update(text.as_bytes());
     format!("{:x}", hash.finalize())
@@ -1671,7 +1779,8 @@ fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
         ServingPreference::Local if model == crate::embedding::LatticeEmbeddingProvider::MODEL => {
             "local:lattice:fp32"
         }
-        ServingPreference::Local => "local:clip:fp32",
+        ServingPreference::Local if is_clip_model(model) => "local:clip:fp32",
+        ServingPreference::Local => "local:http:v1",
     }
 }
 
@@ -1959,6 +2068,8 @@ mod tests {
             "openai/clip-vit-base-patch32",
             Some(512),
             EmbeddingModality::Image,
+            EmbeddingPurpose::Document,
+            None,
             "same-input",
         );
         let local = cache_key(
@@ -1966,6 +2077,8 @@ mod tests {
             "openai/clip-vit-base-patch32",
             Some(512),
             EmbeddingModality::Image,
+            EmbeddingPurpose::Document,
+            None,
             "same-input",
         );
         assert_eq!(
@@ -1978,12 +2091,73 @@ mod tests {
     #[test]
     fn local_clip_decode_failure_is_validation_error() {
         let error = map_embedding_provider_error(
-            true,
             crate::clients::turbopuffer::TurbopufferError::Other(
                 "failed to decode CLIP image: unsupported format".to_string(),
-            ),
+            )
+            .into(),
+            "image",
         );
         assert!(matches!(error, AppError::Validation(_)));
+        let error = map_embedding_provider_error(
+            crate::clients::turbopuffer::TurbopufferError::Other("kernel failed".to_string())
+                .into(),
+            "image",
+        );
+        assert!(matches!(error, AppError::Upstream(_)));
+    }
+
+    #[test]
+    fn embedding_cache_separates_purpose_artifact_and_local_http_leg() {
+        let key = |purpose, artifact| {
+            cache_key(
+                ServingPreference::Local,
+                "sentence-transformers/all-MiniLM-L6-v2",
+                Some(384),
+                EmbeddingModality::Text,
+                purpose,
+                artifact,
+                "same-input",
+            )
+        };
+        assert_eq!(
+            cache_variant(
+                ServingPreference::Local,
+                "sentence-transformers/all-MiniLM-L6-v2"
+            ),
+            "local:http:v1"
+        );
+        assert_ne!(
+            key(EmbeddingPurpose::Document, Some("a")),
+            key(EmbeddingPurpose::Query, Some("a"))
+        );
+        assert_ne!(
+            key(EmbeddingPurpose::Query, Some("a")),
+            key(EmbeddingPurpose::Query, Some("b"))
+        );
+        assert_eq!(
+            key(EmbeddingPurpose::Query, Some("a")),
+            key(EmbeddingPurpose::Query, Some("a"))
+        );
+    }
+
+    #[test]
+    fn provider_error_classes_map_to_public_statuses() {
+        assert!(matches!(
+            map_embedding_provider_error(EmbeddingError::Validation("bad".into()), "text"),
+            AppError::Validation(message) if message.contains("`text`")
+        ));
+        assert!(matches!(
+            map_embedding_provider_error(EmbeddingError::Unavailable("down".into()), "text"),
+            AppError::ServiceUnavailable(_)
+        ));
+        assert!(matches!(
+            map_embedding_provider_error(EmbeddingError::Timeout("slow".into()), "text"),
+            AppError::GatewayTimeout(_)
+        ));
+        assert!(matches!(
+            map_embedding_provider_error(EmbeddingError::Upstream("broken".into()), "text"),
+            AppError::Upstream(_)
+        ));
     }
 
     #[test]

@@ -773,6 +773,199 @@
     "ids": []
   },
   {
+    "name": "filter-only query orders by id",
+    "op": "query",
+    "body": {
+      "top_k": 10
+    },
+    "order": [
+      7,
+      "7",
+      "a",
+      "b",
+      "c",
+      "d"
+    ],
+    "fields": [
+      "id"
+    ]
+  },
+  {
+    "name": "filter-only query with filter",
+    "op": "query",
+    "body": {
+      "filters": [
+        "n",
+        "Gte",
+        2
+      ],
+      "top_k": 10
+    },
+    "order": [
+      7,
+      "7",
+      "b"
+    ]
+  },
+  {
+    "name": "rank_by attribute asc sorts nulls first",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "n",
+        "asc"
+      ],
+      "top_k": 10,
+      "include_attributes": [
+        "n"
+      ]
+    },
+    "order": [
+      "c",
+      "d",
+      "a",
+      "b",
+      7,
+      "7"
+    ]
+  },
+  {
+    "name": "rank_by attribute desc sorts nulls last with limit",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "n",
+        "desc"
+      ],
+      "limit": 3,
+      "include_attributes": [
+        "n"
+      ]
+    },
+    "order": [
+      "7",
+      7,
+      "b"
+    ],
+    "fields": [
+      "id",
+      "n"
+    ],
+    "n": 8
+  },
+  {
+    "name": "rank_by attribute with filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "n",
+        "desc"
+      ],
+      "filters": [
+        "n",
+        "Lt",
+        8
+      ],
+      "top_k": 10
+    },
+    "order": [
+      7,
+      "b",
+      "a"
+    ]
+  },
+  {
+    "name": "rank_by multiple attributes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        [
+          "active",
+          "desc"
+        ],
+        [
+          "id",
+          "asc"
+        ]
+      ],
+      "top_k": 10
+    },
+    "order": [
+      "a",
+      "b",
+      7,
+      "7",
+      "c",
+      "d"
+    ]
+  },
+  {
+    "name": "rank_by id desc",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "desc"
+      ],
+      "top_k": 2
+    },
+    "order": [
+      "d",
+      "c"
+    ]
+  },
+  {
+    "name": "page by string id filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "filters": [
+        "id",
+        "Gt",
+        "7"
+      ],
+      "top_k": 2
+    },
+    "order": [
+      "a",
+      "b"
+    ]
+  },
+  {
+    "name": "page by numeric id filter",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "filters": [
+        "id",
+        "Gt",
+        7
+      ],
+      "top_k": 2
+    },
+    "order": [
+      "7",
+      "a"
+    ]
+  },
+  {
+    "name": "unknown rank_by attribute is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "missing",
+        "asc"
+      ]
+    },
+    "status": 400
+  },
+  {
     "name": "single fetch",
     "op": "fetch",
     "body": {
@@ -899,7 +1092,7 @@
     "feature": "delete_by_filter"
   },
   {
-    "name": "reject mixed upsert_condition",
+    "name": "reject mixed patch_condition",
     "op": "write",
     "body": {
       "upsert_rows": [
@@ -912,14 +1105,14 @@
           "n": 999
         }
       ],
-      "upsert_condition": [
+      "patch_condition": [
         "n",
         "Eq",
         1
       ]
     },
     "status": 422,
-    "feature": "upsert_condition"
+    "feature": "patch_condition"
   },
   {
     "name": "reject mixed copy_from_namespace",
@@ -1508,6 +1701,148 @@
     "name": "new schema attribute readable",
     "op": "schema",
     "field": "added"
+  },
+  {
+    "name": "conditional upsert with $ref_new",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "b",
+          "vector": [
+            0,
+            1
+          ],
+          "text": "database vector",
+          "n": 3
+        },
+        {
+          "id": "7",
+          "vector": [
+            0.6,
+            0.4
+          ],
+          "text": "stale",
+          "n": 1
+        },
+        {
+          "id": "e",
+          "vector": [
+            0.5,
+            0.5
+          ],
+          "text": "new row",
+          "n": 1
+        }
+      ],
+      "upsert_condition": [
+        "n",
+        "Lt",
+        {
+          "$ref_new": "n"
+        }
+      ]
+    },
+    "count": 2
+  },
+  {
+    "name": "failed condition keeps stored row",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "filters": [
+        "id",
+        "In",
+        [
+          "7",
+          "b",
+          "e"
+        ]
+      ],
+      "include_attributes": [
+        "n"
+      ]
+    },
+    "order": [
+      "7",
+      "b",
+      "e"
+    ],
+    "n": 8
+  },
+  {
+    "name": "passed condition replaced row",
+    "op": "query",
+    "body": {
+      "filters": [
+        "id",
+        "Eq",
+        "b"
+      ],
+      "include_attributes": [
+        "n"
+      ]
+    },
+    "order": [
+      "b"
+    ],
+    "n": 3
+  },
+  {
+    "name": "insert-only condition skips existing id",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "b",
+          "vector": [
+            0,
+            1
+          ],
+          "n": 99
+        }
+      ],
+      "upsert_condition": [
+        "id",
+        "Eq",
+        null
+      ]
+    },
+    "count": 0
+  },
+  {
+    "name": "conditional delete",
+    "op": "write",
+    "body": {
+      "deletes": [
+        "e",
+        "b",
+        "missing"
+      ],
+      "delete_condition": [
+        "n",
+        "Gte",
+        3
+      ]
+    },
+    "count": 1
+  },
+  {
+    "name": "conditional writes leave expected rows",
+    "op": "query",
+    "body": {
+      "top_k": 10
+    },
+    "order": [
+      "7",
+      "a",
+      "c",
+      "d",
+      "e"
+    ]
   },
   {
     "name": "warm hint explicitly unsupported",

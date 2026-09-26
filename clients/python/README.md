@@ -72,6 +72,7 @@ asyncio.run(main())
 - `get_key`
 - `get_license`
 - `get_metric_catalog_entry`
+- `get_namespace_capabilities`
 - `get_namespace_metadata`
 - `get_namespace_snapshot`
 - `get_pipeline_document_chunks`
@@ -85,6 +86,7 @@ asyncio.run(main())
 - `get_udf`
 - `get_udf_status`
 - `get_vectorstore`
+- `get_vector_store_capabilities`
 - `get_warehouse`
 - `get_warm_job`
 - `heartbeat_documents`

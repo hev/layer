@@ -76,6 +76,10 @@ pub struct AppState {
     pub telemetry: Arc<TelemetryCounters>,
     pub turbopuffer: Option<Arc<dyn TurbopufferClient>>,
     pub embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
+    /// The locally configured embedder reached over `LAYER_EMBED_URL`
+    /// (RFC 0120). Serves every `prefer: local` model that no in-process
+    /// provider claims.
+    pub http_embedding_provider: Option<Arc<embedding::HttpEmbeddingProvider>>,
     pub lattice_embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     pub local_clip_embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     pub embedding_cache: Arc<embedding::EmbeddingCache>,

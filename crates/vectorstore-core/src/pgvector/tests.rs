@@ -109,6 +109,191 @@ async fn pgvector_live_isolation_atomicity_and_filtered_hnsw() {
     result.unwrap();
 }
 
+#[test]
+fn rank_by_orderings_and_id_sort_keys() {
+    assert_eq!(
+        ordering(&json!(["ts", "desc"])).unwrap(),
+        Some(vec![("ts".into(), true)])
+    );
+    assert_eq!(
+        ordering(&json!([["a", "asc"], ["id", "desc"]])).unwrap(),
+        Some(vec![("a".into(), false), ("id".into(), true)])
+    );
+    // Ranking operators are not orderings.
+    for rank in [
+        json!(["vector", "ANN", [1, 0]]),
+        json!(["text", "BM25", "q"]),
+        json!(["vectors", "ANN", [[1, 0]]]),
+        json!(["ts", "sideways"]),
+    ] {
+        assert_eq!(ordering(&rank).unwrap(), None, "{rank}");
+    }
+    assert!(ordering(&json!([["a", "asc"], ["b", "up"]])).is_err());
+    assert!(ordering(&json!(vec![json!(["a", "asc"]); 9])).is_err());
+    // Integer keys compare numerically as text and sort before strings.
+    let keys: Vec<String> = [
+        json!(9),
+        json!(10),
+        json!(u64::MAX),
+        json!("10"),
+        json!("9"),
+    ]
+    .iter()
+    .map(|id| id_order_key(id).unwrap())
+    .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted);
+    assert!(id_order_key(&json!(-1)).is_err());
+    assert!(id_order_key(&json!("")).is_err());
+}
+
+fn ids(result: &Value) -> Vec<Value> {
+    result["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].clone())
+        .collect()
+}
+
+/// LYR-112 against the pinned ParadeDB service, like the test above:
+/// PGVECTOR_TEST_URL=postgresql://... cargo test -p vectorstore-core --features pgvector pgvector_live -- --ignored
+#[tokio::test]
+#[ignore = "requires pinned ParadeDB; set PGVECTOR_TEST_URL"]
+async fn pgvector_live_ordered_scan_and_conditional_writes() {
+    let url = std::env::var("PGVECTOR_TEST_URL").expect("PGVECTOR_TEST_URL required");
+    let a = PgvectorClient::connect(&url, "test/lyr112/store")
+        .await
+        .unwrap();
+    let ns = format!("scratch-lyr112-rust-{}", std::process::id());
+    let result: Result<()> = async {
+        // Byte order puts "Zed" before "alpha"; en_US collation would not.
+        a.write(&ns, &json!({"upsert_rows":[
+            {"id":"b","ts":30,"title":"alpha","vector":[1,0]},
+            {"id":"a","ts":10,"title":"Zed","vector":[0,1]},
+            {"id":"c","ts":20,"title":"beta"},
+            {"id":"d","title":"gamma"},
+            {"id":10,"ts":20,"title":"ten"},
+            {"id":9,"ts":null,"title":"nine"}
+        ]})).await?;
+        let q = |body: Value| {
+            let (a, ns) = (&a, &ns);
+            async move { a.query_wire(ns, &body).await }
+        };
+        // Filter-only: id ascending, unsigned integers before strings.
+        let found = q(json!({"top_k":10})).await?;
+        assert_eq!(ids(&found), vec![json!(9), json!(10), json!("a"), json!("b"), json!("c"), json!("d")]);
+        assert!(found["rows"][0].get("$dist").is_none());
+        assert_eq!(found["rows"][0].as_object().unwrap().len(), 1, "default projection is id only");
+        // Attribute order: nulls/missing first ascending, id breaks ties.
+        let found = q(json!({"rank_by":["ts","asc"],"limit":10,"include_attributes":["ts"]})).await?;
+        assert_eq!(ids(&found), vec![json!(9), json!("d"), json!("a"), json!(10), json!("c"), json!("b")]);
+        assert!(found["rows"][0].get("$dist").is_none());
+        assert_eq!(found["rows"][2]["ts"], json!(10));
+        // Descending: nulls last; top_k cuts after ordering.
+        let found = q(json!({"rank_by":["ts","desc"],"top_k":3})).await?;
+        assert_eq!(ids(&found), vec![json!("b"), json!(10), json!("c")]);
+        // Filters compose with ordering.
+        let found = q(json!({"rank_by":["ts","desc"],"filters":["ts","Lt",30],"top_k":10})).await?;
+        assert_eq!(ids(&found), vec![json!(10), json!("c"), json!("a")]);
+        // Strings order and compare in byte order.
+        let found = q(json!({"rank_by":["title","asc"],"filters":["title","Lt","b"],"top_k":10})).await?;
+        assert_eq!(ids(&found), vec![json!("a"), json!("b")]);
+        // Multiple keys.
+        let found = q(json!({"rank_by":[["ts","desc"],["id","desc"]],"filters":["ts","Eq",20],"top_k":10})).await?;
+        assert_eq!(ids(&found), vec![json!("c"), json!(10)]);
+        let found = q(json!({"rank_by":["id","desc"],"top_k":2})).await?;
+        assert_eq!(ids(&found), vec![json!("d"), json!("c")]);
+        // Pagination: advance an id filter, as the Turbopuffer docs describe.
+        let mut seen = vec![];
+        let mut last: Option<Value> = None;
+        loop {
+            let mut body = json!({"rank_by":["id","asc"],"top_k":4});
+            if let Some(last) = &last {
+                body["filters"] = json!(["id","Gt",last]);
+            }
+            let page = ids(&q(body).await?);
+            if page.is_empty() { break; }
+            last = page.last().cloned();
+            seen.extend(page);
+        }
+        assert_eq!(seen, vec![json!(9), json!(10), json!("a"), json!("b"), json!("c"), json!("d")]);
+        // Malformed or unsupported ordering is rejected before any SQL.
+        for (body, unsupported) in [
+            (json!({"rank_by":["missing","asc"]}), false),
+            (json!({"rank_by":["vector","asc"]}), false),
+            (json!({"rank_by":[["ts","asc"],["title","sideways"]]}), false),
+            (json!({"rank_by":["ts","asc"],"cursor":"x"}), true),
+        ] {
+            let error = q(body).await.unwrap_err().to_string();
+            assert_eq!(error.contains("UnsupportedByStore"), unsupported, "{error}");
+        }
+        // scan_page walks the same order with an opaque cursor.
+        let mut cursor = None;
+        let mut scanned = vec![];
+        loop {
+            let page = a.scan_page(&ns, cursor.as_deref(), 4, Some(&json!(["title","NotEq","gamma"])), None).await?;
+            scanned.extend(page.documents.iter().map(|d| (d.id.clone(), d.attributes.contains_key("title"))));
+            cursor = page.next_cursor;
+            if cursor.is_none() { break; }
+        }
+        assert_eq!(scanned.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["9", "10", "a", "b", "c"]);
+        assert!(scanned.iter().all(|(_, title)| *title));
+        // Both order keys are index-backed.
+        let mut tx = a.begin(&ns).await?;
+        let n = a.required(&mut tx, &ns).await?;
+        sqlx::query("SET LOCAL enable_seqscan=off").execute(&mut *tx).await.map_err(db)?;
+        for order in [format!("{} DESC", id_order("data")), format!("{} DESC NULLS LAST", quoted(&n.schema.get("ts").unwrap().column()))] {
+            let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN SELECT data FROM layer_pgvector.{} ORDER BY {order} LIMIT 10", quoted(&n.table)))
+                .fetch_all(&mut *tx).await.map_err(db)?;
+            let plan = plan.join("\n");
+            assert!(plan.contains("Index Scan Backward"), "{order}: {plan}");
+        }
+        tx.commit().await.map_err(db)?;
+
+        // Conditional upserts: the documented version check.
+        let cw = format!("{ns}-cw");
+        a.write(&cw, &json!({"upsert_rows":[{"id":101,"version":2,"title":"v2"},{"id":102,"version":5,"title":"v5"}]})).await?;
+        let written = a.write(&cw, &json!({
+            "upsert_rows":[{"id":101,"version":3,"title":"v3"},{"id":102,"version":4,"title":"v4"},{"id":103,"version":1,"title":"v1"}],
+            "upsert_condition":["version","Lt",{"$ref_new":"version"}]
+        })).await?;
+        assert_eq!(written["rows_affected"], json!(2), "{written}");
+        let titles = |r: Value| r["rows"].as_array().unwrap().iter().map(|r| r["title"].clone()).collect::<Vec<_>>();
+        let all = json!({"rank_by":["id","asc"],"include_attributes":["title"]});
+        assert_eq!(titles(a.query_wire(&cw, &all).await?), vec![json!("v3"), json!("v5"), json!("v1")]);
+        // Insert-only: an existing id is skipped, a new one is written.
+        let written = a.write(&cw, &json!({"upsert_rows":[{"id":101,"title":"again"},{"id":104,"title":"new"}],"upsert_condition":["id","Eq",null]})).await?;
+        assert_eq!(written["rows_affected"], json!(1));
+        // A missing attribute on the stored row compares as null (false).
+        let written = a.write(&cw, &json!({"upsert_rows":[{"id":104,"version":9,"title":"v9"}],"upsert_condition":["version","Lt",{"$ref_new":"version"}]})).await?;
+        assert_eq!(written["rows_affected"], json!(0));
+        // Delete conditions see $ref_new as null and skip missing ids.
+        let written = a.write(&cw, &json!({"deletes":[101,102,999],"delete_condition":["version","Gte",4]})).await?;
+        assert_eq!(written["rows_deleted"], json!(1));
+        let written = a.write(&cw, &json!({"deletes":[101],"delete_condition":["title","Eq",{"$ref_new":"title"}]})).await?;
+        assert_eq!(written["rows_deleted"], json!(0));
+        assert_eq!(ids(&a.query_wire(&cw, &json!({})).await?), vec![json!(101), json!(103), json!(104)]);
+        // A rejected condition leaves no effects, including schema changes.
+        for condition in [json!(["version","Lt",{"$ref_new":"title"}]), json!(["version","Regex","x"]), json!(["nope","Eq",1])] {
+            assert!(a.write(&cw, &json!({"schema":{"added":"string"},"upsert_rows":[{"id":105}],"upsert_condition":condition})).await.is_err());
+        }
+        assert!(a.metadata(&cw).await?["schema"].get("added").is_none());
+        assert_eq!(a.metadata(&cw).await?["approx_row_count"], json!(3));
+        assert!(q(json!({"filters":["ts","Eq",{"$ref_new":"ts"}]})).await.is_err());
+        Ok(())
+    }.await;
+    for namespace in [ns.clone(), format!("{ns}-cw")] {
+        let response = a.delete_namespace(&namespace).await.unwrap();
+        assert!(
+            response.status == 200 || response.status == 404,
+            "namespace cleanup failed"
+        );
+    }
+    result.unwrap();
+}
+
 #[tokio::test]
 async fn adapter_capabilities_match_matrix_and_default_rejections() {
     use crate::capabilities::{Support, WireFeature};

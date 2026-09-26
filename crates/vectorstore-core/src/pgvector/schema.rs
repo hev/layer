@@ -59,6 +59,19 @@ impl Field {
             )))
         }
     }
+    pub fn same_type(&self, other: &Field) -> bool {
+        self.kind == other.kind
+    }
+    /// The column as filters and rank_by compare it: strings in byte order,
+    /// independent of the database's default collation.
+    pub fn order_expr(&self, qualifier: &str) -> String {
+        let column = format!("{qualifier}{}", quoted(&self.column()));
+        if self.kind == "string" {
+            format!("{column} COLLATE \"C\"")
+        } else {
+            column
+        }
+    }
     fn scalar_index(&self) -> bool {
         self.scalar() && self.kind != "string" && self.filterable()
     }
@@ -253,8 +266,10 @@ impl Schema {
                 } else if f.scalar_index() {
                     // Text attributes can exceed PostgreSQL's B-tree tuple
                     // limit. BM25 owns text indexing; scalar text filters scan.
+                    // NULLS FIRST matches rank_by: a forward scan serves asc
+                    // (nulls first), a backward scan desc (nulls last).
                     sqlx::query(&format!(
-                        "CREATE INDEX ON layer_pgvector.\"{table}\" (\"{col}\")"
+                        "CREATE INDEX ON layer_pgvector.\"{table}\" (\"{col}\" NULLS FIRST)"
                     ))
                     .execute(&mut **tx)
                     .await

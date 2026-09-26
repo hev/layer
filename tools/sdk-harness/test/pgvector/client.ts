@@ -58,6 +58,14 @@ try {
           new Set(c.ids.map((id: unknown) => JSON.stringify(id))),
           c.name,
         );
+      if (c.order) {
+        assert.deepEqual(
+          rows.map((r: any) => r.id),
+          c.order,
+          c.name,
+        );
+        assert(rows.every((r: any) => !("$dist" in r)), c.name);
+      }
       if (c.first) assert.equal(rows[0].id, c.first, c.name);
       if ("dist" in c) assert(Math.abs(rows[0].$dist - c.dist) < 1e-6, c.name);
       if (c.fields)
