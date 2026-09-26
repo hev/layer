@@ -1559,7 +1559,7 @@
     "status": 400
   },
   {
-    "name": "multiple text fields rejected",
+    "name": "second text field added to existing namespace",
     "op": "write",
     "body": {
       "schema": {
@@ -1567,10 +1567,94 @@
           "type": "string",
           "full_text_search": true
         }
+      },
+      "upsert_rows": [
+        {
+          "id": "e",
+          "vector": [
+            0.5,
+            0.5
+          ],
+          "text": "release notes",
+          "title": "database"
+        }
+      ]
+    },
+    "count": 1
+  },
+  {
+    "name": "schema lists both text fields",
+    "op": "schema",
+    "field": "title"
+  },
+  {
+    "name": "BM25 on the added field scores that field only",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "title",
+        "BM25",
+        "database"
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "ids": [
+      "e"
+    ],
+    "first": "e"
+  },
+  {
+    "name": "BM25 on the original field is unchanged",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "database"
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "ids": [
+      "a",
+      "b"
+    ],
+    "first": "a"
+  },
+  {
+    "name": "BM25 on a non-text field rejected",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "n",
+        "BM25",
+        "database"
+      ],
+      "top_k": 20,
+      "include_attributes": true
+    },
+    "status": 400
+  },
+  {
+    "name": "removing full_text_search rejected",
+    "op": "write",
+    "body": {
+      "schema": {
+        "title": "string"
       }
     },
-    "status": 422,
-    "feature": "multiple full_text_search"
+    "status": 400
+  },
+  {
+    "name": "added text field row removed",
+    "op": "write",
+    "body": {
+      "deletes": [
+        "e"
+      ]
+    },
+    "count": 1
   },
   {
     "name": "column upsert replaces full row",

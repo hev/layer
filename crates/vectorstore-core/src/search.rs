@@ -2,6 +2,15 @@ pub const SEARCH_CAPABILITIES: crate::capabilities::Capabilities =
     crate::capabilities::Capabilities {
         kind: "search",
         coverage: search_coverage,
+        // RFC 0117 declarations table: gateway-resolved embed on one attribute.
+        limits: crate::capabilities::SchemaLimits {
+            embed: crate::capabilities::Coverage::approximate(
+                "Gateway-resolved only; one embedded attribute per namespace",
+            ),
+            max_gateway_embed_attributes: Some(1),
+            max_full_text_search_fields: None,
+            max_vector_fields: None,
+        },
     };
 
 fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabilities::Coverage {

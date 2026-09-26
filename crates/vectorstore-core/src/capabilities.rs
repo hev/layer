@@ -32,7 +32,7 @@ wire_features! {
     Fetch => ("fetch", "Single/batch fetch", "api/query"),
     Dense => ("dense", "Dense top-k (ANN)", "api/query"),
     DistanceMetric => ("distance_metric", "Cosine / squared-Euclidean distance", "api/query"),
-    Fts => ("fts", "Single-field BM25 text rank", "api/query"),
+    Fts => ("fts", "BM25 text rank", "api/query"),
     NativeText => ("native_text", "Explicit native Postgres text fallback", "api/query"),
     Hybrid => ("hybrid", "HybridText rank operator (gateway dense + text RRF)", "api/query"),
     Projection => ("include_attributes", "Attribute projection", "api/query"),
@@ -171,10 +171,33 @@ impl Coverage {
 pub const MULTI_QUERY_USE_HYBRID_TEXT: &str =
     "422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator";
 
+/// Schema-shape limits a store enforces (RFC 0117 `schema_limits`). Each
+/// `max_*` is `None` when the store declares no limit. Rendered in the
+/// generated store matrix and, once the capabilities endpoint ships, in
+/// `CapabilitiesReport.schema_limits`.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SchemaLimits {
+    /// Whether a schema attribute may declare `embed`; the `embed` cell.
+    pub embed: Coverage,
+    pub max_gateway_embed_attributes: Option<u32>,
+    pub max_full_text_search_fields: Option<u32>,
+    pub max_vector_fields: Option<u32>,
+}
+impl SchemaLimits {
+    /// The undeclared row: no claim on any limit.
+    pub const UNDECLARED: Self = Self {
+        embed: Coverage::unsupported(),
+        max_gateway_embed_attributes: None,
+        max_full_text_search_fields: None,
+        max_vector_fields: None,
+    };
+}
+
 #[derive(Clone, Copy)]
 pub struct Capabilities {
     pub kind: &'static str,
     pub coverage: fn(WireFeature) -> Coverage,
+    pub limits: SchemaLimits,
 }
 impl Capabilities {
     pub fn get(self, feature: WireFeature) -> Coverage {
@@ -220,6 +243,7 @@ impl Capabilities {
 pub const UNDECLARED: Capabilities = Capabilities {
     kind: "undeclared",
     coverage: |_| Coverage::unsupported(),
+    limits: SchemaLimits::UNDECLARED,
 };
 
 /// Explicit schema-property ownership. Native query/write bodies also permit
@@ -287,12 +311,15 @@ mod tests {
             OrderedScan,
             ConditionalWrites,
         ];
+        // Served with the limits stated in the cell: HybridText with
+        // fuzziness 0, conditional upserts/deletes, and any number of text
+        // fields but one vector field.
+        let approximate = [Hybrid, ConditionalWrites, MultipleFields];
         for &feature in WireFeature::ALL {
             let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(
                 coverage.support,
-                if [Hybrid, ConditionalWrites].contains(&feature) {
-                    // Served, with the limits stated in the cell.
+                if approximate.contains(&feature) {
                     Support::Approximate
                 } else if allowed.contains(&feature) {
                     Support::Supported
@@ -309,9 +336,18 @@ mod tests {
             );
             assert_eq!(
                 PGVECTOR_CAPABILITIES.require(feature).is_ok(),
-                allowed.contains(&feature)
+                allowed.contains(&feature) || approximate.contains(&feature)
             );
         }
+        // RFC 0117 declarations table, pgvector row, after LYR-87.
+        let limits = PGVECTOR_CAPABILITIES.limits;
+        assert_eq!(
+            limits.embed.support,
+            PGVECTOR_CAPABILITIES.get(Embed).support
+        );
+        assert_eq!(limits.max_gateway_embed_attributes, Some(0));
+        assert_eq!(limits.max_full_text_search_fields, None);
+        assert_eq!(limits.max_vector_fields, Some(1));
     }
 
     #[tokio::test]

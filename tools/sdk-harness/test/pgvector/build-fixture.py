@@ -270,13 +270,39 @@ q(
 )
 add("type change rejected", "write", {"schema": {"n": "string"}}, status=400)
 add("dimension change rejected", "write", {"schema": {"vector": "[3]f32"}}, status=400)
+# A second full_text_search field on an existing namespace rebuilds the single
+# BM25 index in the same write; each field then ranks by its own text.
 add(
-    "multiple text fields rejected",
+    "second text field added to existing namespace",
     "write",
-    {"schema": {"title": {"type": "string", "full_text_search": True}}},
-    status=422,
-    feature="multiple full_text_search",
+    {
+        "schema": {"title": {"type": "string", "full_text_search": True}},
+        "upsert_rows": [
+            {"id": "e", "vector": [0.5, 0.5], "text": "release notes", "title": "database"},
+        ],
+    },
+    count=1,
 )
+add("schema lists both text fields", "schema", field="title")
+q(
+    "BM25 on the added field scores that field only",
+    ids=["e"],
+    query={"rank_by": ["title", "BM25", "database"]},
+    first="e",
+)
+q(
+    "BM25 on the original field is unchanged",
+    ids=["a", "b"],
+    query={"rank_by": ["text", "BM25", "database"]},
+    first="a",
+)
+q(
+    "BM25 on a non-text field rejected",
+    query={"rank_by": ["n", "BM25", "database"]},
+    status=400,
+)
+add("removing full_text_search rejected", "write", {"schema": {"title": "string"}}, status=400)
+add("added text field row removed", "write", {"deletes": ["e"]}, count=1)
 add(
     "column upsert replaces full row",
     "write",

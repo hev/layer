@@ -161,9 +161,6 @@ impl Schema {
         if fields.values().filter(|f| f.dimension().is_some()).count() > 1 {
             return Err(unsupported("multiple vector fields"));
         }
-        if fields.values().filter(|f| f.text).count() > 1 {
-            return Err(unsupported("multiple full_text_search fields"));
-        }
         Ok(Self(fields))
     }
     pub fn get(&self, name: &str) -> Option<&Field> {
@@ -276,13 +273,37 @@ impl Schema {
                     .map_err(db)?;
                 }
             }
-            if f.text && !old.get(&f.name).is_some_and(|f| f.text) {
-                let options = json!({col.clone():{"tokenizer":{"type":"default"}}});
-                // The only interpolated strings are hash identifiers and a JSON
-                // document made exclusively from those identifiers and constants.
-                sqlx::query(&format!("CREATE INDEX \"{}\" ON layer_pgvector.\"{table}\" USING bm25 (rid,\"{col}\") WITH (key_field='rid',text_fields='{}')",identifier("b_",table),options))
-                    .execute(&mut **tx).await.map_err(db)?;
+        }
+        // pg_search permits one `USING bm25` index per relation, so a single
+        // index covers every full_text_search field. A newly declared text
+        // field rebuilds that index over the complete set inside this
+        // transaction; the write is visible only once the rebuild commits.
+        let text: Vec<&Field> = self.fields().filter(|f| f.text).collect();
+        let added = text
+            .iter()
+            .any(|f| !old.get(&f.name).is_some_and(|f| f.text));
+        if added {
+            let index = identifier("b_", table);
+            if old.fields().any(|f| f.text) {
+                sqlx::query(&format!("DROP INDEX IF EXISTS layer_pgvector.\"{index}\""))
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(db)?;
             }
+            let columns = text
+                .iter()
+                .map(|f| quoted(&f.column()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let options = Value::Object(
+                text.iter()
+                    .map(|f| (f.column(), json!({"tokenizer":{"type":"default"}})))
+                    .collect(),
+            );
+            // The only interpolated strings are hash identifiers and a JSON
+            // document made exclusively from those identifiers and constants.
+            sqlx::query(&format!("CREATE INDEX \"{index}\" ON layer_pgvector.\"{table}\" USING bm25 (rid,{columns}) WITH (key_field='rid',text_fields='{options}')"))
+                .execute(&mut **tx).await.map_err(db)?;
         }
         Ok(())
     }

@@ -59,12 +59,23 @@ fn main() {
             json!({"route": route.id(), "feature": route.feature().id(), "stores": coverage})
         })
         .collect();
+    // Per-store schema declaration limits; null is no store-imposed limit.
+    let schema_limits: serde_json::Map<String, Value> = stores
+        .iter()
+        .map(|store| {
+            (
+                store.kind.to_string(),
+                serde_json::to_value(store.limits).expect("limits serialize"),
+            )
+        })
+        .collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "generated_by": "scripts/generate-store-capabilities",
             "fts_ranking_note": "BM25-class scoring; tokenization differs; fused order may differ across backends",
         "hybrid_routes": hybrid_routes,
+        "schema_limits": schema_limits,
         "features": features
         }))
         .expect("artifact serializes")

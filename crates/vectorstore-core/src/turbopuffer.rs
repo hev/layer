@@ -2,6 +2,13 @@ pub const TURBOPUFFER_CAPABILITIES: crate::capabilities::Capabilities =
     crate::capabilities::Capabilities {
         kind: "turbopuffer",
         coverage: turbopuffer_coverage,
+        // RFC 0117 declarations table: native embed, no schema limits.
+        limits: crate::capabilities::SchemaLimits {
+            embed: crate::capabilities::Coverage::supported(),
+            max_gateway_embed_attributes: None,
+            max_full_text_search_fields: None,
+            max_vector_fields: None,
+        },
     };
 
 fn turbopuffer_coverage(

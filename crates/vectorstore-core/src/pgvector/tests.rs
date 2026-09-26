@@ -38,6 +38,21 @@ fn schema_preflights_types_and_dimensions() {
         .contains("multiple vector"));
     assert!(rows_for_test().is_err());
 }
+
+#[test]
+fn schema_accepts_several_full_text_search_fields() {
+    let fts = json!({"type":"string","full_text_search":true});
+    let schema = Schema::parse(&json!({"text": fts, "workdir": fts, "vector": "[2]f32"})).unwrap();
+    assert_eq!(schema.fields().filter(|f| f.text).count(), 2);
+    // Declaring a further text field on an existing namespace is compatible;
+    // dropping full_text_search from a declared one is not.
+    let grown = schema.merge(Some(&json!({"title": fts})), &[]).unwrap();
+    assert_eq!(grown.fields().filter(|f| f.text).count(), 3);
+    assert!(schema
+        .merge(Some(&json!({"workdir": "string"})), &[])
+        .is_err());
+    assert!(Schema::parse(&json!({"n": {"type":"int","full_text_search":true}})).is_err());
+}
 fn rows_for_test() -> Result<Vec<Value>> {
     schema::rows(&json!({"upsert_columns":{"id":["a","b"],"n":[1]}}))
 }
@@ -97,6 +112,21 @@ async fn pgvector_live_isolation_atomicity_and_filtered_hnsw() {
         assert_eq!(a.fetch(&ns,"long").await?.unwrap().attributes["text"].as_str().unwrap().len(),45000);
         let ids=a.ranked_query(&ns,&json!(["text","BM25","tenant"]),10,None,None).await?;
         assert_eq!(ids.rows[0].id,json!("same").to_string());
+
+        // A second full_text_search field on an existing namespace rebuilds the
+        // single BM25 index; each field ranks by its own text.
+        a.write(&ns,&json!({"schema":{"workdir":{"type":"string","full_text_search":true}},"upsert_rows":[{"id":"kit","text":"alpha notes","workdir":"tenant/kit","vector":[1,1],"n":3}]})).await?;
+        let by_workdir=a.ranked_query(&ns,&json!(["workdir","BM25","tenant"]),10,None,None).await?;
+        assert_eq!(by_workdir.rows.iter().map(|r|r.id.clone()).collect::<Vec<_>>(),vec![json!("kit").to_string()]);
+        let by_text=a.ranked_query(&ns,&json!(["text","BM25","tenant"]),10,None,None).await?;
+        assert_eq!(by_text.rows.iter().map(|r|r.id.clone()).collect::<Vec<_>>(),vec![json!("same").to_string()]);
+        // Both fields declared up front on a fresh namespace.
+        let fresh=format!("{ns}-fresh");
+        let fts=json!({"type":"string","full_text_search":true});
+        b.write(&fresh,&json!({"schema":{"text":fts,"workdir":fts},"upsert_rows":[{"id":"x","text":"database","workdir":"home"},{"id":"y","text":"home","workdir":"database"}]})).await?;
+        assert_eq!(b.ranked_query(&fresh,&json!(["text","BM25","database"]),10,None,None).await?.rows[0].id,json!("x").to_string());
+        assert_eq!(b.ranked_query(&fresh,&json!(["workdir","BM25","database"]),10,None,None).await?.rows[0].id,json!("y").to_string());
+        b.delete_namespace(&fresh).await?;
         Ok(())
     }.await;
     for client in [&a, &b] {

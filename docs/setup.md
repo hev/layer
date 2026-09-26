@@ -250,7 +250,7 @@ from that schema:
 | Declaration | Physical index |
 | --- | --- |
 | Vector attribute such as `"vector": "[3]f32"` | pgvector HNSW with `m=16`, `ef_construction=64`. `cosine_distance` uses cosine operators; `euclidean_squared` uses L2 operators. |
-| String attribute with `full_text_search: true` | `pg_search` BM25 index using the default tokenizer. |
+| String attributes with `full_text_search: true` | One `pg_search` BM25 index over every such attribute, default tokenizer. Declaring another full-text attribute later rebuilds the index inside that write. |
 | Filterable numeric or boolean attribute | B-tree index. String scalar filters scan; text ranking uses the BM25 index. |
 
 `distance_metric` defaults to `cosine_distance` and is fixed for a namespace.
