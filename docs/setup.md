@@ -63,6 +63,34 @@ jobs:
         run: docker rm -f gateway
 ```
 
+## Embedding service
+
+The Compose bundle also starts `embed`, the CPU embedding service
+(`hevlayer/layer-embed`). Its image bakes `sentence-transformers/all-MiniLM-L6-v2`
+and `BAAI/bge-small-en-v1.5` (both 384 dimensions), so it needs no account,
+key, GPU or download after the image pull. It joins only the internal `embed`
+Compose network: the gateway reaches it as `LAYER_EMBED_URL=http://embed:8081`,
+nothing on the host can, and the container has no route out of the machine.
+Both models are verified, loaded and warmed before the service reports healthy;
+the gateway waits for that. Override the image with `EMBED_IMAGE`, as with
+`GATEWAY_IMAGE`.
+
+To add or override text models, mount a bundle directory (a `manifest.json` in
+the image's format plus the files it lists) read-only and point the service at
+it from a Compose override file:
+
+```yaml
+services:
+  embed:
+    environment:
+      LAYER_EMBED_MODELS_DIR: /models
+    volumes:
+      - ./my-models:/models:ro
+```
+
+Changing the bundle needs a restart and a full re-index of the namespaces that
+used the replaced model. See the [embedding docs](https://hevlayer.com/docs/ce/api/embed#bringing-your-own-weights).
+
 ## Standalone config
 
 The standalone gateway runs with Docker, Compose, or a bare binary.

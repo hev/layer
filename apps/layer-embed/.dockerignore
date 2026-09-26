@@ -1,0 +1,11 @@
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!scripts/
+!scripts/prepare-artifacts.py
+!licenses/
+!licenses/**
+!artifacts.lock.json
+!manifest.json

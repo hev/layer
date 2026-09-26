@@ -1,0 +1,22 @@
+Stock model redistribution notices
+
+sentence-transformers/all-MiniLM-L6-v2
+Publisher: sentence-transformers (UKPLab)
+Revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+License: Apache-2.0 (see Apache-2.0.txt)
+https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+The upstream model card is included as minilm/README.md. The weights,
+tokenizer and configuration files are redistributed without modification.
+Runtime selects masked mean pooling, 256 tokens and L2 normalization.
+
+BAAI/bge-small-en-v1.5
+Publisher: Beijing Academy of Artificial Intelligence (BAAI)
+Revision: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+License: MIT (see MIT.txt, from FlagOpen/FlagEmbedding)
+https://huggingface.co/BAAI/bge-small-en-v1.5
+The upstream model card is included as bge/README.md. The weights,
+tokenizer and configuration files are redistributed without modification.
+Runtime selects CLS pooling, 512 tokens and L2 normalization. Query text
+must arrive with the publisher's retrieval instruction, applied by the gateway.
+
+Model licenses are separate from the layer-embed application license.

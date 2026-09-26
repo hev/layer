@@ -7,6 +7,13 @@
 {{- if not .Values.documentCache.enabled }}
 {{- fail "documentCache.enabled=true is required; legacy aerospike modes were removed" }}
 {{- end }}
+{{- if and .Values.gateway.embed.enabled (not .Values.gateway.embed.image) }}
+{{- fail "gateway.embed.image is required when gateway.embed.enabled=true (customer pull path: hevlayer/layer-embed:<version>)" }}
+{{- end }}
+{{- if and .Values.gateway.localModels.enabled (not .Values.gateway.embed.enabled) }}
+{{- fail "gateway.localModels.enabled requires gateway.embed.enabled=true; the bundle mounts into the embedding sidecar, not the gateway" }}
+{{- end }}
+{{- $embedPort := int .Values.gateway.embed.port -}}
 {{- $metricsEmbedded := and .Values.metrics.enabled .Values.metrics.embedded (not .Values.metrics.externalEndpoint) -}}
 {{- $indexNamespace := default .Release.Namespace (default .Values.operator.discovery.indexNamespace .Values.gateway.indexNamespace) -}}
 apiVersion: apps/v1
@@ -38,7 +45,7 @@ spec:
         {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
-      {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled }}
+      {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled .Values.gateway.localModels.enabled }}
       initContainers:
         {{- if .Values.gateway.lattice.enabled }}
         - name: lattice-model
@@ -80,8 +87,80 @@ spec:
             - name: local-clip-model
               mountPath: /var/lib/hevlayer/clip
         {{- end }}
+        {{- if .Values.gateway.localModels.enabled }}
+        # RFC 0120 offline bundle: fetch manifest.json and the files it lists,
+        # pin the manifest, and let the sidecar verify each file against it.
+        - name: local-models
+          image: {{ required "gateway.localModels.artifact.image is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              bundle_dir=/models
+              bundle_uri={{ required "gateway.localModels.artifact.s3Uri is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.s3Uri | quote }}
+              aws s3 cp "$bundle_uri/manifest.json" "$bundle_dir/manifest.json" --only-show-errors
+              echo "{{ required "gateway.localModels.artifact.manifestSha256 is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.manifestSha256 }}  $bundle_dir/manifest.json" | sha256sum -c -
+              aws s3 sync "$bundle_uri/" "$bundle_dir/" --only-show-errors --exclude 'manifest.json'
+              chmod -R a-w "$bundle_dir"
+          volumeMounts:
+            - name: local-models
+              mountPath: /models
+        {{- end }}
       {{- end }}
       containers:
+        {{- if .Values.gateway.embed.enabled }}
+        # CPU embedding sidecar (RFC 0120): loopback only, so its plaintext
+        # private protocol never leaves the pod. Ready means both stock models
+        # (plus any mounted bundle) verified, loaded and warmed.
+        - name: embed
+          image: {{ .Values.gateway.embed.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.gateway.embed.imagePullPolicy | quote }}
+          env:
+            - name: LAYER_EMBED_BIND
+              value: "127.0.0.1:{{ $embedPort }}"
+            {{- if .Values.gateway.localModels.enabled }}
+            - name: LAYER_EMBED_MODELS_DIR
+              value: {{ .Values.gateway.localModels.mountPath | quote }}
+            {{- end }}
+          {{- with .Values.gateway.embed.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.gateway.localModels.enabled }}
+          volumeMounts:
+            - name: local-models
+              mountPath: {{ .Values.gateway.localModels.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+          # The image ships no curl; bash /dev/tcp reaches the loopback bind,
+          # which an httpGet probe from the kubelet cannot.
+          startupProbe:
+            exec:
+              command:
+                - bash
+                - -ec
+                - exec 3<>/dev/tcp/127.0.0.1/{{ $embedPort }}; printf 'GET /health/ready HTTP/1.0\r\n\r\n' >&3; grep -q '200 OK' <&3
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -ec
+                - exec 3<>/dev/tcp/127.0.0.1/{{ $embedPort }}; printf 'GET /health/ready HTTP/1.0\r\n\r\n' >&3; grep -q '200 OK' <&3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - bash
+                - -ec
+                - exec 3<>/dev/tcp/127.0.0.1/{{ $embedPort }}; printf 'GET /health/live HTTP/1.0\r\n\r\n' >&3; grep -q '200 OK' <&3
+            periodSeconds: 10
+            failureThreshold: 3
+        {{- end }}
         {{- if .Values.gateway.queue.embedded }}
         - name: postgres
           image: {{ .Values.gateway.queue.postgres.image | quote }}
@@ -210,6 +289,10 @@ spec:
             - name: LAYER_LOCAL_CLIP_MODEL_PATH
               value: {{ .Values.gateway.localClip.modelPath | quote }}
             {{- end }}
+            {{- if .Values.gateway.embed.enabled }}
+            - name: LAYER_EMBED_URL
+              value: "http://127.0.0.1:{{ $embedPort }}"
+            {{- end }}
             - name: LAYER_KEY_PEPPER
               valueFrom:
                 secretKeyRef:
@@ -288,6 +371,11 @@ spec:
         - name: local-clip-model
           emptyDir:
             sizeLimit: 1Gi
+        {{- end }}
+        {{- if .Values.gateway.localModels.enabled }}
+        - name: local-models
+          emptyDir:
+            sizeLimit: {{ .Values.gateway.localModels.artifact.sizeLimit | quote }}
         {{- end }}
         {{- if .Values.gateway.queue.embedded }}
         - name: gateway-internal-config

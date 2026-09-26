@@ -41,6 +41,45 @@ gateway:
       tokenizerSha256: ""
       configSha256: ""
       preprocessorSha256: ""
+  # Bundled CPU embedding sidecar (RFC 0120). Runs hevlayer/layer-embed in the
+  # gateway pod, bound to the pod's loopback, and hands the gateway
+  # LAYER_EMBED_URL. The image bakes both stock models
+  # (sentence-transformers/all-MiniLM-L6-v2 and BAAI/bge-small-en-v1.5, 384
+  # dimensions), so the default needs no mount, download, credential or GPU:
+  # after the image pull it starts with egress denied. Opt in per install; the
+  # gateway ignores LAYER_EMBED_URL until its HTTP embedding provider ships.
+  embed:
+    enabled: false
+    image: ""  # required when enabled — customer pull path: hevlayer/layer-embed:<version>
+    imagePullPolicy: IfNotPresent
+    port: 8081
+    # Both models load into memory on start (about 1 GiB) and inference is
+    # CPU-bound; two batches run at a time.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 3Gi
+  # Optional offline model bundle for the sidecar: the extension path over the
+  # baked menu. An init container copies the bundle (manifest.json plus the
+  # files it lists) from S3 into an ephemeral volume and checks manifest.json
+  # against the pinned SHA-256 before the pod starts; the sidecar then verifies
+  # every listed file's size and SHA-256, loads and warms the effective menu,
+  # and only then reports ready. Mounted entries override baked entries by
+  # model ID. Nothing is downloaded into the gateway container. Requires
+  # gateway.embed.enabled; changing a bundle requires a restart and a full
+  # re-index of namespaces that used the replaced model.
+  localModels:
+    enabled: false
+    mountPath: /models
+    artifact:
+      image: amazon/aws-cli:2.27.49@sha256:1b7003e3ecb737b7533d8e16a547b4bc36e912508c3532ae51003aad8d0cd41d
+      # S3 prefix holding manifest.json and the model files at the relative
+      # paths the manifest lists, e.g. s3://my-bucket/layer-embed/bundle-2026-09
+      s3Uri: ""
+      manifestSha256: ""
+      sizeLimit: 4Gi
   drain:
     markerPath: /tmp/layer-gateway-draining
     preStopSleepSeconds: 20
