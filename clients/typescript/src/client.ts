@@ -178,14 +178,21 @@ const SEARCH_HISTORY_TAG_RE = /^[A-Za-z0-9:_\-.=/+]+$/;
 export class HevlayerError extends Error {
   readonly statusCode: number;
   readonly kind: string | null;
+  /** Stable identifier on `UnsupportedByStore` rejections; match on it rather than parsing `message`. */
+  readonly feature: string | null;
   readonly body: unknown;
   readonly response: Response;
 
-  constructor(statusCode: number, message: string, options: { kind?: string | null; body?: unknown; response: Response }) {
+  constructor(
+    statusCode: number,
+    message: string,
+    options: { kind?: string | null; feature?: string | null; body?: unknown; response: Response },
+  ) {
     super(message);
     this.name = "HevlayerError";
     this.statusCode = statusCode;
     this.kind = options.kind ?? null;
+    this.feature = options.feature ?? null;
     this.body = options.body;
     this.response = options.response;
   }
@@ -1903,8 +1910,9 @@ export class Hevlayer {
   private errorFromResponse(response: Response, body: unknown): HevlayerError {
     if (isRecord(body)) {
       const kind = typeof body.error === "string" ? body.error : null;
+      const feature = typeof body.feature === "string" ? body.feature : null;
       const message = typeof body.message === "string" && body.message ? body.message : response.statusText;
-      return new HevlayerError(response.status, message, { kind, body, response });
+      return new HevlayerError(response.status, message, { kind, feature, body, response });
     }
     const message = typeof body === "string" && body ? body : response.statusText;
     return new HevlayerError(response.status, message, { body, response });

@@ -1112,7 +1112,7 @@
       ]
     },
     "status": 422,
-    "feature": "patch_condition"
+    "feature": "conditional_writes"
   },
   {
     "name": "reject mixed copy_from_namespace",
@@ -1151,6 +1151,33 @@
     },
     "status": 422,
     "feature": "distance_metric"
+  },
+  {
+    "name": "reject schema embed",
+    "op": "write",
+    "body": {
+      "schema": {
+        "summary": {
+          "type": "string",
+          "embed": {
+            "model": "qwen/qwen3-embedding-8b"
+          }
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue-embed",
+          "summary": "embedded on write"
+        }
+      ]
+    },
+    "status": 422,
+    "feature": "schema.embed"
+  },
+  {
+    "name": "schema unchanged after embed rejection",
+    "op": "schema",
+    "absent": "summary"
   },
   {
     "name": "schema DDL rolled back with unsupported option",
@@ -1216,7 +1243,7 @@
       "searchAfter": "cursor"
     },
     "status": 422,
-    "feature": "searchAfter"
+    "feature": "search_after"
   },
   {
     "name": "reject query cursor",
@@ -1235,7 +1262,7 @@
       "cursor": "cursor"
     },
     "status": 422,
-    "feature": "cursor"
+    "feature": "search_after"
   },
   {
     "name": "reject query delete_by_filter",
@@ -1298,7 +1325,7 @@
       ]
     },
     "status": 422,
-    "feature": "queries"
+    "feature": "multi_query"
   },
   {
     "name": "reject query aggregate_by",
@@ -1343,7 +1370,7 @@
       ]
     },
     "status": 422,
-    "feature": "group_by"
+    "feature": "aggregate_by"
   },
   {
     "name": "reject query exclude_attributes",
@@ -1971,7 +1998,7 @@
       "top_k": 3
     },
     "status": 422,
-    "feature": "Fuzzy"
+    "feature": "fuzzy"
   },
   {
     "name": "hybrid unknown field rejected",
@@ -1993,7 +2020,7 @@
       "searchAfter": "later"
     },
     "status": 422,
-    "feature": "searchAfter"
+    "feature": "search_after"
   },
   {
     "name": "disable scalar filtering",

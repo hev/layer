@@ -35,7 +35,7 @@ fn schema_preflights_types_and_dimensions() {
     assert!(Schema::parse(&json!({"a":"[2]f32","b":"[2]f32"}))
         .unwrap_err()
         .to_string()
-        .contains("multiple vector"));
+        .contains("UnsupportedByStore: pgvector: max_vector_fields"));
     assert!(rows_for_test().is_err());
 }
 
@@ -470,10 +470,127 @@ async fn multi_query_rejection_names_capability_and_wire_key() {
         let body: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(body["error"], "UnsupportedByStore");
         assert!(
-            body["message"].as_str().unwrap().ends_with(&format!(
-                "UnsupportedByStore: pgvector: multi_query (wire key: {key})"
-            )),
+            body["message"].as_str().unwrap()
+                == format!("UnsupportedByStore: pgvector: multi_query: wire key: {key}"),
             "{body}"
         );
+        assert_eq!(body["feature"], "multi_query", "{body}");
     }
+}
+
+/// RFC 0118 step A: every pgvector 422 carries the typed `feature`, and the
+/// message is the canonical `UnsupportedByStore: pgvector: {feature}` with no
+/// transport prefix.
+#[tokio::test]
+async fn rejections_carry_a_typed_feature() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr88-feature-test".into(),
+    };
+    let rows = json!([{"id": "rogue", "vector": [1, 0]}]);
+    for (body, feature) in [
+        (json!({"upsert_rows": rows, "patch_rows": []}), "patch_rows"),
+        (
+            json!({"upsert_rows": rows, "patch_condition": ["n", "Eq", 1]}),
+            "conditional_writes",
+        ),
+        (
+            json!({"upsert_rows": rows, "copy_from_namespace": "other"}),
+            "copy_from_namespace",
+        ),
+        (
+            json!({"upsert_rows": rows, "distance_metric": "dot_product"}),
+            "distance_metric",
+        ),
+        (
+            json!({"schema": {"a": "[2]f32", "b": "[2]f32"}}),
+            "max_vector_fields",
+        ),
+    ] {
+        let response = client
+            .passthrough("POST", "/v2/namespaces/ns", None, Some(body))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 422);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"], "UnsupportedByStore");
+        assert_eq!(body["store"], "pgvector");
+        assert_eq!(body["route"], "/v2/namespaces/ns");
+        assert_eq!(body["feature"], feature, "{body}");
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("UnsupportedByStore: pgvector: {feature}")),
+            "{message}"
+        );
+    }
+    for (body, feature) in [
+        (
+            json!({"rank_by": ["vector", "ANN", [1, 0]], "searchAfter": "x"}),
+            "search_after",
+        ),
+        (
+            json!({"rank_by": ["vector", "ANN", [1, 0]], "group_by": ["n"]}),
+            "aggregate_by",
+        ),
+        (
+            json!({"rank_by": ["vector", "ANN", [1, 0]], "exclude_attributes": ["n"]}),
+            "exclude_attributes",
+        ),
+    ] {
+        let response = client
+            .passthrough("POST", "/v2/namespaces/ns/query", None, Some(body))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 422);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["feature"], feature, "{body}");
+    }
+}
+
+/// RFC 0118 step B pins today's behavior so step C shows up as a diff: a
+/// schema `embed` declaration is a 422 naming `schema.embed`, rejected
+/// before any SQL, so schema and rows stay untouched.
+#[tokio::test]
+async fn schema_embed_is_rejected_as_schema_embed() {
+    let error = Schema::parse(&json!({
+        "text": {"type": "string", "embed": {"model": "qwen/qwen3-embedding-8b"}}
+    }))
+    .unwrap_err();
+    let message = error.to_string();
+    let rejection = crate::capabilities::StoreRejection::parse(&message).unwrap();
+    assert_eq!(rejection.store, "pgvector");
+    assert_eq!(rejection.feature, "schema.embed");
+    assert_eq!(
+        rejection.message,
+        "UnsupportedByStore: pgvector: schema.embed"
+    );
+
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr88-embed-test".into(),
+    };
+    let response = client
+        .passthrough(
+            "POST",
+            "/v2/namespaces/traces",
+            None,
+            Some(json!({
+                "schema": {"text": {"type": "string", "embed": {"model": "qwen/qwen3-embedding-8b"}}},
+                "upsert_rows": [{"id": "a", "text": "no vector here"}]
+            })),
+        )
+        .await
+        .expect("rejected before the (unreachable) pool is touched");
+    assert_eq!(response.status, 422);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"], "UnsupportedByStore");
+    assert_eq!(body["feature"], "schema.embed");
+    assert_eq!(
+        body["message"],
+        "UnsupportedByStore: pgvector: schema.embed"
+    );
 }

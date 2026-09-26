@@ -3629,6 +3629,19 @@ components:
           type: string
         message:
           type: string
+        feature:
+          type: string
+          description: 'Present on every `UnsupportedByStore` rejection that names
+            a feature. A stable identifier for what the store cannot serve: a wire-feature
+            id from the store capability matrix where one owns the request (`multi_query`,
+            `patch_rows`, `search_after`), otherwise the rejected wire key, dotted
+            when nested (`schema.embed`, `embed.chunk`). Schema-count limits use the
+            limit name (`max_vector_fields`, `max_full_text_search_fields`). Match
+            on this field; do not parse `message`. Clients ignore values they do not
+            know.
+
+            '
+          example: schema.embed
     MetricKind:
       type: string
       enum:

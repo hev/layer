@@ -75,6 +75,30 @@ wire_features! {
 }
 
 impl WireFeature {
+    /// The feature that owns a request-body key, for stores that reject the
+    /// key. A rejected key an inventoried feature owns is reported as that
+    /// feature's id (RFC 0118 § "The 422 body"): a client matches one string
+    /// against the capability report and the 422. `None` means the wire key
+    /// itself is the feature name.
+    pub fn for_wire_key(key: &str) -> Option<Self> {
+        match key {
+            // Keys that native query/write bodies admit through
+            // additionalProperties, so SCHEMA_FIELDS does not list them.
+            "queries" | "rerank_by" => return Some(Self::MultiQuery),
+            "group_by" => return Some(Self::Aggregate),
+            "searchAfter" | "cursor" => return Some(Self::Pagination),
+            "upsert_condition" | "patch_condition" | "delete_condition" => {
+                return Some(Self::ConditionalWrites)
+            }
+            _ => {}
+        }
+        SCHEMA_FIELDS
+            .iter()
+            .flat_map(|(_, fields)| fields.iter())
+            .find(|(name, _)| *name == key)
+            .map(|(_, feature)| *feature)
+    }
+
     pub fn for_rank(rank_by: &serde_json::Value) -> Option<Self> {
         let op = rank_by.get(1)?.as_str()?;
         if op.eq_ignore_ascii_case("BM25") || op.eq_ignore_ascii_case("HybridText") {
@@ -210,11 +234,7 @@ impl Capabilities {
     /// Preserve the existing string-sniffed UnsupportedByStore dispatch.
     pub fn require(self, feature: WireFeature) -> Result<(), TurbopufferError> {
         if self.get(feature).support == Support::Unsupported {
-            Err(TurbopufferError::Other(format!(
-                "UnsupportedByStore: {}: {}",
-                self.kind,
-                feature.id()
-            )))
+            Err(unsupported_by_store(self.kind, feature.id(), None))
         } else {
             Ok(())
         }
@@ -237,6 +257,66 @@ impl Capabilities {
             self.kind,
             feature.id()
         )))
+    }
+}
+
+/// Marker every store rejection carries; gateway routes dispatch on it.
+pub const UNSUPPORTED_BY_STORE: &str = "UnsupportedByStore";
+
+/// The canonical rejection: `UnsupportedByStore: {store}: {feature}` with an
+/// optional `: {detail}` tail. `feature` is a stable identifier: a
+/// [`WireFeature`] id where one exists, otherwise the rejected wire key,
+/// dotted when nested (`schema.embed`). Prose belongs in `detail`, never in
+/// `feature`, so [`StoreRejection::parse`] can recover the typed field from
+/// the message on every path that only carries a string.
+pub fn unsupported_by_store(store: &str, feature: &str, detail: Option<&str>) -> TurbopufferError {
+    let mut message = format!("{UNSUPPORTED_BY_STORE}: {store}: {feature}");
+    if let Some(detail) = detail.filter(|d| !d.is_empty()) {
+        message.push_str(": ");
+        message.push_str(detail);
+    }
+    TurbopufferError::Other(message)
+}
+
+/// The typed view of a canonical rejection message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreRejection<'a> {
+    pub store: &'a str,
+    pub feature: &'a str,
+    /// The message from the `UnsupportedByStore` marker on, without any
+    /// transport prefix such as `Turbopuffer error: `.
+    pub message: &'a str,
+}
+impl<'a> StoreRejection<'a> {
+    fn is_identifier(token: &str) -> bool {
+        !token.is_empty()
+            && token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    }
+    /// Recover `store` and `feature` from a message in the canonical shape.
+    /// Free-form rejections (`UnsupportedByStore: search backend does not
+    /// support …`) return `None`: they name no feature and must not invent
+    /// one.
+    pub fn parse(message: &'a str) -> Option<Self> {
+        let start = message.find(UNSUPPORTED_BY_STORE)?;
+        let message = &message[start..];
+        let rest = message
+            .strip_prefix(UNSUPPORTED_BY_STORE)?
+            .strip_prefix(": ")?;
+        let (store, rest) = rest.split_once(": ")?;
+        let feature = rest.split([':', ' ']).next().unwrap_or_default();
+        (Self::is_identifier(store) && Self::is_identifier(feature)).then_some(Self {
+            store,
+            feature,
+            message,
+        })
+    }
+    /// The message from the marker on, for any string that carries it.
+    pub fn canonical_message(message: &str) -> &str {
+        message
+            .find(UNSUPPORTED_BY_STORE)
+            .map_or(message, |start| &message[start..])
     }
 }
 

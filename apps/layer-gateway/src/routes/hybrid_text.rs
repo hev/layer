@@ -36,6 +36,7 @@ use crate::routes::query::{
 };
 use crate::shards::active_shard_count;
 use crate::AppState;
+use vectorstore_core::capabilities::WireFeature;
 
 /// Bound query expansion to 15 fuzzy tokens plus the BM25 anchor.
 /// This is a ranking policy, not the pinned upstream concurrency budget;
@@ -1359,17 +1360,27 @@ pub(crate) async fn run_hybrid_text(
     // it does not manufacture support for the vendor Fuzzy filter.
     let phase_one = state.turbopuffer().requires_native_wire(namespace);
     if phase_one && expr.fuzziness != Fuzziness::Fixed(0) {
-        return Err(AppError::unsupported_by_store(
-            "pgvector Fuzzy; phase-one hybrid requires fuzziness: 0".to_string(),
-            Some("pgvector".to_string()),
+        return Err(AppError::unsupported_feature(
+            "pgvector",
             None,
+            WireFeature::Fuzzy.id(),
+            "phase-one hybrid requires fuzziness: 0",
         ));
     }
-    if phase_one && (request.cursor.is_some() || request.temporal_filter.is_some()) {
-        return Err(AppError::unsupported_by_store(
-            "pgvector hybrid cursor/temporal_filter".to_string(),
-            Some("pgvector".to_string()),
+    if phase_one && request.cursor.is_some() {
+        return Err(AppError::unsupported_feature(
+            "pgvector",
             None,
+            WireFeature::Pagination.id(),
+            "phase-one hybrid takes no cursor",
+        ));
+    }
+    if phase_one && request.temporal_filter.is_some() {
+        return Err(AppError::unsupported_feature(
+            "pgvector",
+            None,
+            WireFeature::Temporal.id(),
+            "phase-one hybrid takes no temporal_filter",
         ));
     }
     let policy = tokenize_query_input_with_stopwords(&expr.input, &expr.stopwords);

@@ -903,6 +903,7 @@ type QueryResponse struct {
 type Error struct {
 	Error string `json:"error"`
 	Message string `json:"message"`
+	Feature string `json:"feature,omitempty"`
 }
 
 type SnapshotHistoryEntry struct {

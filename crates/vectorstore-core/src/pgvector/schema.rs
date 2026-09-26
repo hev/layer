@@ -124,12 +124,18 @@ impl Schema {
         let mut fields = BTreeMap::new();
         for (name, decl) in object(value)? {
             if name == "id" {
-                return Err(unsupported("id schema"));
+                return Err(unsupported("schema.id"));
             }
             let kind = if let Some(kind) = decl.as_str() {
                 kind
             } else {
-                keys(decl, &["type", "full_text_search", "filterable"])?;
+                // Declaration keys are nested under `schema`, so the feature
+                // is dotted: `embed` rejects as `schema.embed` (RFC 0118).
+                for key in object(decl)?.keys() {
+                    if !["type", "full_text_search", "filterable"].contains(&key.as_str()) {
+                        return Err(unsupported(&format!("schema.{key}")));
+                    }
+                }
                 decl.get("type")
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("schema requires type"))?
@@ -137,7 +143,12 @@ impl Schema {
             let text = match decl.get("full_text_search") {
                 None | Some(Value::Bool(false)) => false,
                 Some(Value::Bool(true)) => true,
-                _ => return Err(unsupported("full_text_search configuration")),
+                _ => {
+                    return Err(unsupported_detail(
+                        "schema.full_text_search",
+                        "configuration object; only true/false is accepted",
+                    ))
+                }
             };
             if decl.get("filterable").is_some_and(|v| !v.is_boolean()) {
                 return Err(invalid("filterable must be boolean"));
@@ -151,7 +162,7 @@ impl Schema {
             if !["string", "int", "uint", "float", "bool"].contains(&kind)
                 && !f.dimension().is_some_and(|d| d > 0 && d <= 2000)
             {
-                return Err(unsupported(&format!("schema type {kind}")));
+                return Err(unsupported_detail("schema.type", kind));
             }
             if text && kind != "string" {
                 return Err(invalid("full_text_search requires string"));
@@ -159,7 +170,10 @@ impl Schema {
             fields.insert(name.clone(), f);
         }
         if fields.values().filter(|f| f.dimension().is_some()).count() > 1 {
-            return Err(unsupported("multiple vector fields"));
+            return Err(unsupported_detail(
+                "max_vector_fields",
+                "one vector field per namespace",
+            ));
         }
         Ok(Self(fields))
     }
@@ -209,7 +223,10 @@ impl Schema {
                 } else if v.is_number() {
                     "float".into()
                 } else {
-                    return Err(unsupported(&format!("attribute type for {k}")));
+                    return Err(unsupported_detail(
+                        "schema.type",
+                        &format!("inferred from attribute {k}"),
+                    ));
                 };
                 value[k] = json!({"type":kind});
             }

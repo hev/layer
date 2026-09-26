@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use vectorstore_core::capabilities::{StoreRejection, UNSUPPORTED_BY_STORE};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -38,6 +39,11 @@ pub enum AppError {
     UnsupportedByStore {
         store: Option<String>,
         route: Option<String>,
+        /// Stable identifier for what was rejected (RFC 0118 § "The 422
+        /// body"): a wire-feature id where one exists, otherwise the wire
+        /// key, dotted when nested. Recovered from a canonical message;
+        /// free-form rejections carry none.
+        feature: Option<String>,
         message: String,
     },
 
@@ -98,6 +104,8 @@ struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     route: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    feature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_state: Option<&'static str>,
 }
 
@@ -118,15 +126,49 @@ impl AppError {
         }
     }
 
+    /// A store rejection. A message in the canonical
+    /// `UnsupportedByStore: {store}: {feature}` shape yields the typed
+    /// `feature` and is trimmed to start at the marker; any other message is
+    /// kept as written and names no feature.
     pub fn unsupported_by_store(
         message: impl Into<String>,
         store: Option<String>,
         route: Option<String>,
     ) -> Self {
+        let message = message.into();
+        let (feature, message) = match StoreRejection::parse(&message) {
+            Some(rejection) => (
+                Some(rejection.feature.to_string()),
+                rejection.message.to_string(),
+            ),
+            None => (None, message),
+        };
         Self::UnsupportedByStore {
             store,
             route,
-            message: message.into(),
+            feature,
+            message,
+        }
+    }
+
+    /// A gateway-originated store rejection with an explicit feature id.
+    pub fn unsupported_feature(
+        store: &str,
+        route: Option<String>,
+        feature: &str,
+        detail: impl AsRef<str>,
+    ) -> Self {
+        let detail = detail.as_ref();
+        let mut message = format!("{UNSUPPORTED_BY_STORE}: {store}: {feature}");
+        if !detail.is_empty() {
+            message.push_str(": ");
+            message.push_str(detail);
+        }
+        Self::UnsupportedByStore {
+            store: Some(store.to_string()),
+            route,
+            feature: Some(feature.to_string()),
+            message,
         }
     }
 
@@ -139,7 +181,7 @@ impl AppError {
     }
 
     pub fn is_store_support_error(error: impl ToString) -> bool {
-        error.to_string().contains("UnsupportedByStore")
+        error.to_string().contains(UNSUPPORTED_BY_STORE)
     }
 
     /// Map an S3 client failure into a response error: a gateway composed
@@ -186,6 +228,10 @@ impl IntoResponse for AppError {
 
         let retry_after = match &self {
             AppError::RetryableUpstream { retry_after, .. } => retry_after.as_deref(),
+            _ => None,
+        };
+        let feature = match &self {
+            AppError::UnsupportedByStore { feature, .. } => feature.clone(),
             _ => None,
         };
         let (status, error_type, message, store, route, cache_state) = match &self {
@@ -248,9 +294,10 @@ impl IntoResponse for AppError {
                 store,
                 route,
                 message,
+                ..
             } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "UnsupportedByStore",
+                UNSUPPORTED_BY_STORE,
                 message.clone(),
                 store.clone(),
                 route.clone(),
@@ -319,6 +366,7 @@ impl IntoResponse for AppError {
             message,
             store,
             route,
+            feature,
             cache_state,
         };
 
@@ -358,7 +406,50 @@ mod capability_tests {
         assert_eq!(body["error"], "UnsupportedByStore");
         assert_eq!(body["store"], "pgvector");
         assert_eq!(body["route"], "batchQueryNamespace");
-        assert!(body["message"].as_str().unwrap().contains("multi_query"));
-        assert!(body.get("feature").is_none());
+        assert_eq!(body["message"], "UnsupportedByStore: pgvector: multi_query");
+        assert_eq!(body["feature"], "multi_query");
+    }
+
+    /// A free-form rejection names no feature rather than inventing one, and
+    /// its message is kept as written.
+    #[tokio::test]
+    async fn free_form_rejection_carries_no_feature() {
+        let response = AppError::unsupported_by_store(
+            "UnsupportedByStore: namespace init shard backfill requires Turbopuffer",
+            Some("search".into()),
+            None,
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "UnsupportedByStore");
+        assert!(body.get("feature").is_none(), "{body}");
+        assert_eq!(
+            body["message"],
+            "UnsupportedByStore: namespace init shard backfill requires Turbopuffer"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_originated_rejection_names_its_feature() {
+        let response = AppError::unsupported_feature(
+            "pgvector",
+            Some("queryNamespace".into()),
+            "fuzzy",
+            "phase-one hybrid requires fuzziness: 0",
+        )
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["feature"], "fuzzy");
+        assert_eq!(
+            body["message"],
+            "UnsupportedByStore: pgvector: fuzzy: phase-one hybrid requires fuzziness: 0"
+        );
     }
 }

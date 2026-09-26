@@ -37,12 +37,16 @@ class HevlayerError(Exception):
         message: str,
         *,
         error: str | None = None,
+        feature: str | None = None,
         response: httpx.Response | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
         self.error = error
+        # Stable identifier on UnsupportedByStore rejections; match on it
+        # rather than parsing the message.
+        self.feature = feature
         self.response = response
 
 
@@ -1222,8 +1226,8 @@ class AsyncHevlayer:
         cache_status = response.headers.get("x-layer-cache")
 
         if response.is_error:
-            error, message = self._error_payload(response)
-            raise HevlayerError(response.status_code, message, error=error, response=response)
+            error, message, feature = self._error_payload(response)
+            raise HevlayerError(response.status_code, message, error=error, feature=feature, response=response)
 
         raw = None if response.status_code == 204 or not response.content else response.json()
         data = self._parse_data(raw, result_type)
@@ -1257,8 +1261,8 @@ class AsyncHevlayer:
         cache_status = response.headers.get("x-layer-cache")
 
         if response.is_error:
-            error, message = self._error_payload(response)
-            raise HevlayerError(response.status_code, message, error=error, response=response)
+            error, message, feature = self._error_payload(response)
+            raise HevlayerError(response.status_code, message, error=error, feature=feature, response=response)
 
         data = response.content
         if with_perf:
@@ -1363,13 +1367,18 @@ class AsyncHevlayer:
             return result_type.model_validate(value)
         return value
 
-    def _error_payload(self, response: httpx.Response) -> tuple[str | None, str]:
+    def _error_payload(self, response: httpx.Response) -> tuple[str | None, str, str | None]:
         try:
             body = response.json()
         except ValueError:
             body = None
         if isinstance(body, dict):
             error = body.get("error")
+            feature = body.get("feature")
             message = body.get("message") or response.text or response.reason_phrase
-            return str(error) if error is not None else None, str(message)
-        return None, response.text or response.reason_phrase
+            return (
+                str(error) if error is not None else None,
+                str(message),
+                str(feature) if feature is not None else None,
+            )
+        return None, response.text or response.reason_phrase, None

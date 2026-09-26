@@ -43,7 +43,15 @@ async def main():
                     )
                     if "feature" in case:
                         assert e.error == "UnsupportedByStore", (case["name"], e.error)
-                        assert case["feature"] in str(e), (case["name"], str(e))
+                        # The typed field, not a substring of the message (RFC 0118).
+                        assert e.feature == case["feature"], (
+                            case["name"],
+                            e.feature,
+                            str(e),
+                        )
+                        assert str(e).startswith(
+                            f"UnsupportedByStore: pgvector: {case['feature']}"
+                        ), (case["name"], str(e))
                 else:
                     assert case.get("status", 200) == 200, (
                         case["name"],

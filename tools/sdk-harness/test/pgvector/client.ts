@@ -35,7 +35,12 @@ try {
       assert.equal(e.statusCode, c.status ?? 200, `${c.name}: ${e}`);
       if (c.feature) {
         assert.equal(e.kind, "UnsupportedByStore", c.name);
-        assert(e.message.includes(c.feature), `${c.name}: ${e}`);
+        // The typed field, not a substring of the message (RFC 0118).
+        assert.equal(e.feature, c.feature, `${c.name}: ${e}`);
+        assert(
+          e.message.startsWith(`UnsupportedByStore: pgvector: ${c.feature}`),
+          `${c.name}: ${e}`,
+        );
       }
       console.log("PASS", c.name);
       continue;

@@ -29,8 +29,24 @@ struct Namespace {
     metric: String,
 }
 
+/// A rejection naming a stable feature id (RFC 0118 § "The 422 body").
 fn unsupported(feature: &str) -> TurbopufferError {
-    TurbopufferError::Other(format!("UnsupportedByStore: pgvector {feature}"))
+    crate::capabilities::unsupported_by_store("pgvector", feature, None)
+}
+/// A rejection whose human-readable detail follows the feature id.
+fn unsupported_detail(feature: &str, detail: &str) -> TurbopufferError {
+    crate::capabilities::unsupported_by_store("pgvector", feature, Some(detail))
+}
+/// A rejected request-body key. A key an inventoried wire feature owns
+/// reports that feature's id and names the key in the detail, so a client
+/// matches one string against the capability report and the 422.
+fn unsupported_key(key: &str) -> TurbopufferError {
+    match crate::capabilities::WireFeature::for_wire_key(key) {
+        Some(feature) if feature.id() != key => {
+            unsupported_detail(feature.id(), &format!("wire key: {key}"))
+        }
+        _ => unsupported(key),
+    }
 }
 fn invalid(message: impl Into<String>) -> TurbopufferError {
     TurbopufferError::from_status(
@@ -55,6 +71,21 @@ fn response(status: u16, body: Value) -> TurbopufferPassthroughResponse {
         body: body.to_string().into_bytes(),
     }
 }
+/// The 422 body, in the same shape the gateway's error module renders: the
+/// canonical message plus the typed `feature` recovered from it.
+fn rejection_body(route: &str, error: &str) -> Value {
+    use crate::capabilities::{StoreRejection, UNSUPPORTED_BY_STORE};
+    let mut body = json!({
+        "error": UNSUPPORTED_BY_STORE,
+        "store": "pgvector",
+        "route": route,
+        "message": StoreRejection::canonical_message(error),
+    });
+    if let Some(rejection) = StoreRejection::parse(error) {
+        body["feature"] = json!(rejection.feature);
+    }
+    body
+}
 fn object(value: &Value) -> Result<&Map<String, Value>> {
     value
         .as_object()
@@ -63,7 +94,7 @@ fn object(value: &Value) -> Result<&Map<String, Value>> {
 fn keys(value: &Value, allowed: &[&str]) -> Result<()> {
     for key in object(value)?.keys() {
         if !allowed.contains(&key.as_str()) {
-            return Err(unsupported(key));
+            return Err(unsupported_key(key));
         }
     }
     Ok(())
@@ -215,6 +246,22 @@ impl PgvectorClient {
             ],
         )?;
         let rows = schema::rows(body)?;
+        // Validate what the request alone can prove before the transaction
+        // (RFC 0114 atomicity): a declaration this store cannot serve, or a
+        // metric it cannot index, is rejected with no lock and no SQL. The
+        // merge below re-parses against the stored schema and can still
+        // reject; it never accepts what this pass rejects.
+        if let Some(update) = body.get("schema") {
+            Schema::parse(update)?;
+        }
+        if let Some(metric) = body.get("distance_metric") {
+            let metric = metric
+                .as_str()
+                .ok_or_else(|| invalid("distance_metric must be a string"))?;
+            if !["cosine_distance", "euclidean_squared"].contains(&metric) {
+                return Err(unsupported("distance_metric"));
+            }
+        }
         let deletes = match body.get("deletes") {
             None => vec![],
             Some(v) => v
@@ -359,7 +406,7 @@ impl PgvectorClient {
                     };
                     match error {
                         TurbopufferError::Other(message) => {
-                            TurbopufferError::Other(format!("{message} (wire key: {key})"))
+                            TurbopufferError::Other(format!("{message}: wire key: {key}"))
                         }
                         error => error,
                     }
@@ -414,10 +461,9 @@ impl PgvectorClient {
             .cloned()
             .or_else(|| body.get("vector").map(|v| json!(["vector", "ANN", v])))
             .ok_or_else(|| invalid("rank_by or vector is required"))?;
-        let rank = rank
-            .as_array()
-            .filter(|r| r.len() == 3)
-            .ok_or_else(|| unsupported("rank_by expression"))?;
+        let rank = rank.as_array().filter(|r| r.len() == 3).ok_or_else(|| {
+            unsupported_detail("rank_by", "expression must be [field, operator, input]")
+        })?;
         let field = rank[0]
             .as_str()
             .ok_or_else(|| invalid("rank field must be a string"))?;
@@ -472,7 +518,7 @@ impl PgvectorClient {
             }
             let text = rank[2]
                 .as_str()
-                .ok_or_else(|| unsupported("BM25 expression"))?;
+                .ok_or_else(|| unsupported_detail("fts", "BM25 input must be a string"))?;
             sql.push("paradedb.score(rid)::float8 AS score FROM layer_pgvector.")
                 .push(quoted(&ns.table))
                 .push(" WHERE rid @@@ paradedb.match(")
@@ -640,7 +686,7 @@ impl PgvectorClient {
                         .filter(|s| *s > 0 && *s <= 1000)
                         .ok_or_else(|| invalid("page_size must be between 1 and 1000"))?
                 }
-                _ => return Err(unsupported(&key)),
+                _ => return Err(unsupported_key(&key)),
             }
         }
         let mut names: Vec<String> = sqlx::query_scalar("SELECT name FROM layer_pgvector.namespaces WHERE scope=$1 AND starts_with(name,$2) AND name COLLATE \"C\" > $3 COLLATE \"C\" ORDER BY name COLLATE \"C\" LIMIT $4")
@@ -671,10 +717,13 @@ impl PgvectorClient {
             return self.list(query).await;
         }
         if parts.len() < 3 || !["v1", "v2"].contains(&parts[0]) || parts[1] != "namespaces" {
-            return Err(unsupported(&format!("{method} {path}")));
+            return Err(unsupported_detail(
+                "passthrough",
+                &format!("{method} {path}"),
+            ));
         }
         if query.is_some_and(|s| !s.is_empty()) {
-            return Err(unsupported("query parameters"));
+            return Err(unsupported_detail("passthrough", "query parameters"));
         }
         let ns = percent_encoding::percent_decode_str(parts[2])
             .decode_utf8()
@@ -700,7 +749,13 @@ impl PgvectorClient {
                 tx.commit().await.map_err(db)?;
                 Ok(json!({"status":"OK"}))
             }
-            _ => Err(unsupported(parts.get(3).copied().unwrap_or(method))),
+            // The fourth segment is the wire operation (`hint_cache_warm`,
+            // `export`, ...); a bare namespace verb has no better name than
+            // the passthrough it fell through to.
+            _ => Err(unsupported_detail(
+                parts.get(3).copied().unwrap_or("passthrough"),
+                &format!("{method} {path}"),
+            )),
         }
     }
 }
@@ -771,10 +826,12 @@ impl TurbopufferClient for PgvectorClient {
                 404,
                 json!({"error":"not_found","message":message}),
             )),
-            Err(e) if e.to_string().contains("UnsupportedByStore") => Ok(response(
-                422,
-                json!({"error":"UnsupportedByStore","store":"pgvector","route":path,"message":e.to_string()}),
-            )),
+            Err(e)
+                if e.to_string()
+                    .contains(crate::capabilities::UNSUPPORTED_BY_STORE) =>
+            {
+                Ok(response(422, rejection_body(path, &e.to_string())))
+            }
             Err(e) => Err(e),
         }
     }
@@ -791,7 +848,9 @@ impl TurbopufferClient for PgvectorClient {
         let mut rows = vec![];
         for d in docs {
             if d.vectors.is_some() {
-                return Err(unsupported("multi_vector"));
+                return Err(unsupported(
+                    crate::capabilities::WireFeature::MultiVector.id(),
+                ));
             }
             let mut row = json!(d.attributes);
             row["id"] = json!(d.id);

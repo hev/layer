@@ -1032,6 +1032,7 @@ export interface Error {
   [key: string]: unknown;
   error: string;
   message: string;
+  feature?: string;
 }
 
 export interface SnapshotHistoryEntry {

@@ -112,10 +112,20 @@ pub async fn query(
                 ]
                 .contains(&key.as_str())
                 {
-                    return Err(AppError::unsupported_by_store(
-                        format!("pgvector {key}"),
-                        Some("pgvector".into()),
+                    // Same rule as the adapter's key allow-list: a key an
+                    // inventoried feature owns reports that feature's id.
+                    let (feature, detail) =
+                        match vectorstore_core::capabilities::WireFeature::for_wire_key(key) {
+                            Some(feature) if feature.id() != key => {
+                                (feature.id(), format!("wire key: {key}"))
+                            }
+                            _ => (key.as_str(), String::new()),
+                        };
+                    return Err(AppError::unsupported_feature(
+                        "pgvector",
                         Some(uri.path().into()),
+                        feature,
+                        detail,
                     ));
                 }
             }

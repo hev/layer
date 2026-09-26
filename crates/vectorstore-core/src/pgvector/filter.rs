@@ -79,7 +79,10 @@ pub(super) fn compile(
         )
     };
     if field.is_some_and(|f| !f.scalar()) {
-        return Err(unsupported("vector filter"));
+        return Err(unsupported_detail(
+            "vector_filter",
+            "vector attributes cannot be filtered",
+        ));
     }
     if field.is_some_and(|f| !f.filterable()) {
         return Err(invalid(format!("attribute {name} is not filterable")));

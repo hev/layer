@@ -208,21 +208,40 @@ add(
     hybrid=True,
 )
 # Complete unsupported writes must leave the table, schema and contents untouched.
-for feature, value in [
-    ("patch_rows", [{"id": "a", "n": 99}]),
-    ("patch_columns", {"id": ["a"], "n": [99]}),
-    ("delete_by_filter", ["n", "Eq", 1]),
-    ("patch_condition", ["n", "Eq", 1]),
-    ("copy_from_namespace", "other"),
-    ("distance_metric", "dot_product"),
+# `feature` is the typed field on the 422 body (RFC 0118): the wire-feature id
+# where one owns the key, otherwise the key itself. `patch_condition` is owned
+# by `conditional_writes`, which Postgres serves for upserts and deletes only.
+for key, value, feature in [
+    ("patch_rows", [{"id": "a", "n": 99}], "patch_rows"),
+    ("patch_columns", {"id": ["a"], "n": [99]}, "patch_columns"),
+    ("delete_by_filter", ["n", "Eq", 1], "delete_by_filter"),
+    ("patch_condition", ["n", "Eq", 1], "conditional_writes"),
+    ("copy_from_namespace", "other", "copy_from_namespace"),
+    ("distance_metric", "dot_product", "distance_metric"),
 ]:
     add(
-        "reject mixed " + feature,
+        "reject mixed " + key,
         "write",
-        {"upsert_rows": [{"id": "rogue", "vector": [1, 0], "n": 999}], feature: value},
+        {"upsert_rows": [{"id": "rogue", "vector": [1, 0], "n": 999}], key: value},
         status=422,
         feature=feature,
     )
+# RFC 0118 step B pins today's behavior: a schema `embed` declaration is a 422
+# naming `schema.embed`, and neither the schema nor the rows change. Step C
+# (gateway-served embed for Postgres) turns this case into a visible diff.
+add(
+    "reject schema embed",
+    "write",
+    {
+        "schema": {
+            "summary": {"type": "string", "embed": {"model": "qwen/qwen3-embedding-8b"}}
+        },
+        "upsert_rows": [{"id": "rogue-embed", "summary": "embedded on write"}],
+    },
+    status=422,
+    feature="schema.embed",
+)
+add("schema unchanged after embed rejection", "schema", absent="summary")
 add(
     "schema DDL rolled back with unsupported option",
     "write",
@@ -233,18 +252,18 @@ add(
 add("schema unchanged after rejection", "schema", absent="new_field")
 add("rejected writes unchanged count", "metadata", count=6)
 q("original row unchanged", ["id", "Eq", "a"], ["a"], n=1)
-for feature, value in [
-    ("searchAfter", "cursor"),
-    ("cursor", "cursor"),
-    ("delete_by_filter", True),
-    ("queries", [ann, ann]),
-    ("aggregate_by", {"n": ["Sum", "n"]}),
-    ("group_by", ["n"]),
-    ("exclude_attributes", ["text"]),
-    ("consistency", {"level": "strong"}),
-    ("vector_encoding", "base64"),
+for key, value, feature in [
+    ("searchAfter", "cursor", "search_after"),
+    ("cursor", "cursor", "search_after"),
+    ("delete_by_filter", True, "delete_by_filter"),
+    ("queries", [ann, ann], "multi_query"),
+    ("aggregate_by", {"n": ["Sum", "n"]}, "aggregate_by"),
+    ("group_by", ["n"], "aggregate_by"),
+    ("exclude_attributes", ["text"], "exclude_attributes"),
+    ("consistency", {"level": "strong"}, "consistency"),
+    ("vector_encoding", "base64", "vector_encoding"),
 ]:
-    q("reject query " + feature, query={feature: value}, status=422, feature=feature)
+    q("reject query " + key, query={key: value}, status=422, feature=feature)
 for op in ["Contains", "ContainsAny", "Fuzzy"]:
     q(
         "reject " + op,
@@ -411,7 +430,7 @@ add(
     "query",
     {"rank_by": ["text", "HybridText", "database"], "top_k": 3},
     status=422,
-    feature="Fuzzy",
+    feature="fuzzy",
 )
 add(
     "hybrid unknown field rejected",
@@ -426,7 +445,7 @@ add(
         "searchAfter": "later",
     },
     status=422,
-    feature="searchAfter",
+    feature="search_after",
 )
 add(
     "disable scalar filtering",

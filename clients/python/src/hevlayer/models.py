@@ -914,6 +914,7 @@ class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     error: str
     message: str
+    feature: str | None = None
 
 class SnapshotHistoryEntry(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)

@@ -110,6 +110,9 @@ type HevlayerError struct {
 	StatusCode int
 	Kind string
 	Message string
+	// Feature is the stable identifier on UnsupportedByStore rejections;
+	// match on it rather than parsing Message.
+	Feature string
 	Body []byte
 }
 
@@ -2765,12 +2768,13 @@ func decodeError(statusCode int, data []byte) error {
 	var payload struct {
 		Error string `json:"error"`
 		Message string `json:"message"`
+		Feature string `json:"feature"`
 	}
 	_ = json.Unmarshal(data, &payload)
 	if payload.Message == "" {
 		payload.Message = strings.TrimSpace(string(data))
 	}
-	return &HevlayerError{StatusCode: statusCode, Kind: payload.Error, Message: payload.Message, Body: data}
+	return &HevlayerError{StatusCode: statusCode, Kind: payload.Error, Message: payload.Message, Feature: payload.Feature, Body: data}
 }
 
 func addQueryValue(query url.Values, name string, value interface{}) error {
