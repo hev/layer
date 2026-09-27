@@ -251,7 +251,14 @@ from that schema:
 | --- | --- |
 | Vector attribute such as `"vector": "[3]f32"` | pgvector HNSW with `m=16`, `ef_construction=64`. `cosine_distance` uses cosine operators; `euclidean_squared` uses L2 operators. |
 | String attributes with `full_text_search: true` | One `pg_search` BM25 index over every such attribute, default tokenizer. Declaring another full-text attribute later rebuilds the index inside that write. |
-| Filterable numeric or boolean attribute | B-tree index. String scalar filters scan; text ranking uses the BM25 index. |
+| Filterable numeric or boolean attribute | B-tree index, `NULLS FIRST`, read forward for ascending and backward for descending `rank_by` order. String scalar filters scan, and ordering by a string attribute sorts the filtered rows; text ranking uses the BM25 index. |
+| Every namespace, for `id` | An expression index on the id sort key: unsigned-integer ids first, numerically, then string ids in byte order. Ordered scans, filter-only queries, and `["id", "Gt", last]` paging read it. |
+
+String attributes order and compare in byte order (`COLLATE "C"`) in both
+`rank_by` ordering and `Gt`, `Gte`, `Lt`, and `Lte` filters, independent of
+the database's default collation. Namespaces created before 0.7 keep their
+`ASC NULLS LAST` scalar indexes and have no id sort-key index; their queries
+return the same rows but sort instead of reading an index.
 
 `distance_metric` defaults to `cosine_distance` and is fixed for a namespace.
 HNSW is the adapter's vector index choice; there is no `VectorStore` field for

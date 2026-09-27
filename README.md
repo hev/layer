@@ -2,9 +2,9 @@
 
 > Generated from `hev/layer-pro`; [report issues](https://github.com/hev/layer/issues). Edits land upstream.
 
-Layer Community Edition runs the retrieval gateway locally in front of your
-Turbopuffer account. You need Docker with Compose, Git, curl, and a Turbopuffer
-API key; no license, compiler, or client build.
+Layer Community Edition is a local retrieval gateway over Postgres.
+You need Docker with Compose, Git, and curl; no account, API key, license,
+compiler, or client build.
 
 ## Start
 
@@ -12,7 +12,7 @@ API key; no license, compiler, or client build.
 git clone --branch v0.6.0 https://github.com/hev/layer.git
 cd layer
 export GATEWAY_IMAGE=hevlayer/layer-gateway:0.6.0
-export TURBOPUFFER_API_KEY="tpuf_..."
+export TURBOPUFFER_API_KEY=""
 docker compose up -d --wait
 export LAYER_GATEWAY_URL="http://localhost:${GATEWAY_PORT:-8080}"
 export LAYER_NAMESPACE="${LAYER_NAMESPACE:-products}"
@@ -20,12 +20,13 @@ curl --fail "$LAYER_GATEWAY_URL/health"
 ```
 
 
-Replace `tpuf_...` with your key. `v0.6.0` and the `0.6.0` image are the
-release; set `GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt into the
-development build. See the [CE quickstart](https://hevlayer.com/docs/ce/quickstart)
-for SDK examples.
-
-> **Preview:** started without a key, Compose runs on a local Postgres store.
+`v0.6.0` and the `0.6.0` image are the release; set
+`GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt into the development
+build. Data stays in a local Docker volume. To front an existing Turbopuffer
+account instead, export its key as `TURBOPUFFER_API_KEY` before starting and
+send it as the bearer token. See the
+[CE quickstart](https://hevlayer.com/docs/ce/quickstart) for SDK examples and
+both backends.
 
 ## Write
 
