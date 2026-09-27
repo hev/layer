@@ -9,9 +9,8 @@ compiler, or client build.
 ## Start
 
 ```sh
-git clone --branch v0.6.0 https://github.com/hev/layer.git
+git clone https://github.com/hev/layer.git
 cd layer
-export GATEWAY_IMAGE=hevlayer/layer-gateway:0.6.0
 export TURBOPUFFER_API_KEY=""
 docker compose up -d --wait
 export LAYER_GATEWAY_URL="http://localhost:${GATEWAY_PORT:-8080}"
@@ -20,7 +19,7 @@ curl --fail "$LAYER_GATEWAY_URL/health"
 ```
 
 
-`v0.6.0` and the `0.6.0` image are the release; set
+The Compose file runs the latest release; set
 `GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt into the development
 build. Data stays in a local Docker volume. To front an existing Turbopuffer
 account instead, export its key as `TURBOPUFFER_API_KEY` before starting and
