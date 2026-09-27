@@ -82,11 +82,13 @@ impl ConsistencyWatcher {
     }
 
     /// A positive metadata observation is a short-lived scheduling hint.
-    /// Missing, malformed, zero, failed, or stale observations fail closed.
+    /// Turbopuffer reports readiness at `pinning.status.ready_replicas`;
+    /// `pinning.replicas` is only the requested count. Missing, malformed,
+    /// zero, failed, or stale observations fail closed.
     pub fn observe_pinning(&self, namespace: &str, raw: &serde_json::Value) {
         self.register(namespace);
         if raw
-            .pointer("/pinning/ready_replicas")
+            .pointer("/pinning/status/ready_replicas")
             .and_then(serde_json::Value::as_u64)
             .is_some_and(|replicas| replicas > 0)
         {
@@ -317,21 +319,31 @@ mod tests {
         let tpuf = MockTurbopufferClient::new();
         let watcher = ConsistencyWatcher::new();
         assert!(!watcher.is_pinned_ready("ns"));
-        for raw in [
-            serde_json::json!({"pinning": {"ready_replicas": 1}}),
-            serde_json::json!({"pinning": {"ready_replicas": 0}}),
-            serde_json::json!({"pinning": {"replicas": 1}}),
-            serde_json::json!({}),
-            serde_json::json!({"pinning": {"ready_replicas": null}}),
-            serde_json::json!({"pinning": {"ready_replicas": -1}}),
-            serde_json::json!({"pinning": {"ready_replicas": "1"}}),
+        let status = |ready: serde_json::Value| {
+            serde_json::json!({"pinning": {"replicas": 1, "status": {
+                "updated_at": "2026-09-27T13:49:14Z",
+                "ready_replicas": ready,
+                "replicas": 1,
+                "utilization": 0.0,
+            }}})
+        };
+        for (raw, expected) in [
+            // Live aws-us-east-1 responses while a replica warms (LYR-133).
+            (status(serde_json::json!(0)), false),
+            (status(serde_json::json!(1)), true),
+            (serde_json::json!({"pinning": {"replicas": 1}}), false),
+            // The flat field Turbopuffer does not report is not readiness.
+            (serde_json::json!({"pinning": {"ready_replicas": 1}}), false),
+            (serde_json::json!({}), false),
+            (status(serde_json::Value::Null), false),
+            (status(serde_json::json!(-1)), false),
+            (status(serde_json::json!("1")), false),
         ] {
-            let expected = raw.pointer("/pinning/ready_replicas") == Some(&serde_json::json!(1));
             tpuf.set_metadata_override("ns", raw).await;
             watcher.poll_once(&tpuf, Duration::ZERO).await;
             assert_eq!(watcher.is_pinned_ready("ns"), expected);
         }
-        tpuf.set_metadata_override("ns", serde_json::json!({"pinning": {"ready_replicas": 2}}))
+        tpuf.set_metadata_override("ns", status(serde_json::json!(2)))
             .await;
         watcher.poll_once(&tpuf, Duration::ZERO).await;
         assert!(watcher.is_pinned_ready("ns"));
@@ -342,7 +354,7 @@ mod tests {
             .pinned_ready
             .insert("ns".into(), Instant::now() - Duration::from_secs(120));
         assert!(!watcher.is_pinned_ready("ns"));
-        watcher.observe_pinning("ns", &serde_json::json!({"pinning": {"ready_replicas": 1}}));
+        watcher.observe_pinning("ns", &status(serde_json::json!(1)));
         watcher.forget_namespace("ns");
         assert!(!watcher.is_pinned_ready("ns"));
     }
