@@ -133,6 +133,132 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/blobs":
+    put:
+      operationId: putBlob
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Store a namespace blob
+      description: 'Store opaque bytes durably under a content-addressed sha256 key.
+        A store with native bytes holds the blob itself (turbopuffer up to 6 MiB,
+        pgvector up to the gateway''s 10 MiB cap); S3 holds blobs for stores without
+        native bytes and blobs over the store''s cap. The response returns a `blob://{namespace}/{sha256}`
+        reference that callers can write as an ordinary string attribute. The document
+        write path never carries blob bytes.
+
+        '
+      tags:
+      - blobs
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: warm
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+        description: Best-effort write-through to the Aerospike raw blob cache.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Blob stored
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/BlobPutResponse"
+        '413':
+          description: "`payload_too_large` when the blob exceeds the gateway's 10
+            MiB cap, or `blob_exceeds_store_cap` when it exceeds the store's value
+            cap and the gateway has no object store (no `S3_BUCKET`)\n"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: 'Validation error, or `object_store_not_configured` when the
+            store has no native bytes and the gateway runs without an object store
+            (no `S3_BUCKET`)
+
+            '
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Durable store or object-store write failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/blobs/{sha256}":
+    get:
+      operationId: getBlob
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Fetch a namespace blob
+      description: 'Serve immutable blob bytes by sha256. When the Aerospike cache
+        is configured the gateway reads it first; on a miss it reads the namespace''s
+        store (for stores with native bytes), then S3, and backfills the cache best-effort.
+        Successful responses carry immutable cache headers and an ETag equal to the
+        content hash.
+
+        '
+      tags:
+      - blobs
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: sha256
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+        description: Hex sha256 returned by `putBlob`.
+      responses:
+        '200':
+          description: Blob bytes
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `public, max-age=31536000, immutable`.
+            ETag:
+              schema:
+                type: string
+              description: Quoted sha256 hash.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Blob not found
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Durable object-store read failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
   "/v1/namespaces/{namespace}/hint_cache_warm":
     get:
       operationId: hintCacheWarm
@@ -2084,6 +2210,23 @@ components:
         billing:
           type: object
           additionalProperties: true
+    BlobPutResponse:
+      type: object
+      required:
+      - ref
+      - sha256
+      - size
+      properties:
+        ref:
+          type: string
+          description: Content-addressed blob reference, `blob://{namespace}/{sha256}`.
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        size:
+          type: integer
+          format: int64
+          minimum: 1
     TurbopufferNamespaceSummary:
       type: object
       required:

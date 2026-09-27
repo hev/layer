@@ -75,9 +75,6 @@ async fn boots_without_kubernetes_when_store_json_is_unset() {
             .get(format!("{base}/v2/warehouses"))
             .bearer_auth("test-token"),
         client
-            .put(format!("{base}/v1/namespaces/demo/blobs"))
-            .bearer_auth("test-token"),
-        client
             .get(format!("{base}/v2/namespaces/demo/history"))
             .bearer_auth("test-token"),
         client

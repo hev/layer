@@ -1580,6 +1580,27 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.inner.requires_native_wire(namespace)
     }
 
+    fn blob_storage(&self, namespace: &str) -> vectorstore_core::capabilities::BlobStorage {
+        self.inner.blob_storage(namespace)
+    }
+
+    async fn put_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+        bytes: &[u8],
+    ) -> Result<(), TurbopufferError> {
+        self.inner.put_blob(namespace, sha256, bytes).await
+    }
+
+    async fn get_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        self.inner.get_blob(namespace, sha256).await
+    }
+
     async fn passthrough(
         &self,
         method: &str,

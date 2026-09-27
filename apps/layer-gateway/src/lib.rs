@@ -149,11 +149,11 @@ pub struct AppState {
     /// `Index.spec.blobs.referenceAttributes`. Absent namespace means blob
     /// cache warm is not enabled for that namespace.
     pub blob_reference_attributes: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    /// Whether blob PUT/GET routes are mounted in this gateway composition.
+    /// Whether Aerospike fronts blob reads and writes as the hot cache.
     ///
-    /// Blobs are a pro managed-cache surface. The implementation can fall back
-    /// to S3 during cache outages, but standalone/open mode omits the surface.
-    pub blob_store_enabled: bool,
+    /// Blob routes are always mounted; the bytes live in the namespace's store
+    /// or S3 (RFC 0123). Without the cache, reads go straight to that backend.
+    pub blob_cache_enabled: bool,
     /// Whether managed-platform routes are mounted in this gateway composition.
     ///
     /// These surfaces are Pro in the open-core split: retained history/activity,
@@ -736,19 +736,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     #[cfg(any())]
-    if state.blob_store_enabled {
-        router = router
-            .route(
-                "/v1/namespaces/{namespace}/blobs",
-                put(routes::blobs::put_blob),
-            )
-            .route(
-                "/v1/namespaces/{namespace}/blobs/{sha256}",
-                get(routes::blobs::get_blob),
-            );
-    }
-
-    #[cfg(any())]
     if state.managed_platform_enabled {
         router = router
             .route(
@@ -826,6 +813,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/namespaces/{namespace}/hint_cache_warm",
             get(routes::scans::hint_cache_warm),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/blobs",
+            put(routes::blobs::put_blob),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/blobs/{sha256}",
+            get(routes::blobs::get_blob),
         )
         .route(
             "/v1/namespaces/{namespace}/metadata",

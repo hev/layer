@@ -12,6 +12,8 @@ pub const PGVECTOR_CAPABILITIES: crate::capabilities::Capabilities =
             max_full_text_search_fields: None,
             max_vector_fields: Some(1),
         },
+        // A bytea table; the gateway's blob request cap bounds each value.
+        blobs: crate::capabilities::BlobStorage::native(None),
     };
 
 fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabilities::Coverage {

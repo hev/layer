@@ -27,6 +27,7 @@ use crate::models::{
     WarmBlobsResponse, WarmCacheOptions, WarmCacheResponse, WarmDocumentsResponse, WarmJob,
     WarmJobList, WarmJobQuery, WarmSnapshotsResponse, WarmStepResponse, WarmStepStatus,
 };
+use crate::routes::blobs::{blob_cache_set, is_valid_sha256, read_durable_blob};
 use crate::routes::hybrid_text::{
     build_hybrid_leg_specs, build_surfacing_leg_specs, parse_hybrid_text_expr,
     tokenize_query_input, LegSpec,
@@ -43,18 +44,6 @@ use crate::snapshots::{
     SnapshotFieldSkipped, ValueCount, MAX_FACET_VALUES,
 };
 use crate::AppState;
-
-fn is_valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn blob_s3_key(namespace: &str, sha256: &str) -> String {
-    format!("blobs/{namespace}/{sha256}")
-}
-
-fn blob_cache_set(namespace: &str) -> String {
-    format!("blob-cache:{namespace}")
-}
 
 fn scan_count_response(response: ScanCountResponse) -> Response {
     let mut headers = axum::http::HeaderMap::new();
@@ -2395,25 +2384,17 @@ async fn hydrate_blobs(
             }
         }
 
-        // The warm's dominant cost is the per-blob S3 round-trip, so fetch blobs
+        // The warm's dominant cost is the per-blob backend round-trip, so fetch blobs
         // concurrently — this is the parallelism that matters. `buffered` (not
         // `buffer_unordered`) preserves document order, so the byte budget still
         // cuts off at the exact blob the old serial loop did; any prefetch past
         // the cutoff is bounded by the in-flight count and dropped. Writes stay
         // serial: put_raw is intra-cluster/cheap, and serial writes keep the
         // running byte total and budget cutoff exact.
-        let s3 = state.s3.clone();
         let mut fetches = stream::iter(page_refs)
-            .map(|sha256| {
-                let s3 = s3.clone();
-                let key = blob_s3_key(namespace, &sha256);
-                async move {
-                    let blob = s3
-                        .get(&key)
-                        .await
-                        .map_err(|e| AppError::Upstream(format!("read blob from S3: {e}")))?;
-                    Ok::<(String, Option<Vec<u8>>), AppError>((sha256, blob))
-                }
+            .map(|sha256| async move {
+                let blob = read_durable_blob(state, namespace, &sha256).await?;
+                Ok::<(String, Option<Vec<u8>>), AppError>((sha256, blob))
             })
             .buffered(BLOB_WARM_FETCH_CONCURRENCY);
 

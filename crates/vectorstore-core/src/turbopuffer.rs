@@ -9,7 +9,51 @@ pub const TURBOPUFFER_CAPABILITIES: crate::capabilities::Capabilities =
             max_full_text_search_fields: None,
             max_vector_fields: None,
         },
+        // A blob-set namespace with a native `bytes` attribute.
+        blobs: crate::capabilities::BlobStorage::native(Some(TURBOPUFFER_MAX_BLOB_BYTES)),
     };
+
+/// The largest blob a turbopuffer `bytes` value holds. turbopuffer caps a
+/// value at 8 MiB measured on the base64 wire string, so the decoded cap is
+/// three quarters of that: 6 MiB.
+pub const TURBOPUFFER_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024 / 4 * 3;
+/// The `bytes` attribute holding a blob in its blob-set namespace.
+const BLOB_DATA_ATTRIBUTE: &str = "data";
+const TURBOPUFFER_MAX_NAMESPACE_LEN: usize = 128;
+
+/// The blob-set namespace holding a namespace's blobs, keyed by sha256.
+pub fn blob_set_namespace(namespace: &str) -> String {
+    format!("{namespace}__hevlayer_blobs")
+}
+
+/// A namespace whose blob-set name would exceed turbopuffer's namespace
+/// length keeps its blobs in S3.
+fn turbopuffer_blob_storage(namespace: &str) -> crate::capabilities::BlobStorage {
+    if blob_set_namespace(namespace).len() <= TURBOPUFFER_MAX_NAMESPACE_LEN {
+        TURBOPUFFER_CAPABILITIES.blobs
+    } else {
+        crate::capabilities::BlobStorage::NONE
+    }
+}
+
+fn blob_rejection(kind: &str) -> TurbopufferError {
+    crate::capabilities::unsupported_by_store(kind, "blobs", Some("the store has no native bytes"))
+}
+
+fn decode_blob_value(value: &Value) -> Result<Vec<u8>, TurbopufferError> {
+    use base64::Engine as _;
+    let encoded = value.as_str().ok_or_else(|| {
+        TurbopufferError::Other("blob row has no base64 `data` attribute".to_string())
+    })?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| TurbopufferError::Other(format!("blob row `data` is not base64: {e}")))
+}
+
+fn encode_blob_value(bytes: &[u8]) -> Value {
+    use base64::Engine as _;
+    Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
 
 fn turbopuffer_coverage(
     feature: crate::capabilities::WireFeature,
@@ -196,6 +240,32 @@ pub trait TurbopufferClient: Send + Sync {
 
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         crate::capabilities::UNDECLARED
+    }
+
+    /// Where this store keeps blob bytes for `namespace`. Routers answer for
+    /// the store the namespace resolves to.
+    fn blob_storage(&self, _namespace: &str) -> crate::capabilities::BlobStorage {
+        self.capabilities().blobs
+    }
+
+    /// Store a blob in the store itself, keyed by its sha256. Idempotent.
+    /// Only called when [`Self::blob_storage`] holds the blob.
+    async fn put_blob(
+        &self,
+        _namespace: &str,
+        _sha256: &str,
+        _bytes: &[u8],
+    ) -> Result<(), TurbopufferError> {
+        Err(blob_rejection(self.capabilities().kind))
+    }
+
+    /// Read a blob the store holds. `None` when the store has no such blob.
+    async fn get_blob(
+        &self,
+        _namespace: &str,
+        _sha256: &str,
+    ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        Err(blob_rejection(self.capabilities().kind))
     }
 
     /// Raw Turbopuffer-compatible pass-through for API surfaces where
@@ -545,6 +615,34 @@ impl TurbopufferClient for RoutingTurbopufferClient {
             .is_ok_and(|client| client.requires_native_wire(namespace))
     }
 
+    fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
+        self.client_for_namespace(Some(namespace))
+            .map_or(crate::capabilities::BlobStorage::NONE, |client| {
+                client.blob_storage(namespace)
+            })
+    }
+
+    async fn put_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+        bytes: &[u8],
+    ) -> Result<(), TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .put_blob(namespace, sha256, bytes)
+            .await
+    }
+
+    async fn get_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .get_blob(namespace, sha256)
+            .await
+    }
+
     async fn passthrough(
         &self,
         method: &str,
@@ -830,6 +928,80 @@ fn rows_from_query_body(resp_body: &Value) -> Vec<QueryResult> {
 impl TurbopufferClient for HttpTurbopufferClient {
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         TURBOPUFFER_CAPABILITIES
+    }
+
+    fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
+        turbopuffer_blob_storage(namespace)
+    }
+
+    async fn put_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+        bytes: &[u8],
+    ) -> Result<(), TurbopufferError> {
+        let body = serde_json::json!({
+            "upsert_rows": [{"id": sha256, BLOB_DATA_ATTRIBUTE: encode_blob_value(bytes)}],
+            "schema": {BLOB_DATA_ATTRIBUTE: {"type": "bytes"}},
+        });
+        let url = format!(
+            "{}/v2/namespaces/{}",
+            self.base_url,
+            blob_set_namespace(namespace)
+        );
+        let resp = self
+            .authorize(self.client.post(&url).json(&body))?
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(TurbopufferError::from_response(resp).await);
+        }
+        Ok(())
+    }
+
+    async fn get_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        // Strong consistency (the default): a GET right after a PUT sees it.
+        let body = serde_json::json!({
+            "rank_by": ["id", "asc"],
+            "top_k": 1,
+            "filters": ["id", "Eq", sha256],
+            "include_attributes": [BLOB_DATA_ATTRIBUTE],
+        });
+        let url = format!(
+            "{}/v2/namespaces/{}/query",
+            self.base_url,
+            blob_set_namespace(namespace)
+        );
+        let resp = self
+            .authorize(self.client.post(&url).json(&body))?
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            // No blob-set namespace yet: nothing was ever stored here.
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(TurbopufferError::from_response(resp).await);
+        }
+        let resp_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        resp_body
+            .get("rows")
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(sha256))
+            })
+            .map(|row| decode_blob_value(row.get(BLOB_DATA_ATTRIBUTE).unwrap_or(&Value::Null)))
+            .transpose()
     }
 
     async fn passthrough(
@@ -1803,6 +1975,55 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 impl TurbopufferClient for MockTurbopufferClient {
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         TURBOPUFFER_CAPABILITIES
+    }
+
+    fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
+        turbopuffer_blob_storage(namespace)
+    }
+
+    /// Stores the row the HTTP client writes: base64 `data` in the blob set.
+    async fn put_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+        bytes: &[u8],
+    ) -> Result<(), TurbopufferError> {
+        self.docs
+            .write()
+            .await
+            .entry(blob_set_namespace(namespace))
+            .or_default()
+            .insert(
+                sha256.to_string(),
+                DocumentResponse {
+                    id: sha256.to_string(),
+                    attributes: HashMap::from([(
+                        BLOB_DATA_ATTRIBUTE.to_string(),
+                        encode_blob_value(bytes),
+                    )]),
+                },
+            );
+        Ok(())
+    }
+
+    async fn get_blob(
+        &self,
+        namespace: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        self.docs
+            .read()
+            .await
+            .get(&blob_set_namespace(namespace))
+            .and_then(|docs| docs.get(sha256))
+            .map(|doc| {
+                decode_blob_value(
+                    doc.attributes
+                        .get(BLOB_DATA_ATTRIBUTE)
+                        .unwrap_or(&Value::Null),
+                )
+            })
+            .transpose()
     }
 
     async fn passthrough(

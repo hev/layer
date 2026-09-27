@@ -217,11 +217,40 @@ impl SchemaLimits {
     };
 }
 
+/// Where a store keeps blob bytes (RFC 0123 § "Finishing Layer's blob
+/// store"). A native store holds blobs up to `max_value_bytes` itself; larger
+/// blobs, and every blob on a store without native bytes, go to S3.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct BlobStorage {
+    pub native: bool,
+    /// Largest blob the store holds, in bytes. `None` is no store cap below
+    /// the gateway's own blob request cap.
+    pub max_value_bytes: Option<u64>,
+}
+impl BlobStorage {
+    /// No native bytes: every blob goes to S3.
+    pub const NONE: Self = Self {
+        native: false,
+        max_value_bytes: None,
+    };
+    pub const fn native(max_value_bytes: Option<u64>) -> Self {
+        Self {
+            native: true,
+            max_value_bytes,
+        }
+    }
+    /// Whether the store itself holds a blob of `len` bytes.
+    pub fn holds(self, len: usize) -> bool {
+        self.native && self.max_value_bytes.is_none_or(|max| len as u64 <= max)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Capabilities {
     pub kind: &'static str,
     pub coverage: fn(WireFeature) -> Coverage,
     pub limits: SchemaLimits,
+    pub blobs: BlobStorage,
 }
 impl Capabilities {
     pub fn get(self, feature: WireFeature) -> Coverage {
@@ -324,6 +353,7 @@ pub const UNDECLARED: Capabilities = Capabilities {
     kind: "undeclared",
     coverage: |_| Coverage::unsupported(),
     limits: SchemaLimits::UNDECLARED,
+    blobs: BlobStorage::NONE,
 };
 
 /// Explicit schema-property ownership. Native query/write bodies also permit

@@ -67,6 +67,10 @@ pub enum AppError {
 
     #[error("Object store not configured: {0}")]
     ObjectStoreNotConfigured(String),
+
+    /// A blob over its store's native value cap, with no S3 to hold it.
+    #[error("Blob exceeds store cap: {0}")]
+    BlobExceedsStoreCap(String),
 }
 
 #[cfg(feature = "pro")]
@@ -354,6 +358,14 @@ impl IntoResponse for AppError {
             AppError::ObjectStoreNotConfigured(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "object_store_not_configured",
+                msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::BlobExceedsStoreCap(msg) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "blob_exceeds_store_cap",
                 msg.clone(),
                 None,
                 None,

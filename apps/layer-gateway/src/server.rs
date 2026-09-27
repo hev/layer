@@ -270,7 +270,7 @@ pub async fn run_with_options(options: ServerOptions) {
             }
             info!(
                 "S3_BUCKET is unset; object store disabled — snapshots, search history, \
-                 checkpoints, and blobs degrade or report \"object store not configured\""
+                 checkpoints, and blobs over the store's cap degrade or report \"object store not configured\""
             );
             Arc::new(NoopS3Client)
         }
@@ -361,7 +361,7 @@ pub async fn run_with_options(options: ServerOptions) {
         snapshot_interval_ms: Arc::new(RwLock::new(HashMap::new())),
         snapshot_retention: Arc::new(RwLock::new(HashMap::new())),
         blob_reference_attributes: Arc::new(RwLock::new(HashMap::new())),
-        blob_store_enabled: false,
+        blob_cache_enabled: false,
         managed_platform_enabled: false,
         namespace_store_refs,
         embedding_profiles: Arc::new(RwLock::new(HashMap::new())),

@@ -185,6 +185,9 @@ impl PgvectorClient {
             .map_err(db)?;
         sqlx::query("CREATE TABLE IF NOT EXISTS layer_pgvector.namespaces (scope text NOT NULL, name text NOT NULL, table_name text NOT NULL UNIQUE, schema jsonb NOT NULL, metric text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(scope,name))")
             .execute(&mut *bootstrap).await.map_err(db)?;
+        // Content-addressed blobs (RFC 0123): one bytea row per sha256.
+        sqlx::query("CREATE TABLE IF NOT EXISTS layer_pgvector.blobs (scope text NOT NULL, namespace text NOT NULL, sha256 text NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(scope,namespace,sha256))")
+            .execute(&mut *bootstrap).await.map_err(db)?;
         bootstrap.commit().await.map_err(db)?;
         Ok(Self {
             pool,
@@ -809,6 +812,30 @@ impl TurbopufferClient for PgvectorClient {
 
     fn requires_native_wire(&self, _: &str) -> bool {
         true
+    }
+
+    async fn put_blob(&self, namespace: &str, sha256: &str, bytes: &[u8]) -> Result<()> {
+        sqlx::query("INSERT INTO layer_pgvector.blobs (scope,namespace,sha256,data) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+            .bind(&self.scope)
+            .bind(namespace)
+            .bind(sha256)
+            .bind(bytes)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(())
+    }
+
+    async fn get_blob(&self, namespace: &str, sha256: &str) -> Result<Option<Vec<u8>>> {
+        sqlx::query_scalar(
+            "SELECT data FROM layer_pgvector.blobs WHERE scope=$1 AND namespace=$2 AND sha256=$3",
+        )
+        .bind(&self.scope)
+        .bind(namespace)
+        .bind(sha256)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)
     }
     async fn passthrough(
         &self,

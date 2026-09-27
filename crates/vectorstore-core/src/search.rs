@@ -11,6 +11,7 @@ pub const SEARCH_CAPABILITIES: crate::capabilities::Capabilities =
             max_full_text_search_fields: None,
             max_vector_fields: None,
         },
+        blobs: crate::capabilities::BlobStorage::NONE,
     };
 
 fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabilities::Coverage {

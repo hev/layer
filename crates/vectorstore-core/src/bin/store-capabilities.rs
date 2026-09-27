@@ -69,11 +69,22 @@ fn main() {
             )
         })
         .collect();
+    // Per-store blob backend: native bytes up to max_value_bytes, else S3.
+    let blobs: serde_json::Map<String, Value> = stores
+        .iter()
+        .map(|store| {
+            (
+                store.kind.to_string(),
+                serde_json::to_value(store.blobs).expect("blob storage serializes"),
+            )
+        })
+        .collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "generated_by": "scripts/generate-store-capabilities",
             "fts_ranking_note": "BM25-class scoring; tokenization differs; fused order may differ across backends",
+        "blobs": blobs,
         "hybrid_routes": hybrid_routes,
         "schema_limits": schema_limits,
         "features": features
