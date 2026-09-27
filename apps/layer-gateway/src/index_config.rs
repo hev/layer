@@ -19,6 +19,13 @@ pub enum IndexConfigError {
         first: String,
         second: String,
     },
+    #[error("Index CRs {first} ('{first_pattern}') and {second} ('{second_pattern}') declare overlapping namespace patterns")]
+    OverlappingNamespacePatterns {
+        first: String,
+        first_pattern: String,
+        second: String,
+        second_pattern: String,
+    },
 }
 
 #[async_trait]
@@ -103,7 +110,12 @@ pub async fn refresh_index_config_once(
     preserve_facet_fields: bool,
 ) -> Result<(), IndexConfigError> {
     let config = source.load_index_config().await?;
-    let namespaces: Vec<String> = config.facet_fields.keys().cloned().collect();
+    let namespaces: Vec<String> = config
+        .facet_fields
+        .keys()
+        .filter(|namespace| !vectorstore_core::namespace_pattern::is_pattern(namespace))
+        .cloned()
+        .collect();
     if !preserve_facet_fields {
         state.replace_facet_fields(config.facet_fields);
     }

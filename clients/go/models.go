@@ -423,7 +423,7 @@ type TurbopufferMetadataPatch struct {
 type TurbopufferWriteRequest map[string]interface{}
 
 type TurbopufferBranchFromRequest struct {
-	BranchFromNamespace map[string]interface{} `json:"branch_from_namespace"`
+	BranchFromNamespace interface{} `json:"branch_from_namespace"`
 }
 
 type TurbopufferCopyFromRequest struct {

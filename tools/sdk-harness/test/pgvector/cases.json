@@ -1134,6 +1134,25 @@
     "feature": "copy_from_namespace"
   },
   {
+    "name": "reject mixed branch_from_namespace",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "branch_from_namespace": "other"
+    },
+    "status": 422,
+    "feature": "branch_from_namespace"
+  },
+  {
     "name": "reject mixed distance_metric",
     "op": "write",
     "body": {

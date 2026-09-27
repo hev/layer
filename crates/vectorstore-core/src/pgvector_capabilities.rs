@@ -28,6 +28,7 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
         MultiQuery => {
             Coverage::unsupported_because(crate::capabilities::MULTI_QUERY_USE_HYBRID_TEXT)
         }
+        Branch => Coverage::unsupported_because(crate::capabilities::NO_NATIVE_BRANCH),
         _ => Coverage::unsupported(),
     }
 }

@@ -45,6 +45,7 @@ fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabili
                 Embed => Coverage::approximate(
                     "Gateway-resolved embedding only; native schema passthrough is unavailable.",
                 ),
+                Branch => Coverage::unsupported_because(crate::capabilities::NO_NATIVE_BRANCH),
                 _ => Coverage::unsupported(),
             }
 }

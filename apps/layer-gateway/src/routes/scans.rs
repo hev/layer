@@ -2354,6 +2354,12 @@ async fn hydrate_blobs(
     let mut invalid_refs = 0_u64;
     let mut budget_exhausted = false;
     let mut seen = HashSet::new();
+    // A branch keeps its source's `blob://{source}/…` references; they
+    // resolve here because the source is in the branch's lineage (RFC 0124).
+    let lineage = crate::lineage::read_lineage(state, namespace).await;
+    let accepted: Vec<&str> = std::iter::once(namespace)
+        .chain(lineage.ancestors.iter().map(String::as_str))
+        .collect();
 
     while !budget_exhausted {
         let page: DocumentPage = state
@@ -2374,7 +2380,7 @@ async fn hydrate_blobs(
                     continue;
                 };
                 let mut refs = Vec::new();
-                invalid_refs += collect_blob_refs(namespace, value, &mut refs);
+                invalid_refs += collect_blob_refs(&accepted, value, &mut refs);
                 refs_seen += refs.len() as u64;
                 for sha256 in refs {
                     if seen.insert(sha256.clone()) {
@@ -2442,9 +2448,9 @@ async fn hydrate_blobs(
     })
 }
 
-fn collect_blob_refs(namespace: &str, value: &Value, refs: &mut Vec<String>) -> u64 {
+fn collect_blob_refs(accepted: &[&str], value: &Value, refs: &mut Vec<String>) -> u64 {
     match value {
-        Value::String(raw) => parse_blob_ref(namespace, raw)
+        Value::String(raw) => parse_blob_ref(accepted, raw)
             .map(|maybe| {
                 if let Some(sha256) = maybe {
                     refs.push(sha256);
@@ -2454,14 +2460,16 @@ fn collect_blob_refs(namespace: &str, value: &Value, refs: &mut Vec<String>) -> 
             .unwrap_or(1),
         Value::Array(values) => values
             .iter()
-            .map(|value| collect_blob_refs(namespace, value, refs))
+            .map(|value| collect_blob_refs(accepted, value, refs))
             .sum(),
         Value::Null => 0,
         _ => 1,
     }
 }
 
-fn parse_blob_ref(namespace: &str, raw: &str) -> Result<Option<String>, ()> {
+/// The sha256 of a `blob://{namespace}/{sha256}` reference whose namespace
+/// is one `accepted` names: the namespace itself or one of its ancestors.
+fn parse_blob_ref(accepted: &[&str], raw: &str) -> Result<Option<String>, ()> {
     let reference = raw.trim();
     if reference.is_empty() {
         return Ok(None);
@@ -2472,7 +2480,7 @@ fn parse_blob_ref(namespace: &str, raw: &str) -> Result<Option<String>, ()> {
     let Some((ref_namespace, sha256)) = rest.split_once('/') else {
         return Err(());
     };
-    if ref_namespace != namespace || !is_valid_sha256(sha256) {
+    if !accepted.contains(&ref_namespace) || !is_valid_sha256(sha256) {
         return Err(());
     }
     Ok(Some(sha256.to_ascii_lowercase()))

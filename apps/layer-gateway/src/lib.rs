@@ -10,6 +10,7 @@ pub mod history;
 pub mod index_config;
 pub mod index_gc;
 pub mod keys;
+pub mod lineage;
 pub mod metrics;
 pub mod models;
 pub mod namespace_purge;
@@ -278,12 +279,15 @@ impl AppState {
     }
 
     pub fn facet_fields_for(&self, namespace: &str) -> Option<Vec<String>> {
-        self.facet_fields
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .cloned()
-            .filter(|fields| !fields.is_empty())
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .facet_fields
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
+        .filter(|fields| !fields.is_empty())
     }
 
     pub fn has_facet_field(&self, namespace: &str, field: &str) -> bool {
@@ -308,19 +312,22 @@ impl AppState {
     }
 
     pub fn scan_threads_for(&self, namespace: &str) -> u32 {
-        self.scan_threads
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .copied()
-            .unwrap_or_else(|| {
-                if self.consistency.is_pinned_ready(namespace) {
-                    DEFAULT_PINNED_SCAN_THREADS
-                } else {
-                    DEFAULT_SCAN_THREADS
-                }
-            })
-            .clamp(1, self.scan_threads_max_for(namespace))
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .scan_threads
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .copied()
+        .unwrap_or_else(|| {
+            if self.consistency.is_pinned_ready(namespace) {
+                DEFAULT_PINNED_SCAN_THREADS
+            } else {
+                DEFAULT_SCAN_THREADS
+            }
+        })
+        .clamp(1, self.scan_threads_max_for(namespace))
     }
 
     pub fn replace_scan_threads(&self, scan_threads: HashMap<String, u32>) {
@@ -331,11 +338,14 @@ impl AppState {
     }
 
     pub fn snapshot_interval_ms_for(&self, namespace: &str) -> Option<u64> {
-        self.snapshot_interval_ms
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .copied()
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .snapshot_interval_ms
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .copied()
     }
 
     pub fn replace_snapshot_interval_ms(&self, snapshot_interval_ms: HashMap<String, u64>) {
@@ -346,12 +356,15 @@ impl AppState {
     }
 
     pub fn snapshot_retention_for(&self, namespace: &str) -> Retention {
-        self.snapshot_retention
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .cloned()
-            .unwrap_or(Retention::Never)
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .snapshot_retention
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
+        .unwrap_or(Retention::Never)
     }
 
     pub fn replace_snapshot_retention(&self, snapshot_retention: HashMap<String, Retention>) {
@@ -362,12 +375,15 @@ impl AppState {
     }
 
     pub fn blob_reference_attributes_for(&self, namespace: &str) -> Option<Vec<String>> {
-        self.blob_reference_attributes
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .cloned()
-            .filter(|fields| !fields.is_empty())
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .blob_reference_attributes
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
+        .filter(|fields| !fields.is_empty())
     }
 
     pub fn replace_blob_reference_attributes(
@@ -388,11 +404,14 @@ impl AppState {
     }
 
     pub fn embedding_profile_for(&self, namespace: &str) -> Option<EmbeddingProfile> {
-        self.embedding_profiles
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .cloned()
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .embedding_profiles
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
     }
 
     pub fn replace_embedding_profiles(
@@ -408,13 +427,15 @@ impl AppState {
     /// The VectorStore a namespace's traffic resolves to — its Index's
     /// `storeRef`, or the default store.
     pub fn store_for_namespace(&self, namespace: &str) -> String {
-        let store = self
-            .namespace_store_refs
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
-            .cloned()
-            .unwrap_or_else(|| self.default_store.clone());
+        let store = vectorstore_core::namespace_pattern::resolve(
+            &self
+                .namespace_store_refs
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
+        .unwrap_or_else(|| self.default_store.clone());
         if store != self.default_store {
             self.telemetry.touch_multi_store_routing();
         }
@@ -445,6 +466,8 @@ impl AppState {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
+            // A pattern Index names no namespace a background job can visit.
+            .filter(|(namespace, _)| !vectorstore_core::namespace_pattern::is_pattern(namespace))
             .map(|(namespace, retention)| (namespace.clone(), retention.clone()))
             .collect()
     }
@@ -455,7 +478,7 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter_map(|(namespace, fields)| {
-                if fields.is_empty() {
+                if fields.is_empty() || vectorstore_core::namespace_pattern::is_pattern(namespace) {
                     None
                 } else {
                     Some(namespace.clone())
@@ -807,6 +830,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v2/vectorstores/{name}",
             get(routes::vectorstores::get_vectorstore),
+        )
+        .route(
+            "/v2/vectorstores/{name}/capabilities",
+            get(routes::capabilities::vectorstore_capabilities),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/capabilities",
+            get(routes::capabilities::namespace_capabilities),
         )
         .route("/v2/namespaces", get(routes::namespaces::list_namespaces))
         .route("/v1/namespaces", get(routes::turbopuffer::passthrough_get))

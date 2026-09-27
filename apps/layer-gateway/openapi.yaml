@@ -1012,7 +1012,7 @@ paths:
       operationId: writeNamespace
       x-hevlayer-store-support:
         turbopuffer: supported
-        search: supported
+        search: approximate
         pgvector: approximate
       x-turbopuffer-key: POST /v2/namespaces/{namespace}
       x-hevlayer-client-aliases:
@@ -1039,6 +1039,12 @@ paths:
         cache best-effort before the upstream call when ids are explicit. Conditional
         and filter writes request affected ids from Turbopuffer and apply cache invalidation
         and write-triggered UDF enqueue from the upstream affected-id set after success.
+        A body with `branch_from_namespace` or `copy_from_namespace` is forwarded
+        to the store unchanged; it must carry no documents or `schema` (400), the
+        key needs read scope on the source (403), and the source must resolve to the
+        same VectorStore (422 `BranchAcrossStores`). A store without native branching
+        returns 422 `UnsupportedByStore` naming the feature; the gateway never emulates
+        a branch with a copy.
 
         '
       tags:
@@ -1059,8 +1065,28 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/TurbopufferWriteResponse"
+        '400':
+          description: 'A branch or copy combined with documents, `schema`, or the
+            other key, or a source value that names no namespace
+
+            '
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '403':
+          description: The key lacks write scope on the target or read scope on a
+            branch or copy source
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
         '422':
-          description: Validation error
+          description: 'Validation error; `UnsupportedByStore` for a feature the store
+            lacks, such as `branch_from_namespace` on pgvector; or `BranchAcrossStores`
+            when source and target resolve to different VectorStores
+
+            '
           content:
             application/json:
               schema:
@@ -2278,17 +2304,45 @@ components:
     TurbopufferBranchFromRequest:
       type: object
       additionalProperties: true
+      description: 'Branch the path namespace from a source: a copy-on-write clone
+        in constant time, independent of the source afterwards. The body must carry
+        no documents and no `schema`. The destination must be empty.
+
+        '
       properties:
         branch_from_namespace:
-          type: object
-          additionalProperties: true
+          description: 'The source namespace: its name (turbopuffer''s documented
+            form), or an object with `source_namespace` (the form turbopuffer-go sends).
+            The caller''s key needs read scope on the source, and the source must
+            resolve to the same VectorStore as the target.
+
+            '
+          oneOf:
+          - type: string
+          - type: object
+            additionalProperties: true
+            properties:
+              source_namespace:
+                type: string
+            required:
+            - source_namespace
       required:
       - branch_from_namespace
     TurbopufferCopyFromRequest:
       type: object
       additionalProperties: true
+      description: 'Copy a source namespace into the path namespace: a full, independent
+        copy. The body must carry no documents and no `schema`. The destination must
+        be empty.
+
+        '
       properties:
         copy_from_namespace:
+          description: 'The source namespace: its name, or an object with `source_namespace`
+            and optionally `source_api_key` and `source_region` for a copy from another
+            organization or region. A same-store copy needs read scope on the source.
+
+            '
           oneOf:
           - type: string
           - type: object

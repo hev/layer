@@ -71,6 +71,16 @@ pub enum AppError {
     /// A blob over its store's native value cap, with no S3 to hold it.
     #[error("Blob exceeds store cap: {0}")]
     BlobExceedsStoreCap(String),
+
+    /// A request body turbopuffer would also refuse, rejected before any
+    /// side effect (RFC 0124: a branch or copy combined with a write).
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
+    /// A branch or copy whose source resolves to a different VectorStore
+    /// than its target (RFC 0124 § routing).
+    #[error("Branch across stores: {0}")]
+    BranchAcrossStores(String),
 }
 
 #[cfg(feature = "pro")]
@@ -366,6 +376,22 @@ impl IntoResponse for AppError {
             AppError::BlobExceedsStoreCap(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "blob_exceeds_store_cap",
+                msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::BranchAcrossStores(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "BranchAcrossStores",
                 msg.clone(),
                 None,
                 None,

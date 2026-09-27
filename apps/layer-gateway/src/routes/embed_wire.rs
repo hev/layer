@@ -393,6 +393,40 @@ pub(crate) async fn commit_profiles(
     Ok(())
 }
 
+/// Give a new branch or copy its source's embedding profiles, so a
+/// gateway-served `embed` attribute embeds query text on the target as it
+/// does on the source (RFC 0124). Residue under the target's name is
+/// replaced, or removed when the source has none.
+pub(crate) async fn copy_profiles(
+    state: &AppState,
+    source: &str,
+    target: &str,
+) -> Result<(), AppError> {
+    let profiles = load_profiles(state, source).await?;
+    if profiles.is_empty() {
+        return clear_profiles(state, target).await;
+    }
+    save_profiles(state, target, &profiles).await
+}
+
+/// Remove any embedding profiles held under `namespace`.
+pub(crate) async fn clear_profiles(state: &AppState, namespace: &str) -> Result<(), AppError> {
+    let key = profile_key(namespace);
+    match state.s3.delete_key(&key).await {
+        Ok(()) => {}
+        Err(error) if error.is_not_configured() => {}
+        Err(error) => {
+            return Err(AppError::Upstream(format!(
+                "delete embedding profiles {key}: {error}"
+            )))
+        }
+    }
+    state
+        .wire_embedding_profiles
+        .insert(namespace.to_string(), Vec::new());
+    Ok(())
+}
+
 pub(crate) fn metadata_has_embed_schema(metadata: &Value) -> bool {
     metadata
         .get("schema")

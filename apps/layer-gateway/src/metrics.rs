@@ -134,6 +134,7 @@ pub struct LayerMetrics {
     list_duration: HistogramVec,
     query_shape_total: IntCounterVec,
     multi_query_total: IntCounterVec,
+    namespace_branch_total: IntCounterVec,
     multi_query_legs: HistogramVec,
     multi_query_upstream_calls: HistogramVec,
     hybrid_text_total: IntCounterVec,
@@ -301,6 +302,12 @@ impl LayerMetrics {
             "hevlayer_multi_query_total",
             "Multi-query requests by namespace and status.",
             &["namespace", "store_kind", "status"],
+        );
+        let namespace_branch_total = counter(
+            &registry,
+            "hevlayer_namespace_branch_total",
+            "Namespace branches and copies through the gateway by store and outcome.",
+            &["store_kind", "store_ref", "op", "outcome"],
         );
         let multi_query_legs = histogram(
             &registry,
@@ -639,6 +646,7 @@ impl LayerMetrics {
             list_duration,
             query_shape_total,
             multi_query_total,
+            namespace_branch_total,
             multi_query_legs,
             multi_query_upstream_calls,
             hybrid_text_total,
@@ -832,6 +840,20 @@ impl LayerMetrics {
         self.multi_query_upstream_calls
             .with_label_values(&[&namespace, &store_kind])
             .observe(upstream_calls as f64);
+    }
+
+    /// One branch or copy (`op`) through the gateway. Each turbopuffer branch
+    /// carries a flat fee, so this is a cost signal as well as usage.
+    pub fn observe_namespace_branch(
+        &self,
+        store_kind: &str,
+        store_ref: &str,
+        op: &str,
+        outcome: &str,
+    ) {
+        self.namespace_branch_total
+            .with_label_values(&[store_kind, store_ref, op, outcome])
+            .inc();
     }
 
     /// `tokens` is observed only when the expansion got far enough to
@@ -1578,6 +1600,24 @@ impl TurbopufferClient for MetricsTurbopufferClient {
 
     fn requires_native_wire(&self, namespace: &str) -> bool {
         self.inner.requires_native_wire(namespace)
+    }
+
+    fn capabilities(&self) -> vectorstore_core::capabilities::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn capabilities_for_namespace(
+        &self,
+        namespace: &str,
+    ) -> vectorstore_core::capabilities::Capabilities {
+        self.inner.capabilities_for_namespace(namespace)
+    }
+
+    fn store_capabilities(
+        &self,
+        store: &str,
+    ) -> Option<vectorstore_core::capabilities::Capabilities> {
+        self.inner.store_capabilities(store)
     }
 
     fn blob_storage(&self, namespace: &str) -> vectorstore_core::capabilities::BlobStorage {

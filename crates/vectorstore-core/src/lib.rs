@@ -3,6 +3,7 @@ pub mod capabilities;
 #[cfg(feature = "embedded-engine")]
 pub mod embedded_search;
 pub mod models;
+pub mod namespace_pattern;
 #[cfg(feature = "pgvector")]
 pub mod pgvector;
 pub mod pgvector_capabilities;

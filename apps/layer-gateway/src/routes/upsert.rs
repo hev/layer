@@ -6,12 +6,13 @@ use axum::body::{Body, Bytes};
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde_json::{Map, Value};
 use tracing::warn;
 
+use crate::auth::CallerGrant;
 use crate::clients::turbopuffer::{
     PatchDoc, TurbopufferPassthroughResponse, UpsertDoc, UPSERTED_AT_ATTR,
 };
@@ -95,8 +96,22 @@ pub async fn upsert_or_delete(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
+    grant: Option<Extension<CallerGrant>>,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    // Branch and copy bodies are classified before anything can rewrite
+    // them, and forwarded byte-for-byte on their own path (RFC 0124).
+    if let Some(classified) = crate::routes::branch::classify(&body) {
+        return crate::routes::branch::branch_or_copy(
+            state,
+            &namespace,
+            &uri,
+            grant.as_ref().map(|Extension(grant)| grant),
+            classified,
+            body,
+        )
+        .await;
+    }
     if state.turbopuffer().requires_native_wire(&namespace) {
         let mut ids = Vec::new();
         for key in ["upsert_rows", "deletes"] {

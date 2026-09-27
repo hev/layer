@@ -242,6 +242,19 @@ pub trait TurbopufferClient: Send + Sync {
         crate::capabilities::UNDECLARED
     }
 
+    /// The capabilities of the store `namespace` resolves to. Routers answer
+    /// for that store; a single store answers for itself.
+    fn capabilities_for_namespace(&self, _namespace: &str) -> crate::capabilities::Capabilities {
+        self.capabilities()
+    }
+
+    /// The capabilities of a configured VectorStore by name. `None` when this
+    /// client does not know the store. A single store does not know its own
+    /// resource name, so only routers answer.
+    fn store_capabilities(&self, _store: &str) -> Option<crate::capabilities::Capabilities> {
+        None
+    }
+
     /// Where this store keeps blob bytes for `namespace`. Routers answer for
     /// the store the namespace resolves to.
     fn blob_storage(&self, _namespace: &str) -> crate::capabilities::BlobStorage {
@@ -557,11 +570,14 @@ impl RoutingTurbopufferClient {
     ) -> Result<Arc<dyn TurbopufferClient>, TurbopufferError> {
         let store_name = namespace
             .and_then(|namespace| {
-                self.namespace_store_refs
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(namespace)
-                    .cloned()
+                crate::namespace_pattern::resolve(
+                    &self
+                        .namespace_store_refs
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    namespace,
+                )
+                .cloned()
             })
             .unwrap_or_else(|| self.default_store.clone());
 
@@ -613,6 +629,17 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     fn requires_native_wire(&self, namespace: &str) -> bool {
         self.client_for_namespace(Some(namespace))
             .is_ok_and(|client| client.requires_native_wire(namespace))
+    }
+
+    fn capabilities_for_namespace(&self, namespace: &str) -> crate::capabilities::Capabilities {
+        self.client_for_namespace(Some(namespace))
+            .map_or(crate::capabilities::UNDECLARED, |client| {
+                client.capabilities_for_namespace(namespace)
+            })
+    }
+
+    fn store_capabilities(&self, store: &str) -> Option<crate::capabilities::Capabilities> {
+        self.clients.get(store).map(|client| client.capabilities())
     }
 
     fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
@@ -1742,6 +1769,20 @@ pub struct MockTurbopufferClient {
     ranked_query_active: AtomicUsize,
     ranked_query_max_active: AtomicUsize,
     warm_hints: tokio::sync::RwLock<HashMap<String, u64>>,
+    /// Every body posted to `POST /v2/namespaces/{namespace}` through
+    /// `passthrough`, with its path and query, in arrival order.
+    write_requests: std::sync::Mutex<Vec<MockWriteRequest>>,
+    /// The declaration this mock reports; turbopuffer's unless a test
+    /// stands the mock in for another store kind.
+    declared: crate::capabilities::Capabilities,
+}
+
+/// One namespace write the mock received through `passthrough`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MockWriteRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub body: Option<Value>,
 }
 
 struct CounterGuard<'a> {
@@ -1799,7 +1840,24 @@ impl MockTurbopufferClient {
             ranked_query_active: AtomicUsize::new(0),
             ranked_query_max_active: AtomicUsize::new(0),
             warm_hints: tokio::sync::RwLock::new(HashMap::new()),
+            write_requests: std::sync::Mutex::new(Vec::new()),
+            declared: TURBOPUFFER_CAPABILITIES,
         }
+    }
+
+    /// Report `capabilities` instead of turbopuffer's, so a gateway test can
+    /// exercise a capability gate for another store kind without its backend.
+    pub fn with_capabilities(mut self, capabilities: crate::capabilities::Capabilities) -> Self {
+        self.declared = capabilities;
+        self
+    }
+
+    /// The namespace writes received through `passthrough`, oldest first.
+    pub fn write_requests(&self) -> Vec<MockWriteRequest> {
+        self.write_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Seed a namespace so it shows up in the upstream `/v1/namespaces`
@@ -1975,7 +2033,7 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
     fn capabilities(&self) -> crate::capabilities::Capabilities {
-        TURBOPUFFER_CAPABILITIES
+        self.declared
     }
 
     fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
@@ -2065,7 +2123,21 @@ impl TurbopufferClient for MockTurbopufferClient {
                 });
             }
         }
-        let body = mock_passthrough(self, method, path, query, body).await?;
+        if let ("POST", ["v2", "namespaces", _]) = (method, parts.as_slice()) {
+            self.write_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(MockWriteRequest {
+                    path: path.to_string(),
+                    query: query.map(str::to_string),
+                    body: body.clone(),
+                });
+        }
+        let body = match mock_passthrough(self, method, path, query, body).await {
+            Ok(body) => body,
+            Err(TurbopufferError::Response(response)) => return Ok(response),
+            Err(error) => return Err(error),
+        };
         let bytes =
             serde_json::to_vec(&body).map_err(|e| TurbopufferError::Other(e.to_string()))?;
         Ok(TurbopufferPassthroughResponse {
@@ -2528,6 +2600,15 @@ impl TurbopufferClient for MockTurbopufferClient {
         if let Some(msg) = self.head_failure.read().await.get(namespace).cloned() {
             return Err(TurbopufferError::Other(msg));
         }
+        // A blob set exists once a blob is stored in it, as upstream: the
+        // branch path asks before branching one alongside its namespace.
+        if namespace.ends_with(&blob_set_namespace(""))
+            && !self.docs.read().await.contains_key(namespace)
+        {
+            return Err(TurbopufferError::NotFound(format!(
+                "404 Not Found: namespace '{namespace}' was not found"
+            )));
+        }
         if let Some(raw) = self.metadata_overrides.read().await.get(namespace).cloned() {
             return Ok(parse_metadata_body(raw));
         }
@@ -2670,6 +2751,54 @@ async fn mock_passthrough(
             method, path
         ))),
     }
+}
+
+/// The source namespace a `branch_from_namespace` or `copy_from_namespace`
+/// value names: turbopuffer's string form, or `{"source_namespace": …}`.
+pub fn branch_source_namespace(value: &Value) -> Option<String> {
+    match value {
+        Value::String(source) => Some(source.clone()),
+        Value::Object(object) => object
+            .get("source_namespace")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn mock_response(status: u16, message: String) -> TurbopufferError {
+    TurbopufferError::Response(TurbopufferPassthroughResponse {
+        status,
+        content_type: Some("application/json".to_string()),
+        body: serde_json::to_vec(&serde_json::json!({"status": "error", "error": message}))
+            .expect("static response serializes"),
+    })
+}
+
+/// Branch or copy as turbopuffer does: the destination must be empty, the
+/// source must exist, and the two are independent afterwards.
+async fn mock_clone_namespace(
+    client: &MockTurbopufferClient,
+    source: &str,
+    target: &str,
+) -> Result<(), TurbopufferError> {
+    let mut docs = client.docs.write().await;
+    if docs.get(target).is_some_and(|rows| !rows.is_empty()) {
+        return Err(mock_response(
+            400,
+            format!("destination namespace {target} must be empty"),
+        ));
+    }
+    let Some(rows) = docs.get(source).cloned() else {
+        return Err(mock_response(404, format!("namespace {source} not found")));
+    };
+    docs.insert(target.to_string(), rows);
+    drop(docs);
+    let mut vectors = client.vectors.write().await;
+    if let Some(source_vectors) = vectors.get(source).cloned() {
+        vectors.insert(target.to_string(), source_vectors);
+    }
+    Ok(())
 }
 
 async fn mock_write_body(
@@ -2820,8 +2949,12 @@ async fn mock_write_body(
         }
     }
 
-    if obj.contains_key("branch_from_namespace") || obj.contains_key("copy_from_namespace") {
-        client.ensure_namespace(namespace).await;
+    if let Some(source) = ["branch_from_namespace", "copy_from_namespace"]
+        .iter()
+        .find_map(|key| obj.get(*key))
+        .and_then(branch_source_namespace)
+    {
+        mock_clone_namespace(client, &source, namespace).await?;
     }
 
     if let Some(filter) = obj.get("delete_by_filter") {

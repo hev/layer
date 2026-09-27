@@ -126,6 +126,36 @@ pub(crate) async fn cleanup_namespace_state(
     state: &AppState,
     namespace: &str,
 ) -> NamespaceCleanupOutcome {
+    let mut outcome = reset_namespace_layer_state(state, namespace).await;
+
+    if let Some(index_deleter) = &state.index_deleter {
+        if let Err(e) = index_deleter.delete_index_for_namespace(namespace).await {
+            outcome
+                .errors
+                .push(format!("Index CR garbage collection failed: {e}"));
+        }
+    }
+
+    if !outcome.errors.is_empty() {
+        warn!(
+            namespace = %namespace,
+            errors = ?outcome.errors,
+            "Namespace hard-delete local cleanup was incomplete"
+        );
+    }
+
+    outcome
+}
+
+/// Drop the Layer state held under a namespace's name outside the store:
+/// Aerospike cache sets and the S3 prefixes for snapshots, checkpoints,
+/// history and shard manifests. Unlike a hard delete it leaves the Index
+/// CR alone. A new branch runs this so it never inherits a deleted
+/// namespace's residue (RFC 0124).
+pub(crate) async fn reset_namespace_layer_state(
+    state: &AppState,
+    namespace: &str,
+) -> NamespaceCleanupOutcome {
     let mut outcome = NamespaceCleanupOutcome::default();
 
     // Generation 0 means no cache client has ever been part of this process
@@ -165,6 +195,15 @@ pub(crate) async fn cleanup_namespace_state(
         }
     }
 
+    if state.s3.is_configured() {
+        let key = crate::lineage::lineage_key(namespace);
+        if let Err(e) = state.s3.delete_keys(std::slice::from_ref(&key)).await {
+            outcome
+                .errors
+                .push(format!("S3 lineage purge for '{key}' failed: {e}"));
+        }
+    }
+
     let purges = namespace_s3_prefixes(namespace)
         .into_iter()
         .map(|prefix| async move {
@@ -178,22 +217,6 @@ pub(crate) async fn cleanup_namespace_state(
                 .errors
                 .push(format!("S3 purge for prefix '{prefix}' failed: {e}")),
         }
-    }
-
-    if let Some(index_deleter) = &state.index_deleter {
-        if let Err(e) = index_deleter.delete_index_for_namespace(namespace).await {
-            outcome
-                .errors
-                .push(format!("Index CR garbage collection failed: {e}"));
-        }
-    }
-
-    if !outcome.errors.is_empty() {
-        warn!(
-            namespace = %namespace,
-            errors = ?outcome.errors,
-            "Namespace hard-delete local cleanup was incomplete"
-        );
     }
 
     outcome

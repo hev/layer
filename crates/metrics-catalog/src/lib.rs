@@ -392,6 +392,15 @@ const CATALOG: &[MetricDoc] = &[
         alert: None,
     },
     MetricDoc {
+        name: "hevlayer_namespace_branch_total",
+        kind: MetricKind::Counter,
+        family: MetricFamily::Storage,
+        labels: &["store_kind", "store_ref", "op", "outcome"],
+        description: "Namespace branches and copies through the gateway by store and outcome.",
+        example_promql: "sum by (store_ref, op, outcome) (increase(hevlayer_namespace_branch_total[1d]))",
+        alert: None,
+    },
+    MetricDoc {
         name: "hevlayer_multi_query_legs",
         kind: MetricKind::Histogram,
         family: MetricFamily::Query,

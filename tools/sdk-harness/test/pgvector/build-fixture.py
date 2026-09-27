@@ -217,6 +217,7 @@ for key, value, feature in [
     ("delete_by_filter", ["n", "Eq", 1], "delete_by_filter"),
     ("patch_condition", ["n", "Eq", 1], "conditional_writes"),
     ("copy_from_namespace", "other", "copy_from_namespace"),
+    ("branch_from_namespace", "other", "branch_from_namespace"),
     ("distance_metric", "dot_product", "distance_metric"),
 ]:
     add(

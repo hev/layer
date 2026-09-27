@@ -492,7 +492,7 @@ export type TurbopufferWriteRequest = Record<string, unknown>;
 
 export interface TurbopufferBranchFromRequest {
   [key: string]: unknown;
-  branch_from_namespace: Record<string, unknown>;
+  branch_from_namespace: string | Record<string, unknown>;
 }
 
 export interface TurbopufferCopyFromRequest {

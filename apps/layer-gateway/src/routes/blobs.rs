@@ -152,8 +152,36 @@ fn blob_storage(state: &AppState, namespace: &str) -> BlobStorage {
 
 /// Read a blob from its durable backend, skipping the cache. A native store
 /// is asked first; S3 still answers for blobs over the store's cap and for
-/// blobs written before the store held bytes.
+/// blobs written before the store held bytes. S3 cannot branch, so a branch
+/// reads an S3 blob it inherited under its ancestors' prefixes (RFC 0124).
 pub(crate) async fn read_durable_blob(
+    state: &AppState,
+    namespace: &str,
+    sha256: &str,
+) -> Result<Option<Vec<u8>>, AppError> {
+    if let Some(bytes) = read_own_durable_blob(state, namespace, sha256).await? {
+        return Ok(Some(bytes));
+    }
+    if !state.s3.is_configured() {
+        return Ok(None);
+    }
+    for ancestor in crate::lineage::read_lineage(state, namespace)
+        .await
+        .ancestors
+    {
+        if let Some(bytes) = state
+            .s3
+            .get(&blob_s3_key(&ancestor, sha256))
+            .await
+            .map_err(|e| AppError::from_s3(e, "read blob from S3"))?
+        {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+async fn read_own_durable_blob(
     state: &AppState,
     namespace: &str,
     sha256: &str,

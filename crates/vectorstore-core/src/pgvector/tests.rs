@@ -594,3 +594,49 @@ async fn schema_embed_is_rejected_as_schema_embed() {
         "UnsupportedByStore: pgvector: schema.embed"
     );
 }
+
+/// RFC 0124: a branch-only body gets the branch-named 422, never an emulated
+/// copy, and the capability row says so. The gateway strips the SDK's
+/// `stainless_overload` before dispatch, so the adapter sees this body.
+#[tokio::test]
+async fn branch_from_namespace_is_the_named_422() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr130-branch-test".into(),
+    };
+    for (body, feature) in [
+        (
+            json!({"branch_from_namespace": "trunk"}),
+            "branch_from_namespace",
+        ),
+        (
+            json!({"branch_from_namespace": {"source_namespace": "trunk"}}),
+            "branch_from_namespace",
+        ),
+        (
+            json!({"copy_from_namespace": "trunk"}),
+            "copy_from_namespace",
+        ),
+    ] {
+        let response = client
+            .passthrough("POST", "/v2/namespaces/wt-1", None, Some(body))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 422);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"], "UnsupportedByStore");
+        assert_eq!(body["feature"], feature, "{body}");
+        assert_eq!(
+            body["message"],
+            format!("UnsupportedByStore: pgvector: {feature}"),
+            "{body}"
+        );
+    }
+    let branch = client
+        .capabilities()
+        .get(crate::capabilities::WireFeature::Branch);
+    assert_eq!(branch.support, crate::capabilities::Support::Unsupported);
+    assert_eq!(branch.note, crate::capabilities::NO_NATIVE_BRANCH);
+}

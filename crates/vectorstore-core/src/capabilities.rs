@@ -191,6 +191,11 @@ impl Coverage {
     }
 }
 
+/// Cell note for a store with no native namespace branch (RFC 0124). The
+/// gateway returns `422 UnsupportedByStore` and never emulates one with a copy.
+pub const NO_NATIVE_BRANCH: &str =
+    "No native namespace branching; the gateway does not emulate one.";
+
 /// Cell note for a store that serves hybrid only through `HybridText`.
 pub const MULTI_QUERY_USE_HYBRID_TEXT: &str =
     "422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator";
@@ -286,6 +291,78 @@ impl Capabilities {
             self.kind,
             feature.id()
         )))
+    }
+}
+
+impl Capabilities {
+    /// Whether this build declares the store at all.
+    pub fn declared(self) -> bool {
+        self.kind != UNDECLARED.kind
+    }
+
+    /// The runtime report (RFC 0117 `CapabilitiesReport`): every wire
+    /// feature, both hybrid routes and the schema limits, for the store
+    /// resource `store_name`. Undeclared stores report `undeclared` cells.
+    pub fn report(self, store_name: &str) -> serde_json::Value {
+        let declared = self.declared();
+        let cell = |coverage: Coverage| {
+            if declared {
+                serde_json::json!({"support": coverage.support, "note": coverage.note})
+            } else {
+                serde_json::json!({"support": "undeclared", "note": ""})
+            }
+        };
+        let features: Vec<serde_json::Value> = WireFeature::ALL
+            .iter()
+            .map(|&feature| {
+                let mut entry = serde_json::json!({
+                    "id": feature.id(),
+                    "label": feature.label(),
+                    "page": feature.page(),
+                });
+                merge(&mut entry, cell(self.get(feature)));
+                entry
+            })
+            .collect();
+        let hybrid_routes: Vec<serde_json::Value> = HybridRoute::ALL
+            .iter()
+            .map(|&route| {
+                let mut entry = serde_json::json!({
+                    "route": route.id(),
+                    "feature": route.feature().id(),
+                });
+                merge(&mut entry, cell(self.hybrid_route(route)));
+                entry
+            })
+            .collect();
+        let limits = if declared {
+            serde_json::json!({
+                "embed": cell(self.limits.embed),
+                "max_gateway_embed_attributes": self.limits.max_gateway_embed_attributes,
+                "max_full_text_search_fields": self.limits.max_full_text_search_fields,
+                "max_vector_fields": self.limits.max_vector_fields,
+            })
+        } else {
+            serde_json::json!({
+                "embed": cell(self.limits.embed),
+                "max_gateway_embed_attributes": null,
+                "max_full_text_search_fields": null,
+                "max_vector_fields": null,
+            })
+        };
+        serde_json::json!({
+            "store": {"name": store_name, "kind": self.kind},
+            "declared": declared,
+            "features": features,
+            "hybrid_routes": hybrid_routes,
+            "schema_limits": limits,
+        })
+    }
+}
+
+fn merge(target: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(target), serde_json::Value::Object(extra)) = (target.as_object_mut(), extra) {
+        target.extend(extra);
     }
 }
 

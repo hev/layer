@@ -32,6 +32,38 @@ impl AuthenticatedApiKey {
 #[allow(dead_code)]
 pub trait MintedKeyVerifier: Send + Sync {}
 
+/// What the caller's key was granted, kept on the request so a handler can
+/// authorize a second namespace named in the body (RFC 0124: the source of
+/// a branch or copy). Absent in open and `deriveFromStore` modes.
+#[derive(Clone)]
+pub enum CallerGrant {
+    /// A declared or environment key: scopes, every namespace.
+    Declared(Vec<ApiScope>),
+}
+
+/// Require `scope` on `namespace` for the caller. `None` (open or
+/// `deriveFromStore` mode) allows.
+pub fn authorize_namespace(
+    _state: &AppState,
+    grant: Option<&CallerGrant>,
+    scope: ApiScope,
+    namespace: &str,
+) -> Result<(), crate::error::AppError> {
+    match grant {
+        None => Ok(()),
+        Some(CallerGrant::Declared(scopes)) => {
+            if scopes.contains(&ApiScope::Admin) || scopes.contains(&scope) {
+                Ok(())
+            } else {
+                Err(crate::error::AppError::Forbidden(format!(
+                    "the key needs {} scope on namespace `{namespace}`",
+                    scope.as_str()
+                )))
+            }
+        }
+    }
+}
+
 pub async fn require_api_key(
     State(state): State<Arc<AppState>>,
     mut request: Request<axum::body::Body>,
@@ -77,6 +109,9 @@ pub async fn require_api_key(
             if !authenticated.has_scope(required_scope) {
                 return insufficient_scope(required_scope);
             }
+            request
+                .extensions_mut()
+                .insert(CallerGrant::Declared(key.scopes.clone()));
             request.extensions_mut().insert(authenticated);
             return next.run(request).await;
         }

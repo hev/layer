@@ -432,7 +432,7 @@ class TurbopufferWriteRequest(BaseModel):
 
 class TurbopufferBranchFromRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    branch_from_namespace: dict[str, Any]
+    branch_from_namespace: str | dict[str, Any]
 
 class TurbopufferCopyFromRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
