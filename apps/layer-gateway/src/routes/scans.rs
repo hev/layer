@@ -4554,6 +4554,7 @@ mod tests {
         let rows: Vec<QueryResult> = (0..5)
             .map(|i| QueryResult {
                 id: format!("d-{i}"),
+                numeric_id: false,
                 dist: Some(i as f64),
                 attributes: HashMap::new(),
             })
@@ -4569,6 +4570,7 @@ mod tests {
         let rows: Vec<QueryResult> = (0..TPUF_TOP_K_MAX as usize)
             .map(|i| QueryResult {
                 id: format!("d-{:06}", i),
+                numeric_id: false,
                 dist: Some(i as f64 / TPUF_TOP_K_MAX as f64),
                 attributes: HashMap::new(),
             })
@@ -4586,16 +4588,19 @@ mod tests {
         let rows = vec![
             QueryResult {
                 id: "d-1".into(),
+                numeric_id: false,
                 dist: Some(0.1),
                 attributes: HashMap::new(),
             },
             QueryResult {
                 id: "d-2".into(),
+                numeric_id: false,
                 dist: Some(0.2),
                 attributes: HashMap::new(),
             },
             QueryResult {
                 id: "d-3".into(),
+                numeric_id: false,
                 dist: Some(0.3),
                 attributes: HashMap::new(),
             },
@@ -4612,6 +4617,7 @@ mod tests {
         let rows: Vec<QueryResult> = (0..TPUF_TOP_K_MAX as usize)
             .map(|i| QueryResult {
                 id: format!("d-{:06}", i),
+                numeric_id: false,
                 dist: Some(if i < 3 { 0.1 + i as f64 * 0.05 } else { 0.9 }),
                 attributes: HashMap::new(),
             })
@@ -4628,6 +4634,7 @@ mod tests {
         let rows: Vec<QueryResult> = (0..TPUF_TOP_K_MAX as usize)
             .map(|i| QueryResult {
                 id: format!("d-{:06}", i),
+                numeric_id: false,
                 dist: Some(i as f64 / TPUF_TOP_K_MAX as f64),
                 attributes: HashMap::new(),
             })

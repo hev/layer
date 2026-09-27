@@ -921,6 +921,7 @@ fn search_results_to_query_results(
             );
             Some(QueryResult {
                 id,
+                numeric_id: false,
                 dist,
                 attributes,
             })

@@ -491,7 +491,11 @@ fn log_routed_history(
     let top_result_ids = rows
         .iter()
         .take(10)
-        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|row| {
+            row.get("id")
+                .and_then(vectorstore_core::models::id_from_wire)
+                .map(|(id, _)| id)
+        })
         .collect();
     let entry = SearchHistoryEntry {
         timestamp,

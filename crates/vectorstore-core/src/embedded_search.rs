@@ -128,6 +128,7 @@ impl EmbeddedSearchClient {
                     }
                     QueryResult {
                         id: row.id.to_string(),
+                        numeric_id: false,
                         dist: Some(f64::from(row.score)),
                         attributes: select_attributes(attributes, include_attributes),
                     }

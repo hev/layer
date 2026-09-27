@@ -29,10 +29,38 @@ pub struct DocumentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub id: String,
+    /// True when the store returned `id` as an unsigned integer. The gateway
+    /// keys rows by string internally and writes the integer back out, so a
+    /// Turbopuffer client sees the id type it wrote.
+    #[serde(skip)]
+    pub numeric_id: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dist: Option<f64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attributes: HashMap<String, Value>,
+}
+
+impl QueryResult {
+    /// The id in its wire form: a JSON number for integer ids, else a string.
+    pub fn wire_id(&self) -> Value {
+        if self.numeric_id {
+            if let Ok(id) = self.id.parse::<u64>() {
+                return Value::from(id);
+            }
+        }
+        Value::String(self.id.clone())
+    }
+}
+
+/// Reads a document id off a store row. Turbopuffer ids are unsigned
+/// integers, UUIDs or strings; integers come back as JSON numbers. Returns
+/// the id as a string and whether it was an integer on the wire.
+pub fn id_from_wire(value: &Value) -> Option<(String, bool)> {
+    match value {
+        Value::String(id) => Some((id.clone(), false)),
+        Value::Number(id) => id.as_u64().map(|id| (id.to_string(), true)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

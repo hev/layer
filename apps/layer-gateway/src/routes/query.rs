@@ -499,7 +499,7 @@ pub(crate) fn query_results_to_rows(results: &[QueryResult]) -> Vec<Value> {
         .iter()
         .map(|result| {
             let mut row = serde_json::Map::new();
-            row.insert("id".to_string(), Value::String(result.id.clone()));
+            row.insert("id".to_string(), result.wire_id());
             if let Some(dist) = result.dist {
                 row.insert("$dist".to_string(), Value::from(dist));
             }
@@ -1014,16 +1014,19 @@ mod tests {
         let mut rows = [
             QueryResult {
                 id: "b".into(),
+                numeric_id: false,
                 dist: Some(0.5),
                 attributes: Default::default(),
             },
             QueryResult {
                 id: "a".into(),
+                numeric_id: false,
                 dist: Some(0.5),
                 attributes: Default::default(),
             },
             QueryResult {
                 id: "c".into(),
+                numeric_id: false,
                 dist: Some(0.1),
                 attributes: Default::default(),
             },

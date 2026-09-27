@@ -573,7 +573,11 @@ fn top_result_ids_from_multi_response(body: &Value) -> Vec<String> {
                 .into_iter()
                 .flatten()
         })
-        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|row| {
+            row.get("id")
+                .and_then(vectorstore_core::models::id_from_wire)
+                .map(|(id, _)| id)
+        })
         .take(10)
         .collect()
 }

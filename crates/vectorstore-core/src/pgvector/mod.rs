@@ -943,6 +943,7 @@ impl TurbopufferClient for PgvectorClient {
                 let d = doc(r);
                 crate::models::QueryResult {
                     id: wire_id,
+                    numeric_id: false,
                     attributes: d.attributes,
                     dist,
                 }

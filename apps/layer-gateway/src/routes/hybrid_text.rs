@@ -1216,9 +1216,9 @@ fn rrf_fuse_legs_with_breakdown(
     });
     ranked
         .into_iter()
-        .map(|(id, entry)| {
+        .map(|(_, entry)| {
             let mut obj = Map::new();
-            obj.insert("id".to_string(), Value::String(id.clone()));
+            obj.insert("id".to_string(), entry.row.wire_id());
             obj.insert("$score".to_string(), Value::from(entry.score));
             for (key, value) in &entry.row.attributes {
                 obj.insert(key.clone(), value.clone());
@@ -1576,7 +1576,11 @@ pub(crate) fn log_hybrid_history(
         .rows
         .iter()
         .take(10)
-        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|row| {
+            row.get("id")
+                .and_then(vectorstore_core::models::id_from_wire)
+                .map(|(id, _)| id)
+        })
         .collect();
     let entry = SearchHistoryEntry {
         timestamp,
@@ -1966,6 +1970,7 @@ mod tests {
     fn result(id: &str) -> QueryResult {
         QueryResult {
             id: id.to_string(),
+            numeric_id: false,
             dist: Some(0.0),
             attributes: Default::default(),
         }

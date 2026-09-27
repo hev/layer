@@ -84,7 +84,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::models::{
-    DocumentPage, DocumentResponse, FieldValueResult, IncludeAttributes, QueryResult,
+    id_from_wire, DocumentPage, DocumentResponse, FieldValueResult, IncludeAttributes, QueryResult,
 };
 
 tokio::task_local! {
@@ -902,7 +902,7 @@ fn rows_from_query_body(resp_body: &Value) -> Vec<QueryResult> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|row| {
-            let id = row.get("id")?.as_str()?.to_string();
+            let (id, numeric_id) = id_from_wire(row.get("id")?)?;
             let dist = row
                 .get("$dist")
                 .and_then(|v| v.as_f64())
@@ -917,6 +917,7 @@ fn rows_from_query_body(resp_body: &Value) -> Vec<QueryResult> {
             }
             Some(QueryResult {
                 id,
+                numeric_id,
                 dist,
                 attributes,
             })
@@ -1393,7 +1394,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .unwrap_or_default();
 
         Ok(rows.into_iter().find_map(|row| {
-            let row_id = row.get("id")?.as_str()?;
+            let (row_id, _) = id_from_wire(row.get("id")?)?;
             if row_id != id {
                 return None;
             }
@@ -1406,7 +1407,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
                 }
             }
             Some(DocumentResponse {
-                id: row_id.to_string(),
+                id: row_id,
                 attributes,
             })
         }))
@@ -1455,7 +1456,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         let mut result = HashMap::new();
         for row in rows {
-            if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+            if let Some((id, _)) = row.get("id").and_then(id_from_wire) {
                 let mut attributes = HashMap::new();
                 if let Some(obj) = row.as_object() {
                     for (k, v) in obj {
@@ -1464,13 +1465,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
                         }
                     }
                 }
-                result.insert(
-                    id.to_string(),
-                    DocumentResponse {
-                        id: id.to_string(),
-                        attributes,
-                    },
-                );
+                result.insert(id.clone(), DocumentResponse { id, attributes });
             }
         }
         Ok(result)
@@ -1518,7 +1513,13 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .unwrap_or_default();
 
         Ok(rows.into_iter().find_map(|row| {
-            if row.get("id").and_then(|v| v.as_str()) != Some(id) {
+            if row
+                .get("id")
+                .and_then(id_from_wire)
+                .map(|(row_id, _)| row_id)
+                .as_deref()
+                != Some(id)
+            {
                 return None;
             }
             let arr = row.get("vector")?.as_array()?;
@@ -1590,7 +1591,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
         let mut documents: Vec<DocumentResponse> = rows
             .into_iter()
             .filter_map(|row| {
-                let id = row.get("id")?.as_str()?.to_string();
+                let (id, _) = id_from_wire(row.get("id")?)?;
                 let mut attributes = HashMap::new();
                 if let Some(obj) = row.as_object() {
                     for (k, v) in obj {
@@ -2237,6 +2238,7 @@ impl TurbopufferClient for MockTurbopufferClient {
                     })
                     .map(|doc| QueryResult {
                         id: doc.id.clone(),
+                        numeric_id: false,
                         dist: Some(MOCK_DIST),
                         attributes: doc.attributes.clone(),
                     })
@@ -2344,6 +2346,7 @@ impl TurbopufferClient for MockTurbopufferClient {
                     })
                     .map(|doc| QueryResult {
                         id: doc.id.clone(),
+                        numeric_id: false,
                         // Deterministic per-id pseudo-score lets pagination tests
                         // assert "shard saturated → recurse with score-band filter".
                         dist: Some(mock_score(&doc.id)),
