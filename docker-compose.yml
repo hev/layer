@@ -26,7 +26,7 @@ services:
     # needs no account, key, GPU or download after the image pull. It is
     # reachable only from the gateway over the internal `embed` network: no
     # host port, and no route out of the machine.
-    image: ${EMBED_IMAGE:-hevlayer/layer-embed:edge}
+    image: ${EMBED_IMAGE:-hevlayer/layer-embed:0.7.1}
     restart: unless-stopped
     networks: [embed]
     healthcheck:
@@ -42,7 +42,7 @@ services:
       retries: 60
       start_period: 120s
   gateway:
-    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:0.6.0}
+    image: ${GATEWAY_IMAGE:-hevlayer/layer-gateway:0.7.1}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
