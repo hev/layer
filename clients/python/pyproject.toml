@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hevlayer"
-version = "0.7.2"
+version = "0.7.3-dev"
 description = "Typed async Python client for the hevlayer gateway"
 readme = "README.md"
 requires-python = ">=3.11"
