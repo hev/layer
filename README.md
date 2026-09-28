@@ -2,38 +2,35 @@
 
 > Generated from `hev/layer-pro`; [report issues](https://github.com/hev/layer/issues). Edits land upstream.
 
-Layer Community Edition is a local retrieval gateway over Postgres.
-You need Docker with Compose, Git, and curl; no account, API key, license,
-compiler, or client build.
+Layer Community Edition runs the retrieval gateway on your laptop with a local
+Postgres database or your existing Turbopuffer account. You'll need Docker with
+Compose, Git, and `curl`. The local database needs no account, API key, or
+license key.
 
 ## Start
 
 ```sh
 git clone https://github.com/hev/layer.git
 cd layer
-export TURBOPUFFER_API_KEY=""
 docker compose up -d --wait
-export LAYER_GATEWAY_URL="http://localhost:${GATEWAY_PORT:-8080}"
-export LAYER_NAMESPACE="${LAYER_NAMESPACE:-products}"
-curl --fail "$LAYER_GATEWAY_URL/health"
+curl --fail http://localhost:8080/health
 ```
 
-
-The Compose file runs the latest release; set
-`GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt into the development
-build. Data stays in a local Docker volume. To front an existing Turbopuffer
-account instead, export its key as `TURBOPUFFER_API_KEY` before starting and
-send it as the bearer token. See the
-[CE quickstart](https://hevlayer.com/docs/ce/quickstart) for SDK examples and
-both backends.
+The gateway listens on `localhost:8080`. Compose includes a Postgres database
+with pgvector and `pg_search`, which the gateway uses unless
+`TURBOPUFFER_API_KEY` is set in your shell. Setting the key selects Turbopuffer
+instead, and each request then needs
+`-H "Authorization: Bearer $TURBOPUFFER_API_KEY"`. The Compose file runs the
+latest release; set `GATEWAY_IMAGE=hevlayer/layer-gateway:edge` only to opt
+into the development build. See the
+[CE quickstart](https://hevlayer.com/docs/ce/quickstart) for both backends.
 
 ## Write
 
 The first write creates the namespace.
 
 ```sh
-curl --fail-with-body "$LAYER_GATEWAY_URL/v2/namespaces/$LAYER_NAMESPACE" \
-  -H "Authorization: Bearer $TURBOPUFFER_API_KEY" \
+curl --fail-with-body http://localhost:8080/v2/namespaces/products \
   -H 'Content-Type: application/json' \
   -d '{
     "distance_metric": "cosine_distance",
@@ -45,16 +42,13 @@ curl --fail-with-body "$LAYER_GATEWAY_URL/v2/namespaces/$LAYER_NAMESPACE" \
   }'
 ```
 
-
 ## Query
 
 ```sh
-curl --fail-with-body "$LAYER_GATEWAY_URL/v2/namespaces/$LAYER_NAMESPACE/query" \
-  -H "Authorization: Bearer $TURBOPUFFER_API_KEY" \
+curl --fail-with-body http://localhost:8080/v2/namespaces/products/query \
   -H 'Content-Type: application/json' \
   -d '{"rank_by": ["vector", "ANN", [1, 0, 0]], "top_k": 1, "include_attributes": true}'
 ```
-
 
 The first row has `id: "earbuds"` and `$dist: 0`.
 
