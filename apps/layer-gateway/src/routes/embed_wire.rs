@@ -1,9 +1,10 @@
 //! Validation and routing for Turbopuffer-compatible native embeddings.
 //!
 //! Native requests remain transparent on Turbopuffer stores. Autoscaler and
-//! Lattice requests (plus native requests targeting hev search) are resolved
-//! through their selected gateway provider and lowered to concrete vectors,
-//! so Layer-only serving policy and `embed` / `Embed` are never forwarded.
+//! Lattice requests (plus native requests targeting hev search or Postgres,
+//! which cannot embed) are resolved through their selected gateway provider
+//! and lowered to concrete vectors, so Layer-only serving policy and `embed` /
+//! `Embed` are never forwarded.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,6 +23,7 @@ use crate::embedding::{
 };
 use crate::error::AppError;
 use crate::AppState;
+use vectorstore_core::turbopuffer::EMBEDDING_PROFILES_KEY;
 
 const PROFILE_PREFIX: &str = "embedding-profiles";
 
@@ -43,8 +45,33 @@ impl ServingPreference {
         }
     }
 
-    fn gateway_served(self, search_store: bool) -> bool {
-        self != Self::Native || search_store
+    fn gateway_served(self, store: EmbedStore) -> bool {
+        self != Self::Native || store != EmbedStore::Native
+    }
+}
+
+/// How a namespace's store takes a schema `embed` declaration (RFC 0118).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedStore {
+    /// Turbopuffer: a `native` profile is forwarded and the store embeds.
+    Native,
+    /// hev search: the gateway embeds into the store's single `vector` field.
+    Search,
+    /// A native-wire store (Postgres): the gateway embeds into the profile's
+    /// target column, declared `[N]f32` without `ann`, and the store keeps the
+    /// profile in its registry beside the schema so it survives a restart.
+    NativeWire,
+}
+
+impl EmbedStore {
+    pub(crate) fn for_namespace(state: &AppState, namespace: &str) -> Self {
+        if state.namespace_uses_search_store(namespace) {
+            Self::Search
+        } else if state.turbopuffer().requires_native_wire(namespace) {
+            Self::NativeWire
+        } else {
+            Self::Native
+        }
     }
 }
 
@@ -74,6 +101,10 @@ pub struct EmbeddingProfile {
     /// namespace is re-indexed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_sha256: Option<String>,
+    /// The `embed` value the client wrote, kept only where the store holds
+    /// the profile (RFC 0118 step E) so `GET .../schema` can return it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    declaration: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,8 +177,36 @@ pub(crate) async fn prepare_write(
     state: &AppState,
     namespace: &str,
     body: &mut Value,
-    search_store: bool,
+    store: EmbedStore,
 ) -> Result<WritePreparation, AppError> {
+    if store == EmbedStore::NativeWire {
+        // Reserved for the gateway; a client value never reaches the store.
+        if let Some(body) = body.as_object_mut() {
+            body.remove(EMBEDDING_PROFILES_KEY);
+        }
+    }
+    let mut preparation = prepare_write_profiles(state, namespace, body, store).await?;
+    if store == EmbedStore::NativeWire {
+        if let Some(profiles) = preparation.profiles_to_save.as_deref() {
+            // Written in the store's own write transaction (RFC 0118 step E).
+            body.as_object_mut().expect("write body is object").insert(
+                EMBEDDING_PROFILES_KEY.to_string(),
+                serde_json::to_value(profiles).expect("profiles are JSON"),
+            );
+        }
+        preparation.requires_distance_check = false;
+    }
+    Ok(preparation)
+}
+
+async fn prepare_write_profiles(
+    state: &AppState,
+    namespace: &str,
+    body: &mut Value,
+    store: EmbedStore,
+) -> Result<WritePreparation, AppError> {
+    let native_wire = store == EmbedStore::NativeWire;
+    let route = format!("/v2/namespaces/{namespace}");
     let mut profiles = load_profiles(state, namespace).await?;
     let row_write = has_row_write(body.as_object());
     let had_persisted_profiles = profiles
@@ -181,6 +240,10 @@ pub(crate) async fn prepare_write(
                 .iter()
                 .find(|profile| profile.source == attribute)
                 .cloned();
+            if native_wire {
+                parsed.declaration = Some(embed.clone());
+                prepare_native_wire_profile(state, &route, &mut parsed, previous.as_ref()).await?;
+            }
             if parsed.serving == ServingPreference::Local {
                 match local_leg(state, &parsed.model) {
                     LocalLeg::Lattice => {
@@ -207,7 +270,7 @@ pub(crate) async fn prepare_write(
             if let Some(previous) = previous.as_ref() {
                 parsed.materialized = previous.materialized;
             }
-            let gateway_served = parsed.serving.gateway_served(search_store);
+            let gateway_served = parsed.serving.gateway_served(store);
             if gateway_served {
                 if previous.as_ref().is_some_and(|previous| {
                     previous.source == parsed.source
@@ -277,10 +340,13 @@ pub(crate) async fn prepare_write(
 
     let gateway_profiles = profiles
         .iter()
-        .filter(|profile| profile.serving.gateway_served(search_store))
+        .filter(|profile| profile.serving.gateway_served(store))
         .collect::<Vec<_>>();
 
     reject_source_patches(body, &gateway_profiles)?;
+    if native_wire {
+        reject_native_wire_shape(body, &route, &gateway_profiles)?;
+    }
 
     if gateway_profiles.is_empty() || !row_write {
         let requires_distance_check = native_embed_schema
@@ -301,11 +367,11 @@ pub(crate) async fn prepare_write(
                 || profiles
                     .iter()
                     .any(|profile| profile.serving != ServingPreference::Native)
-                || (profile_changed && search_store),
+                || (profile_changed && store != EmbedStore::Native),
             generated_chunk_attributes: false,
         });
     }
-    if search_store && gateway_profiles.len() > 1 {
+    if store == EmbedStore::Search && gateway_profiles.len() > 1 {
         return Err(AppError::Validation(
             "hev search currently supports one gateway-served embedding attribute per namespace"
                 .to_string(),
@@ -343,18 +409,18 @@ pub(crate) async fn prepare_write(
             &mut performance,
         )
         .await?;
-        apply_write_vectors(body, profile, &inputs.row_indices, &vectors, search_store)?;
+        apply_write_vectors(body, profile, &inputs.row_indices, &vectors, store)?;
     }
 
     let requires_distance_check = native_embed_schema
         || profiles
             .iter()
-            .any(|profile| profile.serving.gateway_served(search_store) && !profile.materialized);
+            .any(|profile| profile.serving.gateway_served(store) && !profile.materialized);
     let materialized_changed = profiles
         .iter()
-        .any(|profile| profile.serving.gateway_served(search_store) && !profile.materialized);
+        .any(|profile| profile.serving.gateway_served(store) && !profile.materialized);
     for profile in &mut profiles {
-        if profile.serving.gateway_served(search_store) {
+        if profile.serving.gateway_served(store) {
             profile.materialized = true;
         }
     }
@@ -446,7 +512,7 @@ pub(crate) async fn prepare_query(
     state: &AppState,
     namespace: &str,
     body: &mut Value,
-    search_store: bool,
+    store: EmbedStore,
 ) -> Result<QueryPreparation, AppError> {
     if !contains_embed_expression(body) {
         return Ok(QueryPreparation::default());
@@ -462,7 +528,7 @@ pub(crate) async fn prepare_query(
             state,
             namespace,
             rank_by,
-            search_store,
+            store,
             &profiles,
             &mut preparation,
             false,
@@ -476,7 +542,7 @@ pub(crate) async fn prepare_query(
                     state,
                     namespace,
                     rank_by,
-                    search_store,
+                    store,
                     &profiles,
                     &mut preparation,
                     false,
@@ -513,7 +579,7 @@ async fn prepare_rank_by(
     state: &AppState,
     namespace: &str,
     rank_by: &mut Value,
-    search_store: bool,
+    store: EmbedStore,
     profiles: &[EmbeddingProfile],
     preparation: &mut QueryPreparation,
     force_gateway: bool,
@@ -563,6 +629,7 @@ async fn prepare_rank_by(
                 layer_extensions: false,
                 materialized: true,
                 artifact_sha256: None,
+                declaration: None,
             });
     }
     if let Some(profile) = declared.as_ref() {
@@ -589,7 +656,7 @@ async fn prepare_rank_by(
         .as_ref()
         .map(|profile| profile.serving)
         .unwrap_or(ServingPreference::Native);
-    let gateway_served = serving.gateway_served(search_store);
+    let gateway_served = serving.gateway_served(store);
     if !gateway_served && !force_gateway {
         let resolved = explicit_model
             .map(|model| {
@@ -648,7 +715,7 @@ async fn prepare_rank_by(
             .as_ref()
             .map(|profile| profile.target.clone())
             .unwrap_or_else(|| {
-                if search_store || target == "vector" {
+                if store == EmbedStore::Search || target == "vector" {
                     "vector".to_string()
                 } else if target.starts_with("embed_") {
                     target.to_string()
@@ -680,7 +747,16 @@ async fn prepare_rank_by(
         artifact_sha256: declared
             .as_ref()
             .and_then(|profile| profile.artifact_sha256.clone()),
+        declaration: None,
     };
+    let mut profile = profile;
+    if store == EmbedStore::NativeWire && declared.is_none() {
+        // No stored profile: resolve `native` the way a declaration would.
+        resolve_native_wire_serving(state, &mut profile, None).await?;
+        if profile.serving == ServingPreference::Local {
+            pin_local_profile(state, &mut profile, None).await?;
+        }
+    }
     let text = apply_instruction(profile.instructions.query.as_deref(), &text);
     let vectors = resolve_vectors(
         state,
@@ -693,7 +769,7 @@ async fn prepare_rank_by(
     )
     .await?;
     rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
-    if search_store {
+    if store == EmbedStore::Search {
         rank_by[0] = Value::String("vector".to_string());
     } else {
         rank_by[0] = Value::String(profile.target.clone());
@@ -712,7 +788,7 @@ pub(crate) async fn resolve_auto_embed(
     namespace: &str,
     field: &str,
     embed: Value,
-    search_store: bool,
+    store: EmbedStore,
 ) -> Result<ResolvedQueryEmbed, AppError> {
     let profiles = load_profiles(state, namespace).await?;
     let mut preparation = QueryPreparation {
@@ -725,7 +801,7 @@ pub(crate) async fn resolve_auto_embed(
         state,
         namespace,
         &mut rank_by,
-        search_store,
+        store,
         &profiles,
         &mut preparation,
         true,
@@ -778,6 +854,7 @@ fn validate_embed(attribute: &str, embed: &Value) -> Result<EmbeddingProfile, Ap
                 layer_extensions: false,
                 materialized: false,
                 artifact_sha256: None,
+                declaration: None,
             })
         }
         Value::Object(options) => validate_embed_options(attribute, options),
@@ -905,6 +982,7 @@ fn validate_embed_options(
         layer_extensions,
         materialized: false,
         artifact_sha256: None,
+        declaration: None,
     })
 }
 
@@ -975,6 +1053,139 @@ async fn pin_local_profile(
     }
     parsed.dims = Some(pin.dimensions);
     parsed.artifact_sha256 = Some(pin.artifact_sha256);
+    Ok(())
+}
+
+/// RFC 0118 rules for a declaration on a store that cannot embed natively,
+/// all before any provider call: no chunking (rule 5), `native` resolved to a
+/// configured provider, and no model, dims or provider change once the
+/// namespace holds vectors (rule 9).
+async fn prepare_native_wire_profile(
+    state: &AppState,
+    route: &str,
+    parsed: &mut EmbeddingProfile,
+    previous: Option<&EmbeddingProfile>,
+) -> Result<(), AppError> {
+    if parsed.chunk.is_some() {
+        return Err(AppError::unsupported_feature(
+            "pgvector",
+            Some(route.to_string()),
+            "embed.chunk",
+            "chunked embedding writes more than one row shape",
+        ));
+    }
+    resolve_native_wire_serving(state, parsed, previous).await?;
+    if let Some(previous) = previous.filter(|previous| previous.materialized) {
+        let changed = previous.model != parsed.model
+            || previous.serving != parsed.serving
+            || parsed
+                .dims
+                .zip(previous.dims)
+                .is_some_and(|(dims, before)| dims != before);
+        if changed {
+            return Err(AppError::unsupported_feature(
+                "pgvector",
+                Some(route.to_string()),
+                "schema.embed",
+                format!(
+                    "attribute `{}` is already embedded with model `{}`; changing its model, dims or provider needs a new namespace",
+                    parsed.source, previous.model
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `serving.prefer: native` on a store that cannot embed (RFC 0118). The
+/// gateway resolves it once, when the attribute is declared, and the profile
+/// keeps the answer: the local embedder at `LAYER_EMBED_URL` when it lists the
+/// model, otherwise the configured Turbopuffer embedding provider. A stored
+/// profile for the same model keeps the provider it was indexed with.
+async fn resolve_native_wire_serving(
+    state: &AppState,
+    profile: &mut EmbeddingProfile,
+    previous: Option<&EmbeddingProfile>,
+) -> Result<(), AppError> {
+    if profile.serving != ServingPreference::Native {
+        return Ok(());
+    }
+    if let Some(previous) = previous.filter(|previous| previous.model == profile.model) {
+        profile.serving = previous.serving;
+        return Ok(());
+    }
+    if local_leg(state, &profile.model) == LocalLeg::Http {
+        if let Some(provider) = state.http_embedding_provider.as_ref() {
+            let serves = provider
+                .serves(&profile.model)
+                .await
+                .map_err(|error| map_embedding_provider_error(error, &profile.source))?;
+            if serves {
+                profile.serving = ServingPreference::Local;
+                return Ok(());
+            }
+        }
+    }
+    if state.embedding_provider.is_none() {
+        return Err(AppError::ServiceUnavailable(format!(
+            "schema attribute `{}`: this store cannot embed, and no configured provider serves model `{}`; set LAYER_EMBED_URL to an embedder that lists it, or configure a kind=turbopuffer VectorStore credential",
+            profile.source, profile.model
+        )));
+    }
+    Ok(())
+}
+
+/// RFC 0118 rules 6 and 7 on a store that cannot embed, before any provider
+/// call: one embedded attribute per namespace, and no client vector beside it.
+fn reject_native_wire_shape(
+    body: &Value,
+    route: &str,
+    profiles: &[&EmbeddingProfile],
+) -> Result<(), AppError> {
+    if profiles.len() > 1 {
+        return Err(AppError::unsupported_feature(
+            "pgvector",
+            Some(route.to_string()),
+            "schema.embed",
+            "one embedded attribute per namespace",
+        ));
+    }
+    let Some(profile) = profiles.first() else {
+        return Ok(());
+    };
+    let is_vector_type = |declaration: &Value| {
+        declaration
+            .as_str()
+            .or_else(|| declaration.get("type").and_then(Value::as_str))
+            .is_some_and(|kind| kind.starts_with('['))
+    };
+    let declares_vector = body
+        .get("schema")
+        .and_then(Value::as_object)
+        .is_some_and(|schema| {
+            schema
+                .iter()
+                .any(|(name, declaration)| *name != profile.target && is_vector_type(declaration))
+        });
+    let client_vector = profile.target != "vector"
+        && (body
+            .get("upsert_rows")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.get("vector").is_some_and(|vector| !vector.is_null()))
+            })
+            || body
+                .get("upsert_columns")
+                .is_some_and(|columns| columns.get("vector").is_some()));
+    if declares_vector || client_vector {
+        return Err(AppError::unsupported_feature(
+            "pgvector",
+            Some(route.to_string()),
+            "max_vector_fields",
+            "one vector field per namespace; this namespace's is its gateway-embedded attribute",
+        ));
+    }
     Ok(())
 }
 
@@ -1567,8 +1778,9 @@ fn apply_write_vectors(
     profile: &EmbeddingProfile,
     row_indices: &[usize],
     vectors: &[Vec<f64>],
-    search_store: bool,
+    store: EmbedStore,
 ) -> Result<(), AppError> {
+    let search_store = store == EmbedStore::Search;
     if let Some(rows) = body.get_mut("upsert_rows").and_then(Value::as_array_mut) {
         for (&row_index, vector) in row_indices.iter().zip(vectors) {
             let row = rows[row_index]
@@ -1611,11 +1823,22 @@ fn apply_write_vectors(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or_else(|| AppError::Validation("schema must be an object".to_string()))?;
-    if !search_store {
-        schema.insert(
-            profile.target.clone(),
-            json!({"type": format!("[{dims}]f32"), "ann": true}),
-        );
+    match store {
+        EmbedStore::Search => {}
+        // `ann` is outside the Postgres declaration allow-list, which would
+        // persist it forever; every `[N]f32` column there is HNSW-indexed.
+        EmbedStore::NativeWire => {
+            schema.insert(
+                profile.target.clone(),
+                json!({"type": format!("[{dims}]f32")}),
+            );
+        }
+        EmbedStore::Native => {
+            schema.insert(
+                profile.target.clone(),
+                json!({"type": format!("[{dims}]f32"), "ann": true}),
+            );
+        }
     }
     Ok(())
 }
@@ -1982,8 +2205,15 @@ async fn load_profiles(
         Ok(Some(body)) => serde_json::from_slice(&body).map_err(|error| {
             AppError::Upstream(format!("invalid embedding profile object {key}: {error}"))
         })?,
-        Ok(None) => Vec::new(),
+        Ok(None) => store_profiles(state, namespace).await?.unwrap_or_default(),
+        Err(error) if error.is_not_configured() => {
+            store_profiles(state, namespace).await?.unwrap_or_default()
+        }
         Err(error) => {
+            // A store that keeps profiles beside its schema still answers.
+            if let Some(profiles) = store_profiles(state, namespace).await? {
+                return Ok(profiles);
+            }
             // The standalone gateway runs with no object store; every write
             // passes through here, so an unreachable S3 must degrade to "no
             // wire profiles" instead of failing the write. Skip the cache so
@@ -2000,6 +2230,30 @@ async fn load_profiles(
         .wire_embedding_profiles
         .insert(namespace.to_string(), profiles.clone());
     Ok(profiles)
+}
+
+/// Profiles a store keeps in its own registry (RFC 0118 step E: Postgres),
+/// so a gateway with no object store still has them after a restart. A store
+/// read failure is a hard failure: guessing "unprofiled" would store rows
+/// without vectors.
+async fn store_profiles(
+    state: &AppState,
+    namespace: &str,
+) -> Result<Option<Vec<EmbeddingProfile>>, AppError> {
+    let stored = state
+        .turbopuffer()
+        .embedding_profiles(namespace)
+        .await
+        .map_err(|error| AppError::from_turbopuffer(error, "store embedding profiles"))?;
+    stored
+        .map(|profiles| {
+            serde_json::from_value(profiles).map_err(|error| {
+                AppError::Upstream(format!(
+                    "invalid embedding profiles stored for namespace {namespace}: {error}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 async fn save_profiles(

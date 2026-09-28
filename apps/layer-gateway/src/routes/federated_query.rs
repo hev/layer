@@ -684,7 +684,7 @@ async fn run_namespace_auto(
                     namespace,
                     field,
                     expression.clone(),
-                    state.namespace_uses_search_store(namespace),
+                    crate::routes::embed_wire::EmbedStore::for_namespace(state, namespace),
                 )
                 .await?;
                 Some((resolved.vector, resolved.target))

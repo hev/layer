@@ -113,6 +113,16 @@ pub async fn upsert_or_delete(
         .await;
     }
     if state.turbopuffer().requires_native_wire(&namespace) {
+        // RFC 0118: the gateway serves schema `embed` for a store that cannot
+        // embed. Vectors are computed before the store's transaction, so a
+        // provider failure writes nothing; the store receives plain vectors.
+        let embed = crate::routes::embed_wire::prepare_write(
+            state.as_ref(),
+            &namespace,
+            &mut body,
+            crate::routes::embed_wire::EmbedStore::NativeWire,
+        )
+        .await?;
         let mut ids = Vec::new();
         for key in ["upsert_rows", "deletes"] {
             if let Some(rows) = body.get(key).and_then(Value::as_array) {
@@ -146,19 +156,21 @@ pub async fn upsert_or_delete(
         )
         .await?;
         if response.status().is_success() {
+            crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
             if state.aerospike_runtime.generation() > 0 {
                 delete_cache_ids(&state, &namespace, &ids).await;
             }
             state.namespace_list_cache.clear();
         }
-        return Ok(response);
+        return crate::routes::query::merge_embedding_performance(response, &embed.performance)
+            .await;
     }
     let search_store = state.namespace_uses_search_store(&namespace);
     let embed = crate::routes::embed_wire::prepare_write(
         state.as_ref(),
         &namespace,
         &mut body,
-        search_store,
+        crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
     )
     .await?;
     if crate::routes::embed_wire::write_needs_distance_metric(&body, embed.requires_distance_check)

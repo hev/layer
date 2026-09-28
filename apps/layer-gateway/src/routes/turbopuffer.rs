@@ -33,13 +33,20 @@ pub async fn passthrough_query_post(
 ) -> Result<Response, AppError> {
     if state.turbopuffer().requires_native_wire(&namespace) {
         let path = uri.path().replacen("/v1/namespaces/", "/v2/namespaces/", 1);
-        return passthrough(state, "POST", &path, uri.query(), Some(body)).await;
+        return crate::routes::query::native_wire_query(
+            state,
+            &namespace,
+            &path,
+            uri.query(),
+            body,
+        )
+        .await;
     }
     let embed = crate::routes::embed_wire::prepare_query(
         state.as_ref(),
         &namespace,
         &mut body,
-        state.namespace_uses_search_store(&namespace),
+        crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
     )
     .await?;
     if embed.found && !embed.passthrough {

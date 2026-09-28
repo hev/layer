@@ -12,20 +12,24 @@ const client = new Hevlayer({
 });
 const prefix = process.env.PGVECTOR_TEST_PREFIX ?? "scratch-lyr20";
 const ns = `${prefix}-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-ts-${randomUUID().slice(0, 8)}-'雪_%41`;
+// Cases may name a sibling namespace (`"ns": "embed"`); each is removed at the end.
+const siblings = new Set<string>();
 const cases = JSON.parse(
   fs.readFileSync(new URL("./cases.json", import.meta.url), "utf8"),
 );
 try {
   for (const c of cases) {
     const body = c.body ?? {};
+    const target = c.ns ? `${ns}-${c.ns}` : ns;
+    if (c.ns) siblings.add(target);
     const methods: Record<string, () => Promise<unknown>> = {
-      write: () => client.writeNamespace(ns, body),
-      query: () => client.queryNamespace(ns, body),
-      schema: () => client.getTurbopufferNamespaceSchema(ns),
-      metadata: () => client.getNamespaceMetadata(ns),
-      fetch: () => client.fetchDocument(ns, body.id),
-      fetch_many: () => client.fetchDocuments(ns, body),
-      warm: () => client.hintCacheWarm(ns),
+      write: () => client.writeNamespace(target, body),
+      query: () => client.queryNamespace(target, body),
+      schema: () => client.getTurbopufferNamespaceSchema(target),
+      metadata: () => client.getNamespaceMetadata(target),
+      fetch: () => client.fetchDocument(target, body.id),
+      fetch_many: () => client.fetchDocuments(target, body),
+      warm: () => client.hintCacheWarm(target),
     };
     let result: any;
     try {
@@ -54,6 +58,7 @@ try {
     if (c.op === "schema") {
       if (c.field) assert(c.field in result, c.name);
       if (c.absent) assert(!(c.absent in result), c.name);
+      if (c.embedded) assert(result[c.embedded].embed, c.name);
     }
     if (c.op === "query") {
       const rows = result.rows;
@@ -81,6 +86,8 @@ try {
         );
       if ("n" in c) assert.equal(rows[0].n, c.n, c.name);
       if (c.hybrid) assert(result.hybrid, c.name);
+      if (c.vector)
+        assert.equal(rows[0][c.vector[0]].length, c.vector[1], c.name);
     }
     if (c.op === "fetch") {
       assert.equal(result.attributes.text, c.text, c.name);
@@ -97,6 +104,7 @@ try {
   const listing = await client.listTurbopufferNamespaces({ prefix: ns });
   assert(listing.namespaces.some((n) => n.id === ns));
 } finally {
+  for (const sibling of siblings) await client.deleteNamespace(sibling);
   await client.deleteNamespace(ns);
   const listing = await client.listTurbopufferNamespaces({ prefix: ns });
   assert.equal(listing.namespaces.length, 0, "namespace cleanup failed");

@@ -310,7 +310,7 @@ pub async fn auto_query(
                     &namespace,
                     field,
                     expression.clone(),
-                    state.namespace_uses_search_store(&namespace),
+                    crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
                 )
                 .await?;
                 embedding_performance = resolved.performance;

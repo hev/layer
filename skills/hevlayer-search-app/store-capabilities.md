@@ -54,7 +54,7 @@ request does once a turbopuffer key is set.
 | Backend snapshot integration | [api/snapshots](https://hevlayer.com/docs/api/snapshots) | no | yes |
 | UDF discovery / writeback primitives | [api/data-supply](https://hevlayer.com/docs/api/data-supply) | no | yes |
 | Arbitrary vendor administrative passthrough | [api/introduction](https://hevlayer.com/docs/api/introduction) | no | yes |
-| Embedding expressions / schema | [api/embed](https://hevlayer.com/docs/api/embed) | no | yes |
+| Embedding expressions / schema | [api/embed](https://hevlayer.com/docs/api/embed) | partial | yes |
 | Query by stored vector ID | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | as_of / between filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Fused leg provenance | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
@@ -70,6 +70,8 @@ request does once a turbopuffer key is set.
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Conditional writes** on pgvector (local): upsert_condition and delete_condition, including $ref_new; patch_condition returns 422 because row and column patches are unsupported
+- **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
+- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.
 
 ## Full-text ranking
 

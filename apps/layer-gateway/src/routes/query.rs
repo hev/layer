@@ -91,14 +91,7 @@ pub async fn query(
             Some("HybridText" | "Auto")
         )
     {
-        return crate::routes::turbopuffer::passthrough(
-            state,
-            "POST",
-            uri.path(),
-            uri.query(),
-            Some(body),
-        )
-        .await;
+        return native_wire_query(state, &namespace, uri.path(), uri.query(), body).await;
     }
     if state.turbopuffer().requires_native_wire(&namespace) {
         if let Some(body) = body.as_object() {
@@ -135,7 +128,7 @@ pub async fn query(
         state.as_ref(),
         &namespace,
         &mut body,
-        state.namespace_uses_search_store(&namespace),
+        crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
     )
     .await?;
     if embed.found && embed.passthrough {
@@ -155,6 +148,34 @@ pub async fn query(
         (!embed.found).then(|| (uri.path().to_string(), uri.query().map(str::to_string)));
     let response = query_prepared(state, namespace, headers, body, passthrough_uri).await?;
     merge_embedding_performance(response, &embed.performance).await
+}
+
+/// A query on a native-wire store (Postgres) that the gateway does not
+/// expand. The body reaches the adapter raw, except that a single ANN `rank_by`
+/// over `["Embed", text]` is resolved to a vector first (RFC 0118, read side
+/// (a)); the store then serves it as the dense query it already supports.
+/// Multi-query bodies stay raw and get the adapter's `multi_query` 422.
+pub(crate) async fn native_wire_query(
+    state: Arc<AppState>,
+    namespace: &str,
+    path: &str,
+    query: Option<&str>,
+    mut body: Value,
+) -> Result<Response, AppError> {
+    let mut performance = json!({});
+    if body.get("queries").is_none() {
+        let embed = crate::routes::embed_wire::prepare_query(
+            state.as_ref(),
+            namespace,
+            &mut body,
+            crate::routes::embed_wire::EmbedStore::NativeWire,
+        )
+        .await?;
+        performance = embed.performance;
+    }
+    let response =
+        crate::routes::turbopuffer::passthrough(state, "POST", path, query, Some(body)).await?;
+    merge_embedding_performance(response, &performance).await
 }
 
 pub(crate) async fn query_prepared(

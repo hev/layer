@@ -549,9 +549,11 @@ async fn rejections_carry_a_typed_feature() {
     }
 }
 
-/// RFC 0118 step B pins today's behavior so step C shows up as a diff: a
-/// schema `embed` declaration is a 422 naming `schema.embed`, rejected
-/// before any SQL, so schema and rows stay untouched.
+/// RFC 0118: the adapter itself never accepts `embed`. Since step C the
+/// gateway strips it and sends vectors plus the profile under
+/// `EMBEDDING_PROFILES_KEY`, so a raw declaration here means a caller
+/// bypassed the gateway; it stays a 422 naming `schema.embed`, rejected
+/// before any SQL, and `embed` never enters what `Schema::parse` re-reads.
 #[tokio::test]
 async fn schema_embed_is_rejected_as_schema_embed() {
     let error = Schema::parse(&json!({
@@ -593,6 +595,55 @@ async fn schema_embed_is_rejected_as_schema_embed() {
         body["message"],
         "UnsupportedByStore: pgvector: schema.embed"
     );
+}
+
+/// RFC 0118 step E: the gateway's profile value is validated before the
+/// transaction. One embedded attribute per namespace, and each profile names
+/// its source and target.
+#[tokio::test]
+async fn embedding_profiles_are_validated_before_sql() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr88-profiles-test".into(),
+    };
+    for (profiles, expected) in [
+        (
+            json!([{"source": "a", "target": "embed_a"}, {"source": "b", "target": "embed_b"}]),
+            Some("schema.embed"),
+        ),
+        (json!([{"source": "a"}]), None),
+        (json!({"source": "a"}), None),
+    ] {
+        let response = client
+            .passthrough(
+                "POST",
+                "/v2/namespaces/profiles",
+                None,
+                Some(json!({"upsert_rows": [{"id": "a"}], EMBEDDING_PROFILES_KEY: profiles})),
+            )
+            .await
+            .expect("rejected before the (unreachable) pool is touched");
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        match expected {
+            Some(feature) => {
+                assert_eq!(response.status, 422, "{body}");
+                assert_eq!(body["feature"], feature, "{body}");
+            }
+            None => assert_eq!(response.status, 400, "{body}"),
+        }
+    }
+    let mut schema = json!({"text": {"type": "string"}, "n": "int"});
+    merge_embed_declarations(
+        &mut schema,
+        &json!([{"source": "text", "target": "embed_text", "declaration": {"model": "m"}}]),
+    );
+    assert_eq!(
+        schema["text"],
+        json!({"type": "string", "embed": {"model": "m"}})
+    );
+    assert_eq!(schema["n"], "int");
 }
 
 /// RFC 0124: a branch-only body gets the branch-named 422, never an emulated

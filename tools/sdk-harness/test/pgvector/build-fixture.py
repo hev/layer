@@ -13,6 +13,10 @@ def add(name, op, body=None, **expected):
     )
 
 
+# Served by the bundled CPU sidecar in CE Compose (api/embed#cpu-models).
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+EMBED_DIMS = 384
+
 rows = [
     {
         "id": "a",
@@ -227,20 +231,18 @@ for key, value, feature in [
         status=422,
         feature=feature,
     )
-# RFC 0118 step B pins today's behavior: a schema `embed` declaration is a 422
-# naming `schema.embed`, and neither the schema nor the rows change. Step C
-# (gateway-served embed for Postgres) turns this case into a visible diff.
+# RFC 0118 step C: the gateway serves schema `embed` on Postgres, but this
+# namespace already holds client vectors, and an embedded namespace holds only
+# its embedding target (rule 7). Neither the schema nor the rows change.
 add(
-    "reject schema embed",
+    "reject schema embed beside client vectors",
     "write",
     {
-        "schema": {
-            "summary": {"type": "string", "embed": {"model": "qwen/qwen3-embedding-8b"}}
-        },
+        "schema": {"summary": {"type": "string", "embed": {"model": EMBED_MODEL}}},
         "upsert_rows": [{"id": "rogue-embed", "summary": "embedded on write"}],
     },
     status=422,
-    feature="schema.embed",
+    feature="max_vector_fields",
 )
 add("schema unchanged after embed rejection", "schema", absent="summary")
 add(
@@ -455,4 +457,140 @@ add(
     count=0,
 )
 q("nonfilterable scalar rejected", query={"filters": ["n", "Eq", 10]}, status=400)
+
+# RFC 0118 steps C and E: schema `embed` on Postgres, in a namespace of its own
+# (`"ns": "embed"`), since an embedded namespace holds no client vectors. The
+# gateway embeds with the configured provider; no row carries a vector.
+def embed_case(name, op, body=None, **expected):
+    add(name, op, body, ns="embed", **expected)
+
+
+embed_schema = {
+    "text": {"type": "string", "full_text_search": True, "embed": {"model": EMBED_MODEL}}
+}
+embed_rows = [
+    {"id": "planet", "text": "Jupiter is the biggest planet in the Solar System."},
+    {"id": "plant", "text": "Plants turn sunlight, water, and carbon dioxide into food."},
+    {"id": "rust", "text": "The Rust borrow checker rejects aliasing mutable references."},
+]
+embed_case("embed schema-only write", "write", {"schema": embed_schema}, count=0)
+embed_case(
+    "schema-only write declares no vector column yet",
+    "schema",
+    field="text",
+    embedded="text",
+    absent="embed_text",
+)
+embed_case(
+    "embed write with text-only rows",
+    "write",
+    {"schema": embed_schema, "upsert_rows": embed_rows},
+    count=3,
+)
+embed_case("schema shows the vector target", "schema", field="embed_text", embedded="text")
+embed_case(
+    "rows carry gateway vectors",
+    "query",
+    {"filters": ["id", "Eq", "planet"], "include_attributes": ["embed_text"]},
+    ids=["planet"],
+    vector=["embed_text", EMBED_DIMS],
+)
+embed_case(
+    "ANN over Embed resolves on Postgres",
+    "query",
+    {"rank_by": ["text", "ANN", ["Embed", "largest planet in the solar system"]], "top_k": 3},
+    first="planet",
+)
+embed_case(
+    "Auto semantic route embeds",
+    "query",
+    {
+        "rank_by": [
+            "text",
+            "Auto",
+            "which one of these is about how green plants make their food",
+            {"vector": ["Embed", "which one of these is about how green plants make their food"]},
+        ],
+        "top_k": 3,
+    },
+    first="plant",
+)
+embed_case(
+    "Auto fused route runs BM25 and semantic legs",
+    "query",
+    {
+        "rank_by": [
+            "text",
+            "Auto",
+            "borrow checker references",
+            {"vector": ["Embed", "borrow checker references"], "fuzziness": 0},
+        ],
+        "top_k": 3,
+    },
+    first="rust",
+    hybrid=True,
+)
+embed_case(
+    "rows-only write still embeds",
+    "write",
+    {"upsert_rows": [{"id": "ocean", "text": "The ocean covers most of the Earth."}]},
+    count=1,
+)
+embed_case(
+    "rows-only write stored a vector",
+    "query",
+    {"filters": ["id", "Eq", "ocean"], "include_attributes": ["embed_text"]},
+    ids=["ocean"],
+    vector=["embed_text", EMBED_DIMS],
+)
+embed_case(
+    "reject a second embedded attribute",
+    "write",
+    {
+        "schema": {"title": {"type": "string", "embed": {"model": EMBED_MODEL}}},
+        "upsert_rows": [{"id": "second", "text": "x", "title": "y"}],
+    },
+    status=422,
+    feature="schema.embed",
+)
+embed_case(
+    "reject a model change on an embedded namespace",
+    "write",
+    {
+        "schema": {
+            "text": {
+                "type": "string",
+                "full_text_search": True,
+                "embed": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            }
+        },
+        "upsert_rows": [{"id": "changed", "text": "x"}],
+    },
+    status=422,
+    feature="schema.embed",
+)
+embed_case(
+    "reject a client vector beside embed",
+    "write",
+    {"upsert_rows": [{"id": "client-vector", "text": "x", "vector": [1, 0]}]},
+    status=422,
+    feature="max_vector_fields",
+)
+embed_case(
+    "reject chunked embedding",
+    "write",
+    {
+        "schema": {
+            "text": {
+                "type": "string",
+                "full_text_search": True,
+                "embed": {"model": EMBED_MODEL, "chunk": {"strategy": "fixed", "size": 20}},
+            }
+        },
+        "upsert_rows": [{"id": "chunked", "text": "x"}],
+    },
+    status=422,
+    feature="embed.chunk",
+)
+embed_case("rejected embed writes leave the count", "metadata", count=4)
 Path(__file__).with_name("cases.json").write_text(json.dumps(cases, indent=2) + "\n")

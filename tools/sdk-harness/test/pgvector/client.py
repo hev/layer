@@ -16,6 +16,8 @@ async def main():
     # The generated Python SDK interpolates path parameters directly (the TS
     # SDK encodes them). Encode here so both suites send the same logical name.
     path_ns = quote(ns, safe="")
+    # Cases may name a sibling namespace (`"ns": "embed"`); each is removed at the end.
+    siblings = set()
     cases = json.loads(Path(__file__).with_name("cases.json").read_text())
     async with AsyncHevlayer(
         base_url=os.environ.get("PGVECTOR_GATEWAY_URL", "http://127.0.0.1:8080")
@@ -24,6 +26,10 @@ async def main():
             for case in cases:
                 op = case["op"]
                 body = case.get("body", {})
+                path_ns = quote(ns, safe="")
+                if "ns" in case:
+                    siblings.add(case["ns"])
+                    path_ns = quote(f"{ns}-{case['ns']}", safe="")
                 methods = {
                     "write": lambda: client.write_namespace(path_ns, body),
                     "query": lambda: client.query_namespace(path_ns, body),
@@ -69,6 +75,11 @@ async def main():
                             assert case["field"] in result, case["name"]
                         if "absent" in case:
                             assert case["absent"] not in result, case["name"]
+                        if "embedded" in case:
+                            assert result[case["embedded"]].get("embed"), (
+                                case["name"],
+                                result,
+                            )
                     if op == "query":
                         rows = result["rows"]
                         if "ids" in case:
@@ -96,6 +107,9 @@ async def main():
                             assert rows[0]["n"] == case["n"], case["name"]
                         if case.get("hybrid"):
                             assert result.get("hybrid"), case["name"]
+                        if "vector" in case:
+                            attribute, dims = case["vector"]
+                            assert len(rows[0][attribute]) == dims, case["name"]
                     if op == "fetch":
                         assert result["attributes"]["text"] == case["text"], case[
                             "name"
@@ -112,6 +126,9 @@ async def main():
             listing = await client.list_turbopuffer_namespaces(prefix=ns)
             assert ns in [n.id for n in listing.namespaces]
         finally:
+            for sibling in siblings:
+                await client.delete_namespace(quote(f"{ns}-{sibling}", safe=""))
+            path_ns = quote(ns, safe="")
             await client.delete_namespace(path_ns)
             listing = await client.list_turbopuffer_namespaces(prefix=ns)
             assert not listing.namespaces, "namespace cleanup failed"

@@ -90,7 +90,7 @@ Decide each field deliberately:
 | Tolerate typos in that text | `"fuzzy": true` as well | Fuzzy `HybridText` legs — turbopuffer only |
 | Narrow results | `"filterable": true` | `filters` predicates, and facet rails over the field |
 | Only display it | neither | returned via `include_attributes`, nothing else |
-| Semantic similarity | a `vector` on the row | `ANN` rank expressions |
+| Semantic similarity | a schema `embed` (or a `vector` on the row) | `ANN` rank expressions |
 
 Rules worth knowing before you commit:
 
@@ -218,12 +218,14 @@ so the local run and the deployed one differ only in who sets them:
 
 Two things differ locally and you must account for both:
 
-- **Embedding happens in your indexer.** The local Postgres store does not
-  accept an `embed` block in the schema (a write that declares one returns
-  `422 UnsupportedByStore`), so vectors arrive on the row. Use a CPU embedding model — `fastembed` with
-  `BAAI/bge-small-en-v1.5` (384 dimensions) is a good default and needs no GPU
-  and no API key. Whatever you pick, embed the *query* with the same model at
-  search time or the vectors are meaningless.
+- **The gateway embeds.** Declare `embed` on the text attribute with a model
+  the bundled CPU service serves: `BAAI/bge-small-en-v1.5` (384 dimensions) is
+  a good default and needs no GPU and no API key. Send rows with no vector,
+  and query with `["Embed", "…"]`; the gateway embeds the query with the same
+  model. Postgres takes one embedded attribute per namespace, and a namespace
+  holds either gateway vectors or row vectors, never both. If your indexer
+  already computes vectors, send them on the row as `vector` and leave `embed`
+  out.
 - **Rows are written straight to the namespace.** Post to
   `POST /v2/namespaces/{ns}` in batches. The first write creates the namespace,
   so send the schema with it.
@@ -234,11 +236,12 @@ curl --fail-with-body http://localhost:8080/v2/namespaces/squad \
   -d '{
     "distance_metric": "cosine_distance",
     "schema": {
-      "text":  {"type": "string", "full_text_search": true},
+      "text":  {"type": "string", "full_text_search": true,
+                "embed": {"model": "BAAI/bge-small-en-v1.5"}},
       "title": {"type": "string", "filterable": true}
     },
     "upsert_rows": [
-      {"id": "s1#0", "text": "…", "title": "Amazon rainforest", "vector": [0.01, …]}
+      {"id": "s1#0", "text": "…", "title": "Amazon rainforest"}
     ]
   }'
 ```
@@ -269,8 +272,8 @@ decided by the `rank_by` expression, not by a different endpoint.
 # Lexical — BM25 over an indexed text field
 -d '{"rank_by": ["text", "BM25", "wireless earbuds"], "top_k": 10, "include_attributes": true}'
 
-# Semantic — ANN over the row vectors
--d '{"rank_by": ["vector", "ANN", [0.01, 0.02, …]], "top_k": 10}'
+# Semantic — ANN over the embedded text; the gateway embeds the query
+-d '{"rank_by": ["text", "ANN", ["Embed", "wireless earbuds"]], "top_k": 10}'
 
 # Hybrid text, locally — Postgres serves HybridText with fuzziness 0 only
 -d '{"rank_by": ["text", "HybridText", "rainforest climate", {"fuzziness": 0}], "top_k": 10}'
@@ -326,7 +329,7 @@ failure mode this whole boundary exists to prevent.
 
 Locally that notably rules out: fuzzy `HybridText` (`fuzziness` other than
 `0`), array-containment and regex filters, facets, `searchAfter` cursors,
-multi-vector and sparse ranking, `aggregate_by`, schema `embed`, and automatic
+multi-vector and sparse ranking, `aggregate_by`, chunked `embed`, and automatic
 query routing. Plan the app's features against
 the matrix, not against the docs index.
 

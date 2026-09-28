@@ -1172,14 +1172,14 @@
     "feature": "distance_metric"
   },
   {
-    "name": "reject schema embed",
+    "name": "reject schema embed beside client vectors",
     "op": "write",
     "body": {
       "schema": {
         "summary": {
           "type": "string",
           "embed": {
-            "model": "qwen/qwen3-embedding-8b"
+            "model": "BAAI/bge-small-en-v1.5"
           }
         }
       },
@@ -1191,7 +1191,7 @@
       ]
     },
     "status": 422,
-    "feature": "schema.embed"
+    "feature": "max_vector_fields"
   },
   {
     "name": "schema unchanged after embed rejection",
@@ -2075,5 +2075,286 @@
       ]
     },
     "status": 400
+  },
+  {
+    "name": "embed schema-only write",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true,
+          "embed": {
+            "model": "BAAI/bge-small-en-v1.5"
+          }
+        }
+      }
+    },
+    "ns": "embed",
+    "count": 0
+  },
+  {
+    "name": "schema-only write declares no vector column yet",
+    "op": "schema",
+    "ns": "embed",
+    "field": "text",
+    "embedded": "text",
+    "absent": "embed_text"
+  },
+  {
+    "name": "embed write with text-only rows",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true,
+          "embed": {
+            "model": "BAAI/bge-small-en-v1.5"
+          }
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "planet",
+          "text": "Jupiter is the biggest planet in the Solar System."
+        },
+        {
+          "id": "plant",
+          "text": "Plants turn sunlight, water, and carbon dioxide into food."
+        },
+        {
+          "id": "rust",
+          "text": "The Rust borrow checker rejects aliasing mutable references."
+        }
+      ]
+    },
+    "ns": "embed",
+    "count": 3
+  },
+  {
+    "name": "schema shows the vector target",
+    "op": "schema",
+    "ns": "embed",
+    "field": "embed_text",
+    "embedded": "text"
+  },
+  {
+    "name": "rows carry gateway vectors",
+    "op": "query",
+    "body": {
+      "filters": [
+        "id",
+        "Eq",
+        "planet"
+      ],
+      "include_attributes": [
+        "embed_text"
+      ]
+    },
+    "ns": "embed",
+    "ids": [
+      "planet"
+    ],
+    "vector": [
+      "embed_text",
+      384
+    ]
+  },
+  {
+    "name": "ANN over Embed resolves on Postgres",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "ANN",
+        [
+          "Embed",
+          "largest planet in the solar system"
+        ]
+      ],
+      "top_k": 3
+    },
+    "ns": "embed",
+    "first": "planet"
+  },
+  {
+    "name": "Auto semantic route embeds",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "Auto",
+        "which one of these is about how green plants make their food",
+        {
+          "vector": [
+            "Embed",
+            "which one of these is about how green plants make their food"
+          ]
+        }
+      ],
+      "top_k": 3
+    },
+    "ns": "embed",
+    "first": "plant"
+  },
+  {
+    "name": "Auto fused route runs BM25 and semantic legs",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "Auto",
+        "borrow checker references",
+        {
+          "vector": [
+            "Embed",
+            "borrow checker references"
+          ],
+          "fuzziness": 0
+        }
+      ],
+      "top_k": 3
+    },
+    "ns": "embed",
+    "first": "rust",
+    "hybrid": true
+  },
+  {
+    "name": "rows-only write still embeds",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "ocean",
+          "text": "The ocean covers most of the Earth."
+        }
+      ]
+    },
+    "ns": "embed",
+    "count": 1
+  },
+  {
+    "name": "rows-only write stored a vector",
+    "op": "query",
+    "body": {
+      "filters": [
+        "id",
+        "Eq",
+        "ocean"
+      ],
+      "include_attributes": [
+        "embed_text"
+      ]
+    },
+    "ns": "embed",
+    "ids": [
+      "ocean"
+    ],
+    "vector": [
+      "embed_text",
+      384
+    ]
+  },
+  {
+    "name": "reject a second embedded attribute",
+    "op": "write",
+    "body": {
+      "schema": {
+        "title": {
+          "type": "string",
+          "embed": {
+            "model": "BAAI/bge-small-en-v1.5"
+          }
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "second",
+          "text": "x",
+          "title": "y"
+        }
+      ]
+    },
+    "ns": "embed",
+    "status": 422,
+    "feature": "schema.embed"
+  },
+  {
+    "name": "reject a model change on an embedded namespace",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true,
+          "embed": {
+            "model": "sentence-transformers/all-MiniLM-L6-v2"
+          }
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "changed",
+          "text": "x"
+        }
+      ]
+    },
+    "ns": "embed",
+    "status": 422,
+    "feature": "schema.embed"
+  },
+  {
+    "name": "reject a client vector beside embed",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "client-vector",
+          "text": "x",
+          "vector": [
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    "ns": "embed",
+    "status": 422,
+    "feature": "max_vector_fields"
+  },
+  {
+    "name": "reject chunked embedding",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true,
+          "embed": {
+            "model": "BAAI/bge-small-en-v1.5",
+            "chunk": {
+              "strategy": "fixed",
+              "size": 20
+            }
+          }
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "chunked",
+          "text": "x"
+        }
+      ]
+    },
+    "ns": "embed",
+    "status": 422,
+    "feature": "embed.chunk"
+  },
+  {
+    "name": "rejected embed writes leave the count",
+    "op": "metadata",
+    "ns": "embed",
+    "count": 4
   }
 ]

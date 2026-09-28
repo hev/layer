@@ -13,6 +13,12 @@ pub const TURBOPUFFER_CAPABILITIES: crate::capabilities::Capabilities =
         blobs: crate::capabilities::BlobStorage::native(Some(TURBOPUFFER_MAX_BLOB_BYTES)),
     };
 
+/// Write-body key carrying a namespace's gateway embedding profiles to a store
+/// that keeps them beside its schema (RFC 0118 step E). The store persists the
+/// value in the write's own transaction and returns it from
+/// [`TurbopufferClient::embedding_profiles`]; it never reaches the schema.
+pub const EMBEDDING_PROFILES_KEY: &str = "_hevlayer_embedding_profiles";
+
 /// The largest blob a turbopuffer `bytes` value holds. turbopuffer caps a
 /// value at 8 MiB measured on the base64 wire string, so the decoded cap is
 /// three quarters of that: 6 MiB.
@@ -432,6 +438,16 @@ pub trait TurbopufferClient: Send + Sync {
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError>;
 
+    /// Gateway embedding profiles the store holds for `namespace`, as last
+    /// written under [`EMBEDDING_PROFILES_KEY`] (RFC 0118 step E). `None` when
+    /// the store keeps none or the namespace does not exist.
+    async fn embedding_profiles(
+        &self,
+        _namespace: &str,
+    ) -> Result<Option<Value>, TurbopufferError> {
+        Ok(None)
+    }
+
     /// Pin durable cleanup to its original store even after Index routing changes.
     /// Single-store clients already represent that store; routers override this.
     async fn head_namespace_in_store(
@@ -667,6 +683,12 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .get_blob(namespace, sha256)
+            .await
+    }
+
+    async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .embedding_profiles(namespace)
             .await
     }
 

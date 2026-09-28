@@ -499,9 +499,10 @@ mod tests {
             ConditionalWrites,
         ];
         // Served with the limits stated in the cell: HybridText with
-        // fuzziness 0, conditional upserts/deletes, and any number of text
-        // fields but one vector field.
-        let approximate = [Hybrid, ConditionalWrites, MultipleFields];
+        // fuzziness 0, conditional upserts/deletes, any number of text
+        // fields but one vector field, and gateway-served embed on one
+        // attribute (RFC 0118 step C).
+        let approximate = [Hybrid, ConditionalWrites, MultipleFields, Embed];
         for &feature in WireFeature::ALL {
             let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(
@@ -526,13 +527,15 @@ mod tests {
                 allowed.contains(&feature) || approximate.contains(&feature)
             );
         }
-        // RFC 0117 declarations table, pgvector row, after LYR-87.
+        // RFC 0117 declarations table, pgvector row, after LYR-87 and RFC
+        // 0118 step C.
         let limits = PGVECTOR_CAPABILITIES.limits;
         assert_eq!(
             limits.embed.support,
             PGVECTOR_CAPABILITIES.get(Embed).support
         );
-        assert_eq!(limits.max_gateway_embed_attributes, Some(0));
+        assert_eq!(limits.embed.support, Support::Approximate);
+        assert_eq!(limits.max_gateway_embed_attributes, Some(1));
         assert_eq!(limits.max_full_text_search_fields, None);
         assert_eq!(limits.max_vector_fields, Some(1));
     }

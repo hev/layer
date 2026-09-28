@@ -302,6 +302,12 @@ impl HttpEmbeddingProvider {
         })
     }
 
+    /// Whether the embedder's registry lists `model`. A store that cannot
+    /// embed natively resolves `serving.prefer: native` here first (RFC 0118).
+    pub async fn serves(&self, model: &str) -> Result<bool, EmbeddingError> {
+        Ok(self.registry().await?.models.contains_key(model))
+    }
+
     /// Resolve the registry record a profile pins to. Unknown models,
     /// revision pins, unsupported modalities, and mismatched dimensions fail
     /// before any inference.

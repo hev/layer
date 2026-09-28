@@ -1641,6 +1641,10 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.inner.get_blob(namespace, sha256).await
     }
 
+    async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>, TurbopufferError> {
+        self.inner.embedding_profiles(namespace).await
+    }
+
     async fn passthrough(
         &self,
         method: &str,

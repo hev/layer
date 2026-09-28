@@ -27,6 +27,10 @@ struct Namespace {
     table: String,
     schema: Schema,
     metric: String,
+    /// Gateway embedding profiles (RFC 0118 step E). A registry column beside
+    /// `schema`, never parsed by `Schema::parse`, so a gateway that predates
+    /// it still loads every namespace.
+    embed: Option<Value>,
 }
 
 /// A rejection naming a stable feature id (RFC 0118 § "The 422 body").
@@ -185,6 +189,12 @@ impl PgvectorClient {
             .map_err(db)?;
         sqlx::query("CREATE TABLE IF NOT EXISTS layer_pgvector.namespaces (scope text NOT NULL, name text NOT NULL, table_name text NOT NULL UNIQUE, schema jsonb NOT NULL, metric text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(scope,name))")
             .execute(&mut *bootstrap).await.map_err(db)?;
+        // RFC 0118 step E: gateway embedding profiles survive a gateway
+        // restart with no object store. Additive and nullable.
+        sqlx::query("ALTER TABLE layer_pgvector.namespaces ADD COLUMN IF NOT EXISTS embed jsonb")
+            .execute(&mut *bootstrap)
+            .await
+            .map_err(db)?;
         // Content-addressed blobs (RFC 0123): one bytea row per sha256.
         sqlx::query("CREATE TABLE IF NOT EXISTS layer_pgvector.blobs (scope text NOT NULL, namespace text NOT NULL, sha256 text NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(scope,namespace,sha256))")
             .execute(&mut *bootstrap).await.map_err(db)?;
@@ -214,13 +224,14 @@ impl PgvectorClient {
         tx: &mut Transaction<'_, Postgres>,
         namespace: &str,
     ) -> Result<Option<Namespace>> {
-        let row = sqlx::query("SELECT table_name,schema,metric FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2")
+        let row = sqlx::query("SELECT table_name,schema,metric,embed FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2")
             .bind(&self.scope).bind(namespace).fetch_optional(&mut **tx).await.map_err(db)?;
         row.map(|r| {
             Ok(Namespace {
                 table: r.get("table_name"),
                 schema: Schema::parse(&r.get::<Value, _>("schema"))?,
                 metric: r.get("metric"),
+                embed: r.get("embed"),
             })
         })
         .transpose()
@@ -246,6 +257,7 @@ impl PgvectorClient {
                 "deletes",
                 "upsert_condition",
                 "delete_condition",
+                EMBEDDING_PROFILES_KEY,
             ],
         )?;
         let rows = schema::rows(body)?;
@@ -257,6 +269,14 @@ impl PgvectorClient {
         if let Some(update) = body.get("schema") {
             Schema::parse(update)?;
         }
+        // The gateway's embedding profiles (RFC 0118 step E): absent keeps the
+        // stored set, an empty array or null clears it. Validated before the
+        // transaction too.
+        let profiles = match body.get(EMBEDDING_PROFILES_KEY).cloned() {
+            Some(profiles) if embed_targets(&profiles)?.is_empty() => Some(None),
+            Some(profiles) => Some(Some(profiles)),
+            None => None,
+        };
         if let Some(metric) = body.get("distance_metric") {
             let metric = metric
                 .as_str()
@@ -303,6 +323,24 @@ impl PgvectorClient {
         for row in &rows {
             schema.validate_row(row, metric)?;
         }
+        let embed = match profiles {
+            Some(profiles) => profiles,
+            None => previous.as_ref().and_then(|n| n.embed.clone()),
+        };
+        // RFC 0118 rule 7: an embedded namespace holds only its embedding
+        // target as a vector field; a client vector is a second one.
+        if let Some(embed) = embed.as_ref() {
+            let targets = embed_targets(embed)?;
+            if schema
+                .fields()
+                .any(|f| !f.scalar() && !targets.iter().any(|(_, target)| *target == f.name))
+            {
+                return Err(unsupported_detail(
+                    "max_vector_fields",
+                    "one vector field per namespace; this namespace's is its gateway-embedded attribute",
+                ));
+            }
+        }
         // Conditions apply per targeted document: an upsert of a new id always
         // proceeds, a delete of a missing id is a no-op.
         let upsert_condition = body.get("upsert_condition").filter(|v| !v.is_null());
@@ -333,8 +371,8 @@ impl PgvectorClient {
             .map_err(db)?;
         }
         schema.install(&mut tx, &table, &old_schema, metric).await?;
-        sqlx::query("INSERT INTO layer_pgvector.namespaces (scope,name,table_name,schema,metric) VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope,name) DO UPDATE SET schema=excluded.schema,updated_at=now()")
-            .bind(&self.scope).bind(namespace).bind(&table).bind(schema.value()).bind(metric).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO layer_pgvector.namespaces (scope,name,table_name,schema,metric,embed) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope,name) DO UPDATE SET schema=excluded.schema,embed=excluded.embed,updated_at=now()")
+            .bind(&self.scope).bind(namespace).bind(&table).bind(schema.value()).bind(metric).bind(&embed).execute(&mut *tx).await.map_err(db)?;
         let mut upserted = 0;
         for row in &rows {
             let key = id_key(&row["id"])?;
@@ -644,8 +682,12 @@ impl PgvectorClient {
             .fetch_one(&mut *tx).await.map_err(db)?;
         let times = sqlx::query("SELECT created_at::text,updated_at::text FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2")
             .bind(&self.scope).bind(namespace).fetch_one(&mut *tx).await.map_err(db)?;
+        let mut schema = ns.schema.value();
+        if let Some(embed) = ns.embed.as_ref() {
+            merge_embed_declarations(&mut schema, embed);
+        }
         Ok(
-            json!({"id":namespace,"schema":ns.schema.value(), "approx_row_count":stats.get::<i64,_>("count"),
+            json!({"id":namespace,"schema":schema, "approx_row_count":stats.get::<i64,_>("count"),
             "approx_logical_bytes":stats.get::<i64,_>("bytes"),"created_at":times.get::<String,_>("created_at"),
             "updated_at":times.get::<String,_>("updated_at"),"last_write_at":times.get::<String,_>("updated_at"),
             "config":{"distance_metric":ns.metric}}),
@@ -759,6 +801,57 @@ impl PgvectorClient {
                 parts.get(3).copied().unwrap_or("passthrough"),
                 &format!("{method} {path}"),
             )),
+        }
+    }
+}
+
+/// `(source, target)` of each gateway embedding profile (RFC 0118 step E).
+/// Everything else in a profile is the gateway's and stays opaque here.
+fn embed_targets(profiles: &Value) -> Result<Vec<(&str, &str)>> {
+    let profiles = match profiles {
+        Value::Null => return Ok(vec![]),
+        Value::Array(profiles) => profiles,
+        _ => return Err(invalid("embedding profiles must be an array")),
+    };
+    let targets = profiles
+        .iter()
+        .map(|profile| {
+            let field = |key| profile.get(key).and_then(Value::as_str);
+            field("source")
+                .zip(field("target"))
+                .ok_or_else(|| invalid("embedding profile requires source and target"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if targets.len() > 1 {
+        return Err(unsupported_detail(
+            "schema.embed",
+            "one embedded attribute per namespace",
+        ));
+    }
+    Ok(targets)
+}
+
+/// Put each profile's client-written `embed` declaration back on its source
+/// attribute, so `GET .../schema` returns what the client wrote.
+fn merge_embed_declarations(schema: &mut Value, profiles: &Value) {
+    let Some(profiles) = profiles.as_array() else {
+        return;
+    };
+    for profile in profiles {
+        let (Some(source), Some(declaration)) = (
+            profile.get("source").and_then(Value::as_str),
+            profile.get("declaration"),
+        ) else {
+            continue;
+        };
+        let Some(attribute) = schema.get_mut(source) else {
+            continue;
+        };
+        if let Some(kind) = attribute.as_str() {
+            *attribute = json!({"type": kind});
+        }
+        if let Some(attribute) = attribute.as_object_mut() {
+            attribute.insert("embed".into(), declaration.clone());
         }
     }
 }
@@ -1023,6 +1116,17 @@ impl TurbopufferClient for PgvectorClient {
             documents: rows.into_iter().map(|(row, _)| doc(row)).collect(),
             next_cursor,
         })
+    }
+    async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>> {
+        let embed: Option<Option<Value>> = sqlx::query_scalar(
+            "SELECT embed FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2",
+        )
+        .bind(&self.scope)
+        .bind(namespace)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(embed.flatten())
     }
     async fn head_namespace(&self, ns: &str) -> Result<NamespaceMeta> {
         let raw = self.metadata(ns).await?;
