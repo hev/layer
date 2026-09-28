@@ -542,6 +542,143 @@ async fn pgvector_live_ordered_scan_and_conditional_writes() {
     result.unwrap();
 }
 
+/// The body of a 400, which `Display` omits.
+fn body_of(error: TurbopufferError) -> String {
+    match error {
+        TurbopufferError::Response(r) if r.status == 400 => {
+            String::from_utf8_lossy(&r.body).into_owned()
+        }
+        error => panic!("expected a 400: {error}"),
+    }
+}
+
+/// LYR-140 against the pinned ParadeDB service, like the tests above:
+/// PGVECTOR_TEST_URL=postgresql://... cargo test -p vectorstore-core --features pgvector pgvector_live -- --ignored
+#[tokio::test]
+#[ignore = "requires pinned ParadeDB; set PGVECTOR_TEST_URL"]
+async fn pgvector_live_patches_and_filtered_writes() {
+    let url = std::env::var("PGVECTOR_TEST_URL").expect("PGVECTOR_TEST_URL required");
+    let a: &'static PgvectorClient = Box::leak(Box::new(
+        PgvectorClient::connect(&url, "test/lyr140/store")
+            .await
+            .unwrap(),
+    ));
+    let ns = format!("scratch-lyr140-rust-{}", std::process::id());
+    let result: Result<()> = async {
+        let all = json!({"rank_by":["id","asc"],"top_k":100,"include_attributes":true});
+        let rows = |a: &'static PgvectorClient| {
+            let (ns, all) = (ns.clone(), all.clone());
+            async move { Ok::<_, TurbopufferError>(a.query_wire(&ns, &all).await?["rows"].clone()) }
+        };
+        a.write(&ns, &json!({"upsert_rows":[
+            {"id":"s1","first_prompt":"one","n":1,"vector":[1,0],"tags":["x"]},
+            {"id":"s2","first_prompt":"two","n":2,"vector":[0,1]},
+            {"id":"s3","first_prompt":"three","n":3,"vector":[1,1]}
+        ]})).await?;
+        // kit's summary patch: only the named attribute changes, a new schema
+        // attribute is declared in the same write, a missing id is ignored.
+        let written = a.write(&ns, &json!({
+            "patch_rows":[{"id":"s1","summary":"first"},{"id":"gone","summary":"never"}],
+            "schema":{"summary":{"type":"string"}}
+        })).await?;
+        assert_eq!(written["rows_affected"], json!(1), "{written}");
+        assert_eq!(written["rows_patched"], json!(1));
+        let found = rows(a).await?;
+        assert_eq!(found[0], json!({"id":"s1","first_prompt":"one","n":1,"tags":["x"],"summary":"first"}));
+        assert_eq!(found.as_array().unwrap().len(), 3, "a patch never creates a row");
+        assert!(a.fetch_vector(&ns, "s1").await?.is_some(), "the vector survives a patch");
+        // Patched attributes are filterable through their columns.
+        let hit = a.query_wire(&ns, &json!({"filters":["summary","Eq","first"]})).await?;
+        assert_eq!(ids(&hit), vec![json!("s1")]);
+        // patch_columns, null clears; patch_condition sees stored and $ref_new.
+        let written = a.write(&ns, &json!({
+            "patch_columns":{"id":["s1","s2","s3"],"n":[10,1,30],"summary":[null,"second","third"]},
+            "patch_condition":["n","Lt",{"$ref_new":"n"}]
+        })).await?;
+        assert_eq!(written["rows_patched"], json!(2), "{written}");
+        let found = rows(a).await?;
+        assert_eq!(found[0]["n"], json!(10));
+        assert_eq!(found[0]["summary"], Value::Null);
+        assert_eq!(found[1]["n"], json!(2), "failed condition keeps s2");
+        assert!(found[1].get("summary").is_none());
+        assert_eq!(found[2]["summary"], json!("third"));
+        let hit = a.query_wire(&ns, &json!({"filters":["summary","Eq",null]})).await?;
+        assert_eq!(ids(&hit), vec![json!("s1"), json!("s2")]);
+        // Postgres patches a client vector, validated like an upsert.
+        a.write(&ns, &json!({"patch_rows":[{"id":"s2","vector":[0.5,0.5]}]})).await?;
+        assert_eq!(a.fetch_vector(&ns, "s2").await?, Some(vec![0.5, 0.5]));
+        assert!(a.write(&ns, &json!({"patch_rows":[{"id":"s2","vector":[1,2,3]}]})).await.is_err());
+        // patch_by_filter and delete_by_filter, combined with the other keys:
+        // delete_by_filter runs first, then patch_by_filter, then upserts,
+        // patches and deletes.
+        let written = a.write(&ns, &json!({
+            "delete_by_filter":["n","Gte",30],
+            "patch_by_filter":{"filters":["n","Lt",30],"patch":{"status":"archived"}},
+            "upsert_rows":[{"id":"s4","n":4,"status":"new"}],
+            "patch_rows":[{"id":"s4","status":"patched"},{"id":"s3","status":"deleted first"}],
+            "deletes":["s2"]
+        })).await?;
+        assert_eq!(written["rows_deleted"], json!(2), "{written}");
+        assert_eq!(written["rows_patched"], json!(3), "{written}");
+        assert_eq!(written["rows_upserted"], json!(1), "{written}");
+        assert_eq!(written["rows_affected"], json!(6), "{written}");
+        assert_eq!(written["rows_remaining"], json!(false));
+        let found = rows(a).await?;
+        assert_eq!(ids(&json!({"rows":found})), vec![json!("s1"), json!("s4")]);
+        assert_eq!(found[0]["status"], json!("archived"));
+        assert_eq!(found[1]["status"], json!("patched"));
+        let hit = a.query_wire(&ns, &json!({"filters":["status","Eq","archived"]})).await?;
+        assert_eq!(ids(&hit), vec![json!("s1")]);
+        // Rejected writes change nothing: schema, rows and counts stay.
+        let before = rows(a).await?;
+        for body in [
+            json!({"schema":{"added":"string"},"upsert_rows":[{"id":"s5"}],"patch_rows":[{"id":"s1","n":"wrong"}]}),
+            json!({"schema":{"added":"string"},"deletes":["s1"],"patch_by_filter":{"filters":["n","Regex","x"],"patch":{"n":1}}}),
+            json!({"schema":{"added":"string"},"deletes":["s1"],"delete_by_filter":["nope","Eq",1]}),
+            json!({"schema":{"added":"string"},"deletes":["s1"],"patch_rows":[{"id":"s1","n":5}],"patch_condition":["n","Lt",{"$ref_new":"status"}]}),
+            json!({"schema":{"added":"string"},"deletes":["s1"],"patch_by_filter":{"filters":["n","Eq",{"$ref_new":"n"}],"patch":{"n":1}}}),
+        ] {
+            assert!(a.write(&ns, &body).await.is_err(), "{body}");
+        }
+        assert_eq!(rows(a).await?, before);
+        assert!(a.metadata(&ns).await?["schema"].get("added").is_none());
+        // Past the limit without allow_partial is a 400 and rolls back.
+        let mut tx = a.begin(&ns).await?;
+        let n = a.required(&mut tx, &ns).await?;
+        let error = filtered_target(&mut tx, &n.table, &n.schema, &json!(["n","Gte",0]), 1, false, "patch_by_filter")
+            .await.err().unwrap();
+        assert!(body_of(error).contains("patch_by_filter_allow_partial"));
+        let every = json!(["n","Gte",0]);
+        let (target, more) = filtered_target(&mut tx, &n.table, &n.schema, &every, 1, true, "patch_by_filter").await?;
+        assert!(more && matches!(target, Target::First(_, 1, _)));
+        tx.commit().await.map_err(db)?;
+        // An embedded namespace refuses patches to its source and target.
+        let embedded = format!("{ns}-embed");
+        let profile = json!([{"source":"text","target":"embed_text","model":"m/x"}]);
+        a.write(&embedded, &json!({
+            EMBEDDING_PROFILES_KEY: profile,
+            "upsert_rows":[{"id":"e1","text":"hello","embed_text":[1,0],"n":1}]
+        })).await?;
+        for patch in [json!({"id":"e1","text":"bye"}), json!({"id":"e1","embed_text":[0,1]})] {
+            let error = body_of(a.write(&embedded, &json!({"patch_rows":[patch]})).await.unwrap_err());
+            assert!(error.contains("gateway-embedded"), "{error}");
+        }
+        let error = body_of(a.write(&embedded, &json!({"patch_by_filter":{"filters":["n","Eq",1],"patch":{"text":"bye"}}})).await.unwrap_err());
+        assert!(error.contains("gateway-embedded"), "{error}");
+        assert_eq!(a.write(&embedded, &json!({"patch_rows":[{"id":"e1","n":2}]})).await?["rows_patched"], json!(1));
+        a.delete_namespace(&embedded).await?;
+        Ok(())
+    }.await;
+    for namespace in [ns.clone(), format!("{ns}-embed")] {
+        let response = a.delete_namespace(&namespace).await.unwrap();
+        assert!(
+            response.status == 200 || response.status == 404,
+            "namespace cleanup failed"
+        );
+    }
+    result.unwrap();
+}
+
 #[tokio::test]
 async fn adapter_capabilities_match_matrix_and_default_rejections() {
     use crate::capabilities::{Support, WireFeature};
@@ -564,13 +701,56 @@ async fn adapter_capabilities_match_matrix_and_default_rejections() {
         Support::Supported
     );
     assert!(client.requires_native_wire("unused"));
-    let error = client
-        .delete_by_filter("unused", &json!({}))
+    for feature in [
+        WireFeature::PatchRows,
+        WireFeature::PatchColumns,
+        WireFeature::DeleteByFilter,
+        WireFeature::ConditionalWrites,
+    ] {
+        assert_eq!(
+            client.capabilities().get(feature).support,
+            Support::Supported
+        );
+    }
+}
+
+/// LYR-140: malformed patch and filtered-write bodies are 400s decided from
+/// the request alone, before the transaction (the pool is unreachable).
+#[tokio::test]
+async fn malformed_patches_are_400_before_sql() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "lyr140-test".into(),
+    };
+    for body in [
+        json!({"patch_rows": [{"n": 1}]}),
+        json!({"patch_rows": [{"id": "", "n": 1}]}),
+        json!({"patch_rows": {"id": "a"}}),
+        json!({"patch_columns": {"id": ["a", "b"], "n": [1]}}),
+        json!({"patch_rows": [], "patch_columns": {"id": []}}),
+        json!({"patch_by_filter": {"patch": {"n": 1}}}),
+        json!({"patch_by_filter": {"filters": ["n", "Eq", 1]}}),
+        json!({"patch_by_filter": {"filters": ["n", "Eq", 1], "patch": {"id": "b"}}}),
+        json!({"delete_by_filter": ["n", "Eq", 1], "delete_by_filter_allow_partial": "yes"}),
+    ] {
+        let response = client
+            .passthrough("POST", "/v2/namespaces/ns", None, Some(body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 400, "{body}");
+    }
+    let response = client
+        .passthrough(
+            "POST",
+            "/v2/namespaces/ns",
+            None,
+            Some(json!({"patch_by_filter": {"filters": ["n", "Eq", 1], "patch": {"n": 2}, "extra": 1}})),
+        )
         .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("UnsupportedByStore: pgvector: delete_by_filter"));
+        .unwrap();
+    assert_eq!(response.status, 422);
 }
 
 /// The two hybrid bodies clients actually send: kit's multi-query + RRF, and
@@ -709,11 +889,6 @@ async fn rejections_carry_a_typed_feature() {
     };
     let rows = json!([{"id": "rogue", "vector": [1, 0]}]);
     for (body, feature) in [
-        (json!({"upsert_rows": rows, "patch_rows": []}), "patch_rows"),
-        (
-            json!({"upsert_rows": rows, "patch_condition": ["n", "Eq", 1]}),
-            "conditional_writes",
-        ),
         (
             json!({"upsert_rows": rows, "copy_from_namespace": "other"}),
             "copy_from_namespace",

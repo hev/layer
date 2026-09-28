@@ -124,15 +124,15 @@ pub async fn upsert_or_delete(
         )
         .await?;
         let mut ids = Vec::new();
-        for key in ["upsert_rows", "deletes"] {
+        for key in ["upsert_rows", "patch_rows", "deletes"] {
             if let Some(rows) = body.get(key).and_then(Value::as_array) {
                 ids.extend(
                     rows.iter()
                         .filter_map(|row| {
-                            if key == "upsert_rows" {
-                                row.get("id")
-                            } else {
+                            if key == "deletes" {
                                 Some(row)
+                            } else {
+                                row.get("id")
                             }
                         })
                         .filter_map(Value::as_str)
@@ -140,13 +140,19 @@ pub async fn upsert_or_delete(
                 );
             }
         }
-        if let Some(values) = body
-            .get("upsert_columns")
-            .and_then(|c| c.get("id"))
-            .and_then(Value::as_array)
-        {
-            ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+        for key in ["upsert_columns", "patch_columns"] {
+            if let Some(values) = body
+                .get(key)
+                .and_then(|c| c.get("id"))
+                .and_then(Value::as_array)
+            {
+                ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
         }
+        // A filtered write touches rows the gateway cannot name.
+        let filtered = ["delete_by_filter", "patch_by_filter"]
+            .iter()
+            .any(|key| body.get(*key).is_some_and(|v| !v.is_null()));
         let response = crate::routes::turbopuffer::passthrough(
             Arc::clone(&state),
             "POST",
@@ -158,7 +164,13 @@ pub async fn upsert_or_delete(
         if response.status().is_success() {
             crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
             if state.aerospike_runtime.generation() > 0 {
-                delete_cache_ids(&state, &namespace, &ids).await;
+                if filtered {
+                    if let Err(e) = state.aerospike.delete_set(&namespace).await {
+                        warn!(namespace = %namespace, error = %e, "Aerospike namespace cache purge failed after filtered write (best-effort)");
+                    }
+                } else {
+                    delete_cache_ids(&state, &namespace, &ids).await;
+                }
             }
             state.namespace_list_cache.clear();
         }

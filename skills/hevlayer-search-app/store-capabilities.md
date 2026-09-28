@@ -40,10 +40,10 @@ request does once a turbopuffer key is set.
 | Ordered scans | [api/scans](https://hevlayer.com/docs/api/scans) | yes | yes |
 | Facets | [api/scans](https://hevlayer.com/docs/api/scans) | no | partial |
 | Aggregates / group_by | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Delete by filter | [api/write](https://hevlayer.com/docs/api/write) | no | partial |
-| Row patches | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
-| Column patches | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
-| Conditional writes | [api/write](https://hevlayer.com/docs/api/write) | partial | yes |
+| Delete by filter | [api/write](https://hevlayer.com/docs/api/write) | yes | partial |
+| Row patches | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
+| Column patches | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
+| Conditional writes | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
 | Copy namespace | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
 | Branch namespace | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
 | Vendor encryption controls | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
@@ -69,7 +69,6 @@ request does once a turbopuffer key is set.
 - **Multi-query queries body / rerank_by (client-composed hybrid)** on pgvector (local): 422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
-- **Conditional writes** on pgvector (local): upsert_condition and delete_condition, including $ref_new; patch_condition returns 422 because row and column patches are unsupported
 - **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
 - **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.
 

@@ -255,12 +255,40 @@ impl PgvectorClient {
                 "upsert_rows",
                 "upsert_columns",
                 "deletes",
+                "patch_rows",
+                "patch_columns",
+                "patch_by_filter",
+                "patch_by_filter_allow_partial",
+                "delete_by_filter",
+                "delete_by_filter_allow_partial",
                 "upsert_condition",
+                "patch_condition",
                 "delete_condition",
                 EMBEDDING_PROFILES_KEY,
             ],
         )?;
         let rows = schema::rows(body)?;
+        let patches = schema::patches(body)?;
+        for patch in &patches {
+            id_key(
+                patch
+                    .get("id")
+                    .ok_or_else(|| invalid("patch requires id"))?,
+            )?;
+        }
+        let filter_patch = FilterPatch::parse(body)?;
+        let delete_filter = body.get("delete_by_filter").filter(|v| !v.is_null());
+        let partial = |key: &str| -> Result<bool> {
+            body.get(key)
+                .map(|v| {
+                    v.as_bool()
+                        .ok_or_else(|| invalid(format!("{key} must be a boolean")))
+                })
+                .transpose()
+                .map(|v| v.unwrap_or(false))
+        };
+        let patch_partial = partial("patch_by_filter_allow_partial")?;
+        let delete_partial = partial("delete_by_filter_allow_partial")?;
         // Validate what the request alone can prove before the transaction
         // (RFC 0114 atomicity): a declaration this store cannot serve, or a
         // metric it cannot index, is rejected with no lock and no SQL. The
@@ -300,7 +328,15 @@ impl PgvectorClient {
             .as_ref()
             .map(|n| n.schema.clone())
             .unwrap_or_default();
-        let schema = old_schema.merge(body.get("schema"), &rows)?;
+        // Patch values infer undeclared attribute types as upserted ones do.
+        let mut written = rows.clone();
+        written.extend(patches.iter().cloned());
+        written.extend(
+            filter_patch
+                .as_ref()
+                .map(|f| Value::Object(f.patch.clone())),
+        );
+        let schema = old_schema.merge(body.get("schema"), &written)?;
         let metric = body
             .get("distance_metric")
             .map(|v| {
@@ -320,8 +356,11 @@ impl PgvectorClient {
         if previous.as_ref().is_some_and(|n| n.metric != metric) {
             return Err(invalid("distance_metric cannot change"));
         }
-        for row in &rows {
+        for row in rows.iter().chain(&patches) {
             schema.validate_row(row, metric)?;
+        }
+        if let Some(filter_patch) = filter_patch.as_ref() {
+            schema.validate_attributes(&Value::Object(filter_patch.patch.clone()), metric)?;
         }
         let embed = match profiles {
             Some(profiles) => profiles,
@@ -340,14 +379,40 @@ impl PgvectorClient {
                     "one vector field per namespace; this namespace's is its gateway-embedded attribute",
                 ));
             }
+            // A patch cannot recompute an embedding (a filter patch does not
+            // know its rows until the UPDATE runs), and a patched target
+            // would no longer be the embedding of its source. Refused, as the
+            // gateway refuses source patches on every store.
+            for (source, target) in targets {
+                let patched = |name: &str| {
+                    patches.iter().any(|p| p.get(name).is_some())
+                        || filter_patch
+                            .as_ref()
+                            .is_some_and(|f| f.patch.contains_key(name))
+                };
+                if let Some(name) = [source, target].into_iter().find(|name| patched(name)) {
+                    return Err(invalid(format!(
+                        "patching gateway-embedded attribute `{name}` is unsupported; upsert the full row so Layer can recompute `{target}`"
+                    )));
+                }
+            }
         }
         // Conditions apply per targeted document: an upsert of a new id always
         // proceeds, a delete of a missing id is a no-op.
         let upsert_condition = body.get("upsert_condition").filter(|v| !v.is_null());
         let delete_condition = body.get("delete_condition").filter(|v| !v.is_null());
+        let patch_condition = body.get("patch_condition").filter(|v| !v.is_null());
+        // Compile every filter against the merged schema before any SQL, so a
+        // malformed or unsupported filter rejects the whole write untouched.
         for (condition, refs) in [
             (upsert_condition, filter::Refs::Excluded),
+            (patch_condition, filter::Refs::Excluded),
             (delete_condition, filter::Refs::Null),
+            (
+                filter_patch.as_ref().map(|f| &f.filters),
+                filter::Refs::Rejected,
+            ),
+            (delete_filter, filter::Refs::Rejected),
         ] {
             if let Some(condition) = condition {
                 filter::compile(&mut QueryBuilder::new(""), &schema, condition, 0, refs)?;
@@ -373,42 +438,90 @@ impl PgvectorClient {
         schema.install(&mut tx, &table, &old_schema, metric).await?;
         sqlx::query("INSERT INTO layer_pgvector.namespaces (scope,name,table_name,schema,metric,embed) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope,name) DO UPDATE SET schema=excluded.schema,embed=excluded.embed,updated_at=now()")
             .bind(&self.scope).bind(namespace).bind(&table).bind(schema.value()).bind(metric).bind(&embed).execute(&mut *tx).await.map_err(db)?;
-        let mut upserted = 0;
-        for row in &rows {
-            let key = id_key(&row["id"])?;
+        // Turbopuffer's order: delete_by_filter, then patch_by_filter, then
+        // upserts, patches and deletes. One transaction; any error rolls back.
+        let mut deleted = 0;
+        let mut patched = 0;
+        let mut remaining = false;
+        if let Some(filters) = delete_filter {
+            let (target, more) = filtered_target(
+                &mut tx,
+                &table,
+                &schema,
+                filters,
+                DELETE_BY_FILTER_LIMIT,
+                delete_partial,
+                "delete_by_filter",
+            )
+            .await?;
             let mut sql = QueryBuilder::<Postgres>::new(format!(
-                "INSERT INTO layer_pgvector.\"{table}\" AS cur (key,data"
+                "DELETE FROM layer_pgvector.\"{table}\" WHERE "
             ));
-            for field in schema.fields() {
-                sql.push(",").push(quoted(&field.column()));
-            }
-            sql.push(") VALUES (")
-                .push_bind(key)
-                .push(",")
-                .push_bind(row.clone());
-            for field in schema.fields() {
-                sql.push(",");
-                field.bind(&mut sql, row.get(&field.name).unwrap_or(&Value::Null));
-            }
-            sql.push(") ON CONFLICT(key) DO UPDATE SET data=excluded.data");
-            for field in schema.fields() {
-                sql.push(",")
-                    .push(quoted(&field.column()))
-                    .push("=excluded.")
-                    .push(quoted(&field.column()));
-            }
-            if let Some(condition) = upsert_condition {
-                // A failed condition leaves the stored row and affects 0 rows.
-                sql.push(" WHERE (");
-                filter::compile(&mut sql, &schema, condition, 0, filter::Refs::Excluded)?;
-                sql.push(")");
-            }
-            upserted += sql
+            target.push(&mut sql, &schema)?;
+            deleted += sql
                 .build()
                 .execute(&mut *tx)
                 .await
                 .map_err(db)?
                 .rows_affected();
+            remaining |= more;
+        }
+        if let Some(filter_patch) = filter_patch.as_ref() {
+            let (target, more) = filtered_target(
+                &mut tx,
+                &table,
+                &schema,
+                &filter_patch.filters,
+                PATCH_BY_FILTER_LIMIT,
+                patch_partial,
+                "patch_by_filter",
+            )
+            .await?;
+            let mut sql = QueryBuilder::<Postgres>::new(format!(
+                "UPDATE layer_pgvector.\"{table}\" SET data=data||"
+            ));
+            sql.push_bind(Value::Object(filter_patch.patch.clone()))
+                .push("::jsonb");
+            for field in schema.fields() {
+                if let Some(value) = filter_patch.patch.get(&field.name) {
+                    sql.push(",").push(quoted(&field.column())).push("=");
+                    field.bind(&mut sql, value);
+                }
+            }
+            sql.push(" WHERE ");
+            target.push(&mut sql, &schema)?;
+            patched += sql
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?
+                .rows_affected();
+            remaining |= more;
+        }
+        let mut upserted = 0;
+        for row in &rows {
+            upserted += upsert_row(&mut tx, &table, &schema, row, upsert_condition).await?;
+        }
+        // A patch is the stored row with the named attributes replaced,
+        // written through the upsert statement so `patch_condition` sees the
+        // stored row and `$ref_new` the patched one. A missing id is ignored:
+        // patches never create documents.
+        for patch in &patches {
+            let key = id_key(&patch["id"])?;
+            let stored: Option<Value> = sqlx::query_scalar(&format!(
+                "SELECT data FROM layer_pgvector.\"{table}\" WHERE key=$1"
+            ))
+            .bind(&key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db)?;
+            let Some(mut row) = stored else {
+                continue;
+            };
+            for (name, value) in object(patch)? {
+                row[name] = value.clone();
+            }
+            patched += upsert_row(&mut tx, &table, &schema, &row, patch_condition).await?;
         }
         let mut sql = QueryBuilder::<Postgres>::new(format!(
             "DELETE FROM layer_pgvector.\"{table}\" WHERE key=ANY("
@@ -419,16 +532,18 @@ impl PgvectorClient {
             filter::compile(&mut sql, &schema, condition, 0, filter::Refs::Null)?;
             sql.push(")");
         }
-        let deleted = sql
+        deleted += sql
             .build()
             .execute(&mut *tx)
             .await
             .map_err(db)?
             .rows_affected();
         tx.commit().await.map_err(db)?;
-        Ok(
-            json!({"status":"OK", "message":"write committed", "billing":{}, "rows_affected":upserted+deleted, "rows_upserted":upserted, "rows_deleted":deleted}),
-        )
+        let mut result = json!({"status":"OK", "message":"write committed", "billing":{}, "rows_affected":upserted+patched+deleted, "rows_upserted":upserted, "rows_patched":patched, "rows_deleted":deleted});
+        if delete_filter.is_some() || filter_patch.is_some() {
+            result["rows_remaining"] = json!(remaining);
+        }
+        Ok(result)
     }
 
     async fn query_wire(&self, namespace: &str, body: &Value) -> Result<Value> {
@@ -804,6 +919,145 @@ impl PgvectorClient {
     }
 }
 
+/// Turbopuffer's documented per-request ceilings for filtered writes. Past
+/// one, the write is a 400 unless `*_allow_partial` is set, in which case the
+/// first rows by insertion order are written and `rows_remaining` is true.
+const DELETE_BY_FILTER_LIMIT: u64 = 5_000_000;
+const PATCH_BY_FILTER_LIMIT: u64 = 50_000;
+
+/// `patch_by_filter: {filters, patch}`.
+struct FilterPatch {
+    filters: Value,
+    patch: Map<String, Value>,
+}
+impl FilterPatch {
+    fn parse(body: &Value) -> Result<Option<Self>> {
+        let Some(value) = body.get("patch_by_filter").filter(|v| !v.is_null()) else {
+            return Ok(None);
+        };
+        keys(value, &["filters", "patch"])?;
+        let filters = value
+            .get("filters")
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| invalid("patch_by_filter requires filters"))?
+            .clone();
+        let patch = value
+            .get("patch")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("patch_by_filter requires a patch object"))?
+            .clone();
+        if patch.contains_key("id") {
+            return Err(invalid("patch_by_filter cannot patch id"));
+        }
+        Ok(Some(Self { filters, patch }))
+    }
+}
+
+/// The rows a filtered write touches: every match, or, when the match count
+/// passes the limit and partial writes are allowed, the first `limit` rows.
+enum Target<'a> {
+    All(&'a Value),
+    First(&'a Value, u64, String),
+}
+impl Target<'_> {
+    fn push(&self, sql: &mut QueryBuilder<'_, Postgres>, schema: &Schema) -> Result<()> {
+        match self {
+            Self::All(filters) => {
+                sql.push("(");
+                filter::compile(sql, schema, filters, 0, filter::Refs::Rejected)?;
+                sql.push(")");
+            }
+            Self::First(filters, limit, table) => {
+                sql.push(format!(
+                    "rid IN (SELECT rid FROM layer_pgvector.\"{table}\" WHERE ("
+                ));
+                filter::compile(sql, schema, filters, 0, filter::Refs::Rejected)?;
+                sql.push(") ORDER BY rid LIMIT ")
+                    .push_bind(i64::try_from(*limit).unwrap_or(i64::MAX))
+                    .push(")");
+            }
+        }
+        Ok(())
+    }
+}
+async fn filtered_target<'a>(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &str,
+    schema: &Schema,
+    filters: &'a Value,
+    limit: u64,
+    allow_partial: bool,
+    key: &str,
+) -> Result<(Target<'a>, bool)> {
+    let mut sql = QueryBuilder::<Postgres>::new(format!(
+        "SELECT count(*) FROM (SELECT 1 FROM layer_pgvector.\"{table}\" WHERE ("
+    ));
+    filter::compile(&mut sql, schema, filters, 0, filter::Refs::Rejected)?;
+    sql.push(") LIMIT ")
+        .push_bind(i64::try_from(limit).unwrap_or(i64::MAX - 1) + 1)
+        .push(") m");
+    let matches: i64 = sql
+        .build_query_scalar()
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db)?;
+    if (matches as u64) <= limit {
+        return Ok((Target::All(filters), false));
+    }
+    if !allow_partial {
+        return Err(invalid(format!(
+            "{key} matches more than {limit} documents; set {key}_allow_partial to write the first {limit}"
+        )));
+    }
+    Ok((Target::First(filters, limit, table.to_owned()), true))
+}
+
+/// `INSERT ... ON CONFLICT DO UPDATE` of one complete row, gated by an
+/// optional condition over the stored row (`cur`) and the new one
+/// (`excluded`). Returns the rows written: 0 when the condition fails.
+async fn upsert_row(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &str,
+    schema: &Schema,
+    row: &Value,
+    condition: Option<&Value>,
+) -> Result<u64> {
+    let key = id_key(&row["id"])?;
+    let mut sql = QueryBuilder::<Postgres>::new(format!(
+        "INSERT INTO layer_pgvector.\"{table}\" AS cur (key,data"
+    ));
+    for field in schema.fields() {
+        sql.push(",").push(quoted(&field.column()));
+    }
+    sql.push(") VALUES (")
+        .push_bind(key)
+        .push(",")
+        .push_bind(row.clone());
+    for field in schema.fields() {
+        sql.push(",");
+        field.bind(&mut sql, row.get(&field.name).unwrap_or(&Value::Null));
+    }
+    sql.push(") ON CONFLICT(key) DO UPDATE SET data=excluded.data");
+    for field in schema.fields() {
+        sql.push(",")
+            .push(quoted(&field.column()))
+            .push("=excluded.")
+            .push(quoted(&field.column()));
+    }
+    if let Some(condition) = condition {
+        // A failed condition leaves the stored row and affects 0 rows.
+        sql.push(" WHERE (");
+        filter::compile(&mut sql, schema, condition, 0, filter::Refs::Excluded)?;
+        sql.push(")");
+    }
+    Ok(sql
+        .build()
+        .execute(&mut **tx)
+        .await
+        .map_err(db)?
+        .rows_affected())
+}
+
 /// `(source, target)` of each gateway embedding profile (RFC 0118 step E).
 /// Everything else in a profile is the gateway's and stays opaque here.
 fn embed_targets(profiles: &Value) -> Result<Vec<(&str, &str)>> {
@@ -1007,11 +1261,37 @@ impl TurbopufferClient for PgvectorClient {
         self.write(namespace, &json!({"upsert_rows":rows})).await?;
         Ok(TurbopufferWriteOutcome::default())
     }
-    async fn patch(&self, _: &str, _: &[PatchDoc]) -> Result<TurbopufferWriteOutcome> {
-        Err(unsupported("patch_rows"))
+    async fn patch(&self, namespace: &str, docs: &[PatchDoc]) -> Result<TurbopufferWriteOutcome> {
+        let rows: Vec<Value> = docs
+            .iter()
+            .map(|d| {
+                let mut row = json!(d.attributes);
+                row["id"] = json!(d.id);
+                row
+            })
+            .collect();
+        self.write(namespace, &json!({"patch_rows":rows})).await?;
+        Ok(TurbopufferWriteOutcome::default())
     }
-    async fn patch_columns(&self, _: &str, _: &PatchColumns) -> Result<TurbopufferWriteOutcome> {
-        Err(unsupported("patch_columns"))
+    async fn patch_columns(
+        &self,
+        namespace: &str,
+        columns: &PatchColumns,
+    ) -> Result<TurbopufferWriteOutcome> {
+        let mut body = json!(columns.columns);
+        body["id"] = json!(columns.ids);
+        self.write(namespace, &json!({"patch_columns":body}))
+            .await?;
+        Ok(TurbopufferWriteOutcome::default())
+    }
+    async fn delete_by_filter(
+        &self,
+        namespace: &str,
+        filters: &Value,
+    ) -> Result<TurbopufferWriteOutcome> {
+        self.write(namespace, &json!({"delete_by_filter":filters}))
+            .await?;
+        Ok(TurbopufferWriteOutcome::default())
     }
     async fn delete(&self, ns: &str, ids: &[String]) -> Result<TurbopufferWriteOutcome> {
         self.write(ns, &json!({"deletes":ids})).await?;

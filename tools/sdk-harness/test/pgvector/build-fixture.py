@@ -213,13 +213,8 @@ add(
 )
 # Complete unsupported writes must leave the table, schema and contents untouched.
 # `feature` is the typed field on the 422 body (RFC 0118): the wire-feature id
-# where one owns the key, otherwise the key itself. `patch_condition` is owned
-# by `conditional_writes`, which Postgres serves for upserts and deletes only.
+# where one owns the key, otherwise the key itself.
 for key, value, feature in [
-    ("patch_rows", [{"id": "a", "n": 99}], "patch_rows"),
-    ("patch_columns", {"id": ["a"], "n": [99]}, "patch_columns"),
-    ("delete_by_filter", ["n", "Eq", 1], "delete_by_filter"),
-    ("patch_condition", ["n", "Eq", 1], "conditional_writes"),
     ("copy_from_namespace", "other", "copy_from_namespace"),
     ("branch_from_namespace", "other", "branch_from_namespace"),
     ("distance_metric", "dot_product", "distance_metric"),
@@ -248,9 +243,9 @@ add("schema unchanged after embed rejection", "schema", absent="summary")
 add(
     "schema DDL rolled back with unsupported option",
     "write",
-    {"schema": {"new_field": "string"}, "patch_rows": []},
+    {"schema": {"new_field": "string"}, "return_affected_ids": True},
     status=422,
-    feature="patch_rows",
+    feature="return_affected_ids",
 )
 add("schema unchanged after rejection", "schema", absent="new_field")
 add("rejected writes unchanged count", "metadata", count=6)
@@ -555,6 +550,145 @@ sessions_case(
     count=1,
 )
 
+# LYR-140 (RFC 0115 slice B item 7): patches and filtered writes, in a
+# namespace of their own (`"ns": "patch"`). A patch writes only the named
+# attributes; a patch to a missing id is ignored; the write is one transaction.
+def patch_case(name, op, body=None, **expected):
+    add(name, op, body, ns="patch", **expected)
+
+
+def patch_rows_after(name, **values):
+    patch_case(
+        name,
+        "query",
+        {"rank_by": ["id", "asc"], "top_k": 10, "include_attributes": True},
+        values=values,
+    )
+
+
+patch_case(
+    "patch seed rows",
+    "write",
+    {
+        "upsert_rows": [
+            {"id": "p1", "vector": [1, 0], "first_prompt": "one", "n": 1, "status": "published"},
+            {"id": "p2", "vector": [0, 1], "first_prompt": "two", "n": 2, "status": "published"},
+            {"id": "p3", "vector": [1, 1], "first_prompt": "three", "n": 3, "status": "draft"},
+        ],
+    },
+    count=3,
+)
+# hev kit's PatchSessionSummaries body, verbatim in shape.
+patch_case(
+    "kit patch_rows summary with schema",
+    "write",
+    {
+        "patch_rows": [{"id": "p1", "summary": "first session"}],
+        "schema": {"summary": {"type": "string"}},
+    },
+    count=1,
+    rows_patched=1,
+)
+patch_rows_after("patch keeps unnamed attributes", summary="first session", first_prompt="one", n=1)
+patch_case("patched attribute is declared", "schema", field="summary")
+patch_case(
+    "patch_rows on a missing id is ignored",
+    "write",
+    {"patch_rows": [{"id": "missing", "n": 9}]},
+    count=0,
+    rows_patched=0,
+)
+patch_case("patch never creates a row", "metadata", count=3)
+patch_case(
+    "patch_columns with null clearing",
+    "write",
+    {"patch_columns": {"id": ["p1", "p2"], "summary": [None, "second"], "n": [10, 20]}},
+    count=2,
+    rows_patched=2,
+)
+patch_rows_after("patch_columns applied", summary=None, n=10)
+patch_case(
+    "patch_condition with $ref_new",
+    "write",
+    {
+        "patch_rows": [{"id": "p1", "n": 5}, {"id": "p2", "n": 25}],
+        "patch_condition": ["n", "Lt", {"$ref_new": "n"}],
+    },
+    count=1,
+    rows_patched=1,
+)
+patch_case(
+    "failed patch_condition keeps the row",
+    "query",
+    {"rank_by": ["id", "asc"], "top_k": 2, "include_attributes": ["n"]},
+    order=["p1", "p2"],
+    n=10,
+)
+patch_case(
+    "patch_by_filter",
+    "write",
+    {"patch_by_filter": {"filters": ["status", "Eq", "published"], "patch": {"status": "archived"}}},
+    count=2,
+    rows_patched=2,
+)
+patch_case(
+    "patch_by_filter result is filterable",
+    "query",
+    {"filters": ["status", "Eq", "archived"], "top_k": 10},
+    order=["p1", "p2"],
+)
+patch_case(
+    "delete_by_filter",
+    "write",
+    {"delete_by_filter": ["status", "Eq", "draft"]},
+    count=1,
+    rows_deleted=1,
+)
+patch_case("delete_by_filter removed the row", "metadata", count=2)
+# Turbopuffer's order: delete_by_filter, patch_by_filter, then the rest.
+patch_case(
+    "filtered writes combine with upsert, patch and delete",
+    "write",
+    {
+        "delete_by_filter": ["id", "Eq", "p2"],
+        "patch_by_filter": {"filters": ["status", "Eq", "archived"], "patch": {"summary": "by filter"}},
+        "upsert_rows": [{"id": "p4", "vector": [0.5, 0.5], "n": 4}],
+        "patch_rows": [{"id": "p4", "status": "new"}, {"id": "p2", "status": "gone"}],
+        "deletes": ["p1"],
+    },
+    count=5,
+    rows_patched=2,
+    rows_deleted=2,
+)
+patch_rows_after("combined write result", status="new", n=4, summary=None)
+patch_case("combined write leaves one row", "metadata", count=1)
+# Rejected writes change nothing, including a schema declared beside them.
+for key, value, status, feature in [
+    ("patch_rows", [{"id": "p4", "n": "wrong"}], 400, None),
+    ("patch_columns", {"id": ["p4", "p5"], "n": [1]}, 400, None),
+    ("patch_by_filter", {"filters": ["n", "Regex", "x"], "patch": {"n": 1}}, 422, "Regex"),
+    ("delete_by_filter", ["nope", "Eq", 1], 400, None),
+    ("patch_condition", ["n", "Lt", {"$ref_new": "status"}], 400, None),
+]:
+    body = {
+        "schema": {"rejected_field": "string"},
+        "upsert_rows": [{"id": "rogue", "vector": [1, 0], "n": 999}],
+        "deletes": ["p4"],
+        key: value,
+    }
+    if key == "patch_condition":
+        body["patch_rows"] = [{"id": "p4", "n": 5}]
+    patch_case(
+        "rejected " + key + " is atomic",
+        "write",
+        body,
+        status=status,
+        **({"feature": feature} if feature else {}),
+    )
+patch_case("schema unchanged after rejected patches", "schema", absent="rejected_field")
+patch_case("rows unchanged after rejected patches", "metadata", count=1)
+patch_rows_after("row unchanged after rejected patches", status="new", n=4)
+
 # RFC 0118 steps C and E: schema `embed` on Postgres, in a namespace of its own
 # (`"ns": "embed"`), since an embedded namespace holds no client vectors. The
 # gateway embeds with the configured provider; no row carries a vector.
@@ -690,4 +824,33 @@ embed_case(
     feature="embed.chunk",
 )
 embed_case("rejected embed writes leave the count", "metadata", count=4)
+# A patch cannot recompute the embedding, so the gateway refuses to patch its
+# source (a 422 validation_error, not UnsupportedByStore: no store takes it);
+# an unrelated attribute still patches.
+embed_case(
+    "reject a patch to the embedded source",
+    "write",
+    {"patch_rows": [{"id": "planet", "text": "Saturn has rings."}]},
+    status=422,
+)
+embed_case(
+    "reject a filter patch to the embedded source",
+    "write",
+    {"patch_by_filter": {"filters": ["id", "Eq", "planet"], "patch": {"text": "Saturn"}}},
+    status=422,
+)
+embed_case(
+    "patch an attribute beside the embedded one",
+    "write",
+    {"patch_rows": [{"id": "planet", "topic": "astronomy"}]},
+    count=1,
+    rows_patched=1,
+)
+embed_case(
+    "ANN over Embed after the patch",
+    "query",
+    {"rank_by": ["text", "ANN", ["Embed", "largest planet in the solar system"]], "top_k": 1, "include_attributes": ["topic"]},
+    first="planet",
+    values={"topic": "astronomy"},
+)
 Path(__file__).with_name("cases.json").write_text(json.dumps(cases, indent=2) + "\n")

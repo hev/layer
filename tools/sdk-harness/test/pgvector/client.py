@@ -67,6 +67,9 @@ async def main():
                         result = result.model_dump(by_alias=True, exclude_none=True)
                     if op == "write":
                         assert result["rows_affected"] == case["count"], case["name"]
+                        for key in ("rows_patched", "rows_deleted"):
+                            if key in case:
+                                assert result[key] == case[key], (case["name"], result)
                     if op == "metadata":
                         assert result["approx_row_count"] == case["count"], case["name"]
                         assert "index" not in result, case["name"]
@@ -105,6 +108,8 @@ async def main():
                             )
                         if "n" in case:
                             assert rows[0]["n"] == case["n"], case["name"]
+                        for key, value in case.get("values", {}).items():
+                            assert rows[0].get(key) == value, (case["name"], rows)
                         if case.get("hybrid"):
                             assert result.get("hybrid"), case["name"]
                         if "vector" in case:

@@ -498,12 +498,14 @@ mod tests {
             ArrayFilters,
             OrderedScan,
             ConditionalWrites,
+            PatchRows,
+            PatchColumns,
+            DeleteByFilter,
         ];
         // Served with the limits stated in the cell: HybridText with
-        // fuzziness 0, conditional upserts/deletes, any number of text
-        // fields but one vector field, and gateway-served embed on one
-        // attribute (RFC 0118 step C).
-        let approximate = [Hybrid, ConditionalWrites, MultipleFields, Embed];
+        // fuzziness 0, any number of text fields but one vector field, and
+        // gateway-served embed on one attribute (RFC 0118 step C).
+        let approximate = [Hybrid, MultipleFields, Embed];
         for &feature in WireFeature::ALL {
             let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(

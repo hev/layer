@@ -50,7 +50,11 @@ try {
       continue;
     }
     assert.equal(c.status ?? 200, 200, `${c.name}: unexpected success`);
-    if (c.op === "write") assert.equal(result.rows_affected, c.count, c.name);
+    if (c.op === "write") {
+      assert.equal(result.rows_affected, c.count, c.name);
+      for (const key of ["rows_patched", "rows_deleted"])
+        if (key in c) assert.equal(result[key], c[key], c.name);
+    }
     if (c.op === "metadata") {
       assert.equal(result.approx_row_count, c.count, c.name);
       assert(!result.index, c.name);
@@ -85,6 +89,8 @@ try {
           c.name,
         );
       if ("n" in c) assert.equal(rows[0].n, c.n, c.name);
+      for (const [key, value] of Object.entries(c.values ?? {}))
+        assert.deepEqual(rows[0][key] ?? null, value, c.name);
       if (c.hybrid) assert(result.hybrid, c.name);
       if (c.vector)
         assert.equal(rows[0][c.vector[0]].length, c.vector[1], c.name);

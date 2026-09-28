@@ -21,10 +21,8 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
     use crate::capabilities::{Coverage, WireFeature::*};
     match feature {
         NamespaceCrud | UpsertRows | UpsertColumns | DeleteIds | Fetch | Dense | DistanceMetric
-        | Fts | Projection | ScalarFilters | NotFilters | ArrayFilters | OrderedScan => {
-            Coverage::supported()
-        }
-        ConditionalWrites => Coverage::approximate(CONDITIONAL_WRITES_UPSERT_AND_DELETE),
+        | Fts | Projection | ScalarFilters | NotFilters | ArrayFilters | OrderedScan
+        | PatchRows | PatchColumns | DeleteByFilter | ConditionalWrites => Coverage::supported(),
         // Mirrors the phase-one gate in the gateway's run_hybrid_text.
         Hybrid => Coverage::approximate(HYBRID_TEXT_FUZZINESS_ZERO_ONLY),
         MultipleFields => Coverage::approximate(MULTIPLE_TEXT_FIELDS_ONE_VECTOR),
@@ -46,10 +44,6 @@ pub const HYBRID_TEXT_FUZZINESS_ZERO_ONLY: &str = "HybridText with fuzziness: 0 
 /// Every `full_text_search` field shares one pg_search BM25 index; a second
 /// `[N]f32` field returns 422.
 pub const MULTIPLE_TEXT_FIELDS_ONE_VECTOR: &str = "Any number of full_text_search fields, ranked one at a time by BM25; a second vector field returns 422";
-
-/// Conditions run in the write's transaction: `INSERT ... ON CONFLICT DO UPDATE
-/// ... WHERE` for upserts, `DELETE ... WHERE` for deletes.
-pub const CONDITIONAL_WRITES_UPSERT_AND_DELETE: &str = "upsert_condition and delete_condition, including $ref_new; patch_condition returns 422 because row and column patches are unsupported";
 
 /// Phase-1 adapter entry point; no database connection is needed for coverage.
 pub fn capabilities() -> crate::capabilities::Capabilities {

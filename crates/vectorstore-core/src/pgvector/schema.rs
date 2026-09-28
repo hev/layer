@@ -281,6 +281,10 @@ impl Schema {
     }
     pub fn validate_row(&self, row: &Value, metric: &str) -> Result<()> {
         id_key(row.get("id").ok_or_else(|| invalid("row requires id"))?)?;
+        self.validate_attributes(row, metric)
+    }
+    /// Validate every attribute but `id`, as a row or a patch carries them.
+    pub fn validate_attributes(&self, row: &Value, metric: &str) -> Result<()> {
         for (k, v) in object(row)? {
             if k == "id" {
                 continue;
@@ -411,26 +415,35 @@ fn infer_array(items: &[Value]) -> Option<&'static str> {
     }
 }
 pub(super) fn rows(body: &Value) -> Result<Vec<Value>> {
-    if body.get("upsert_rows").is_some() && body.get("upsert_columns").is_some() {
-        return Err(invalid(
-            "upsert_rows and upsert_columns are mutually exclusive",
-        ));
+    shaped(body, "upsert")
+}
+/// `patch_rows` or `patch_columns` as rows. A key present with null clears
+/// that attribute; an absent key keeps the stored value.
+pub(super) fn patches(body: &Value) -> Result<Vec<Value>> {
+    shaped(body, "patch")
+}
+fn shaped(body: &Value, op: &str) -> Result<Vec<Value>> {
+    let (row_key, column_key) = (format!("{op}_rows"), format!("{op}_columns"));
+    if body.get(&row_key).is_some() && body.get(&column_key).is_some() {
+        return Err(invalid(format!(
+            "{row_key} and {column_key} are mutually exclusive"
+        )));
     }
-    if let Some(rows) = body.get("upsert_rows") {
+    if let Some(rows) = body.get(&row_key) {
         let rows = rows
             .as_array()
-            .ok_or_else(|| invalid("upsert_rows must be an array"))?;
+            .ok_or_else(|| invalid(format!("{row_key} must be an array")))?;
         for row in rows {
             object(row)?;
         }
         return Ok(rows.clone());
     }
-    if let Some(columns) = body.get("upsert_columns") {
+    if let Some(columns) = body.get(&column_key) {
         let columns = object(columns)?;
         let count = columns
             .get("id")
             .and_then(Value::as_array)
-            .ok_or_else(|| invalid("upsert_columns requires id array"))?
+            .ok_or_else(|| invalid(format!("{column_key} requires id array")))?
             .len();
         if !columns
             .values()

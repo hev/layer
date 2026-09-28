@@ -1019,102 +1019,6 @@
     "hybrid": true
   },
   {
-    "name": "reject mixed patch_rows",
-    "op": "write",
-    "body": {
-      "upsert_rows": [
-        {
-          "id": "rogue",
-          "vector": [
-            1,
-            0
-          ],
-          "n": 999
-        }
-      ],
-      "patch_rows": [
-        {
-          "id": "a",
-          "n": 99
-        }
-      ]
-    },
-    "status": 422,
-    "feature": "patch_rows"
-  },
-  {
-    "name": "reject mixed patch_columns",
-    "op": "write",
-    "body": {
-      "upsert_rows": [
-        {
-          "id": "rogue",
-          "vector": [
-            1,
-            0
-          ],
-          "n": 999
-        }
-      ],
-      "patch_columns": {
-        "id": [
-          "a"
-        ],
-        "n": [
-          99
-        ]
-      }
-    },
-    "status": 422,
-    "feature": "patch_columns"
-  },
-  {
-    "name": "reject mixed delete_by_filter",
-    "op": "write",
-    "body": {
-      "upsert_rows": [
-        {
-          "id": "rogue",
-          "vector": [
-            1,
-            0
-          ],
-          "n": 999
-        }
-      ],
-      "delete_by_filter": [
-        "n",
-        "Eq",
-        1
-      ]
-    },
-    "status": 422,
-    "feature": "delete_by_filter"
-  },
-  {
-    "name": "reject mixed patch_condition",
-    "op": "write",
-    "body": {
-      "upsert_rows": [
-        {
-          "id": "rogue",
-          "vector": [
-            1,
-            0
-          ],
-          "n": 999
-        }
-      ],
-      "patch_condition": [
-        "n",
-        "Eq",
-        1
-      ]
-    },
-    "status": 422,
-    "feature": "conditional_writes"
-  },
-  {
     "name": "reject mixed copy_from_namespace",
     "op": "write",
     "body": {
@@ -1205,10 +1109,10 @@
       "schema": {
         "new_field": "string"
       },
-      "patch_rows": []
+      "return_affected_ids": true
     },
     "status": 422,
-    "feature": "patch_rows"
+    "feature": "return_affected_ids"
   },
   {
     "name": "schema unchanged after rejection",
@@ -2533,6 +2437,518 @@
     "count": 1
   },
   {
+    "name": "patch seed rows",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "p1",
+          "vector": [
+            1,
+            0
+          ],
+          "first_prompt": "one",
+          "n": 1,
+          "status": "published"
+        },
+        {
+          "id": "p2",
+          "vector": [
+            0,
+            1
+          ],
+          "first_prompt": "two",
+          "n": 2,
+          "status": "published"
+        },
+        {
+          "id": "p3",
+          "vector": [
+            1,
+            1
+          ],
+          "first_prompt": "three",
+          "n": 3,
+          "status": "draft"
+        }
+      ]
+    },
+    "ns": "patch",
+    "count": 3
+  },
+  {
+    "name": "kit patch_rows summary with schema",
+    "op": "write",
+    "body": {
+      "patch_rows": [
+        {
+          "id": "p1",
+          "summary": "first session"
+        }
+      ],
+      "schema": {
+        "summary": {
+          "type": "string"
+        }
+      }
+    },
+    "ns": "patch",
+    "count": 1,
+    "rows_patched": 1
+  },
+  {
+    "name": "patch keeps unnamed attributes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "top_k": 10,
+      "include_attributes": true
+    },
+    "ns": "patch",
+    "values": {
+      "summary": "first session",
+      "first_prompt": "one",
+      "n": 1
+    }
+  },
+  {
+    "name": "patched attribute is declared",
+    "op": "schema",
+    "ns": "patch",
+    "field": "summary"
+  },
+  {
+    "name": "patch_rows on a missing id is ignored",
+    "op": "write",
+    "body": {
+      "patch_rows": [
+        {
+          "id": "missing",
+          "n": 9
+        }
+      ]
+    },
+    "ns": "patch",
+    "count": 0,
+    "rows_patched": 0
+  },
+  {
+    "name": "patch never creates a row",
+    "op": "metadata",
+    "ns": "patch",
+    "count": 3
+  },
+  {
+    "name": "patch_columns with null clearing",
+    "op": "write",
+    "body": {
+      "patch_columns": {
+        "id": [
+          "p1",
+          "p2"
+        ],
+        "summary": [
+          null,
+          "second"
+        ],
+        "n": [
+          10,
+          20
+        ]
+      }
+    },
+    "ns": "patch",
+    "count": 2,
+    "rows_patched": 2
+  },
+  {
+    "name": "patch_columns applied",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "top_k": 10,
+      "include_attributes": true
+    },
+    "ns": "patch",
+    "values": {
+      "summary": null,
+      "n": 10
+    }
+  },
+  {
+    "name": "patch_condition with $ref_new",
+    "op": "write",
+    "body": {
+      "patch_rows": [
+        {
+          "id": "p1",
+          "n": 5
+        },
+        {
+          "id": "p2",
+          "n": 25
+        }
+      ],
+      "patch_condition": [
+        "n",
+        "Lt",
+        {
+          "$ref_new": "n"
+        }
+      ]
+    },
+    "ns": "patch",
+    "count": 1,
+    "rows_patched": 1
+  },
+  {
+    "name": "failed patch_condition keeps the row",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "top_k": 2,
+      "include_attributes": [
+        "n"
+      ]
+    },
+    "ns": "patch",
+    "order": [
+      "p1",
+      "p2"
+    ],
+    "n": 10
+  },
+  {
+    "name": "patch_by_filter",
+    "op": "write",
+    "body": {
+      "patch_by_filter": {
+        "filters": [
+          "status",
+          "Eq",
+          "published"
+        ],
+        "patch": {
+          "status": "archived"
+        }
+      }
+    },
+    "ns": "patch",
+    "count": 2,
+    "rows_patched": 2
+  },
+  {
+    "name": "patch_by_filter result is filterable",
+    "op": "query",
+    "body": {
+      "filters": [
+        "status",
+        "Eq",
+        "archived"
+      ],
+      "top_k": 10
+    },
+    "ns": "patch",
+    "order": [
+      "p1",
+      "p2"
+    ]
+  },
+  {
+    "name": "delete_by_filter",
+    "op": "write",
+    "body": {
+      "delete_by_filter": [
+        "status",
+        "Eq",
+        "draft"
+      ]
+    },
+    "ns": "patch",
+    "count": 1,
+    "rows_deleted": 1
+  },
+  {
+    "name": "delete_by_filter removed the row",
+    "op": "metadata",
+    "ns": "patch",
+    "count": 2
+  },
+  {
+    "name": "filtered writes combine with upsert, patch and delete",
+    "op": "write",
+    "body": {
+      "delete_by_filter": [
+        "id",
+        "Eq",
+        "p2"
+      ],
+      "patch_by_filter": {
+        "filters": [
+          "status",
+          "Eq",
+          "archived"
+        ],
+        "patch": {
+          "summary": "by filter"
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "p4",
+          "vector": [
+            0.5,
+            0.5
+          ],
+          "n": 4
+        }
+      ],
+      "patch_rows": [
+        {
+          "id": "p4",
+          "status": "new"
+        },
+        {
+          "id": "p2",
+          "status": "gone"
+        }
+      ],
+      "deletes": [
+        "p1"
+      ]
+    },
+    "ns": "patch",
+    "count": 5,
+    "rows_patched": 2,
+    "rows_deleted": 2
+  },
+  {
+    "name": "combined write result",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "top_k": 10,
+      "include_attributes": true
+    },
+    "ns": "patch",
+    "values": {
+      "status": "new",
+      "n": 4,
+      "summary": null
+    }
+  },
+  {
+    "name": "combined write leaves one row",
+    "op": "metadata",
+    "ns": "patch",
+    "count": 1
+  },
+  {
+    "name": "rejected patch_rows is atomic",
+    "op": "write",
+    "body": {
+      "schema": {
+        "rejected_field": "string"
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "deletes": [
+        "p4"
+      ],
+      "patch_rows": [
+        {
+          "id": "p4",
+          "n": "wrong"
+        }
+      ]
+    },
+    "ns": "patch",
+    "status": 400
+  },
+  {
+    "name": "rejected patch_columns is atomic",
+    "op": "write",
+    "body": {
+      "schema": {
+        "rejected_field": "string"
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "deletes": [
+        "p4"
+      ],
+      "patch_columns": {
+        "id": [
+          "p4",
+          "p5"
+        ],
+        "n": [
+          1
+        ]
+      }
+    },
+    "ns": "patch",
+    "status": 400
+  },
+  {
+    "name": "rejected patch_by_filter is atomic",
+    "op": "write",
+    "body": {
+      "schema": {
+        "rejected_field": "string"
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "deletes": [
+        "p4"
+      ],
+      "patch_by_filter": {
+        "filters": [
+          "n",
+          "Regex",
+          "x"
+        ],
+        "patch": {
+          "n": 1
+        }
+      }
+    },
+    "ns": "patch",
+    "status": 422,
+    "feature": "Regex"
+  },
+  {
+    "name": "rejected delete_by_filter is atomic",
+    "op": "write",
+    "body": {
+      "schema": {
+        "rejected_field": "string"
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "deletes": [
+        "p4"
+      ],
+      "delete_by_filter": [
+        "nope",
+        "Eq",
+        1
+      ]
+    },
+    "ns": "patch",
+    "status": 400
+  },
+  {
+    "name": "rejected patch_condition is atomic",
+    "op": "write",
+    "body": {
+      "schema": {
+        "rejected_field": "string"
+      },
+      "upsert_rows": [
+        {
+          "id": "rogue",
+          "vector": [
+            1,
+            0
+          ],
+          "n": 999
+        }
+      ],
+      "deletes": [
+        "p4"
+      ],
+      "patch_condition": [
+        "n",
+        "Lt",
+        {
+          "$ref_new": "status"
+        }
+      ],
+      "patch_rows": [
+        {
+          "id": "p4",
+          "n": 5
+        }
+      ]
+    },
+    "ns": "patch",
+    "status": 400
+  },
+  {
+    "name": "schema unchanged after rejected patches",
+    "op": "schema",
+    "ns": "patch",
+    "absent": "rejected_field"
+  },
+  {
+    "name": "rows unchanged after rejected patches",
+    "op": "metadata",
+    "ns": "patch",
+    "count": 1
+  },
+  {
+    "name": "row unchanged after rejected patches",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "id",
+        "asc"
+      ],
+      "top_k": 10,
+      "include_attributes": true
+    },
+    "ns": "patch",
+    "values": {
+      "status": "new",
+      "n": 4
+    }
+  },
+  {
     "name": "embed schema-only write",
     "op": "write",
     "body": {
@@ -2812,5 +3228,75 @@
     "op": "metadata",
     "ns": "embed",
     "count": 4
+  },
+  {
+    "name": "reject a patch to the embedded source",
+    "op": "write",
+    "body": {
+      "patch_rows": [
+        {
+          "id": "planet",
+          "text": "Saturn has rings."
+        }
+      ]
+    },
+    "ns": "embed",
+    "status": 422
+  },
+  {
+    "name": "reject a filter patch to the embedded source",
+    "op": "write",
+    "body": {
+      "patch_by_filter": {
+        "filters": [
+          "id",
+          "Eq",
+          "planet"
+        ],
+        "patch": {
+          "text": "Saturn"
+        }
+      }
+    },
+    "ns": "embed",
+    "status": 422
+  },
+  {
+    "name": "patch an attribute beside the embedded one",
+    "op": "write",
+    "body": {
+      "patch_rows": [
+        {
+          "id": "planet",
+          "topic": "astronomy"
+        }
+      ]
+    },
+    "ns": "embed",
+    "count": 1,
+    "rows_patched": 1
+  },
+  {
+    "name": "ANN over Embed after the patch",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "ANN",
+        [
+          "Embed",
+          "largest planet in the solar system"
+        ]
+      ],
+      "top_k": 1,
+      "include_attributes": [
+        "topic"
+      ]
+    },
+    "ns": "embed",
+    "first": "planet",
+    "values": {
+      "topic": "astronomy"
+    }
   }
 ]
