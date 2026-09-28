@@ -17,6 +17,11 @@ gateway:
   image: ""  # required — customer pull path: hevlayer/layer-gateway-pro:<version>
   port: 8080
   replicas: 1
+  # Anonymous gateway telemetry (docs: /docs/observability#telemetry). Set
+  # false for CI, test and internal clusters so they don't show up in install
+  # analytics.
+  telemetry:
+    enabled: true
   # Optional in-process Lattice embedding artifact. When enabled, an init
   # container copies the two pinned files from S3 into an ephemeral volume and
   # verifies both checksums before the gateway starts.

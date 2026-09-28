@@ -3027,6 +3027,18 @@ async fn mock_write_body(
             "billable_logical_bytes_written": 0
         }
     });
+    // Like Turbopuffer, per-kind counts are present only when non-zero.
+    if let Some(obj) = response.as_object_mut() {
+        for (key, count) in [
+            ("rows_upserted", upserted_ids.len()),
+            ("rows_patched", patched_ids.len()),
+            ("rows_deleted", deleted_ids.len()),
+        ] {
+            if count > 0 {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+    }
     if return_affected_ids {
         if let Some(obj) = response.as_object_mut() {
             obj.insert("upserted_ids".to_string(), Value::Array(upserted_ids));

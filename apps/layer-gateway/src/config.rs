@@ -126,6 +126,11 @@ pub struct Config {
     pub telemetry_enabled: bool,
     pub telemetry_endpoint: String,
     pub telemetry_state_path: Option<PathBuf>,
+    /// Who started this gateway (`LAYER_TELEMETRY_SOURCE`, e.g. `kit`) and at
+    /// which version (`LAYER_TELEMETRY_SOURCE_VERSION`). Sent as the
+    /// `distribution` and `distributionVersion` telemetry properties.
+    pub telemetry_source: Option<String>,
+    pub telemetry_source_version: Option<String>,
 }
 
 impl Config {
@@ -352,6 +357,12 @@ impl Config {
                 .and_then(trimmed_non_empty)
                 .map(PathBuf::from)
                 .or_else(default_telemetry_state_path),
+            telemetry_source: env::var("LAYER_TELEMETRY_SOURCE")
+                .ok()
+                .and_then(trimmed_non_empty),
+            telemetry_source_version: env::var("LAYER_TELEMETRY_SOURCE_VERSION")
+                .ok()
+                .and_then(trimmed_non_empty),
         }
     }
 }

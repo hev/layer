@@ -239,6 +239,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.gateway.port | quote }}
+            {{- if not (dig "telemetry" "enabled" true .Values.gateway) }}
+            - name: LAYER_TELEMETRY
+              value: "off"
+            {{- end }}
             - name: LAYER_DRAIN_MARKER_PATH
               value: {{ .Values.gateway.drain.markerPath | quote }}
             - name: AEROSPIKE_HOSTS

@@ -585,6 +585,50 @@ async fn reject_while_draining(
     next.run(request).await
 }
 
+/// Counts successful Turbopuffer-wire queries and writes for the telemetry
+/// heartbeat. Write row counts come from the store's wire response, so every
+/// store kind is covered the same way. Nothing about the request is kept.
+async fn count_telemetry_usage(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(route) = telemetry::classify_usage_route(request.method(), request.uri().path())
+    else {
+        return next.run(request).await;
+    };
+    let response = next.run(request).await;
+    if !response.status().is_success() {
+        return response;
+    }
+    match route {
+        telemetry::UsageRoute::Query => {
+            state.telemetry.record_query();
+            response
+        }
+        telemetry::UsageRoute::Write => {
+            // Write responses are small JSON bodies the handler already
+            // holds in memory.
+            let (parts, body) = response.into_parts();
+            match axum::body::to_bytes(body, usize::MAX).await {
+                Ok(bytes) => {
+                    state
+                        .telemetry
+                        .record_write(telemetry::write_rows_from_response(&bytes));
+                    Response::from_parts(parts, Body::from(bytes))
+                }
+                Err(error) => {
+                    // The body failed mid-read; the client would have seen the
+                    // same failure. Count the write without rows.
+                    tracing::warn!(error = %error, "write response body could not be read");
+                    state.telemetry.record_write(Default::default());
+                    Response::from_parts(parts, Body::empty())
+                }
+            }
+        }
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut public = Router::new()
         .route("/health", get(routes::health::health))
@@ -945,6 +989,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Production vector batches are commonly 10k rows. CLIP vectors in JSON
         // are large enough to exceed axum's small default body limit.
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            count_telemetry_usage,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             reject_while_draining,

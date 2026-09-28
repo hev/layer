@@ -111,7 +111,12 @@ pub async fn run_with_options(options: ServerOptions) {
             telemetry_backend_kinds,
             Arc::clone(&telemetry_counters),
         ) {
-            telemetry.spawn();
+            telemetry
+                .with_distribution(
+                    config.telemetry_source.clone(),
+                    config.telemetry_source_version.clone(),
+                )
+                .spawn();
             info!("Anonymous gateway telemetry enabled");
         }
     } else {
