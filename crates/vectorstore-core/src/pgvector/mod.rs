@@ -462,6 +462,7 @@ impl PgvectorClient {
                 "limit",
                 "filters",
                 "include_attributes",
+                "exclude_attributes",
             ],
         )?;
         if body.get("limit").is_some() && body.get("top_k").is_some() {
@@ -477,12 +478,7 @@ impl PgvectorClient {
             .as_u64()
             .filter(|n| *n > 0 && *n <= 10000)
             .ok_or_else(|| invalid("top_k must be between 1 and 10000"))?;
-        let include: Option<IncludeAttributes> = body
-            .get("include_attributes")
-            .map(|v| {
-                serde_json::from_value(v.clone()).map_err(|_| invalid("invalid include_attributes"))
-            })
-            .transpose()?;
+        let include = projection(body)?;
         // A filter-only query (no rank_by, no vector) is ordered by id ascending.
         let order = match body.get("rank_by") {
             Some(rank) => ordering(rank)?,
@@ -622,7 +618,7 @@ impl PgvectorClient {
         limit: u64,
         filters: Option<&Value>,
         after: Option<&str>,
-        include: Option<&IncludeAttributes>,
+        include: Option<&Projection>,
     ) -> Result<Vec<(Value, String)>> {
         let mut tx = self.begin(namespace).await?;
         let ns = self.required(&mut tx, namespace).await?;
@@ -653,6 +649,9 @@ impl PgvectorClient {
                 .ok_or_else(|| invalid(format!("unknown rank_by attribute {attribute}")))?;
             if !field.scalar() {
                 return Err(invalid("rank_by cannot order by a vector attribute"));
+            }
+            if field.array() {
+                return Err(invalid("rank_by cannot order by an array attribute"));
             }
             sql.push(field.order_expr("")).push(if *descending {
                 " DESC NULLS LAST,"
@@ -856,14 +855,40 @@ fn merge_embed_declarations(schema: &mut Value, profiles: &Value) {
     }
 }
 
-fn project(data: &mut Value, include: Option<&IncludeAttributes>, schema: &Schema) {
+/// The query's projection. `exclude_attributes` is everything
+/// `include_attributes: true` returns minus the listed names, so it is
+/// resolved against the namespace schema as the listed names dropped from
+/// `All(true)`; the two keys are mutually exclusive, as on Turbopuffer.
+enum Projection {
+    Include(IncludeAttributes),
+    Exclude(Vec<String>),
+}
+fn projection(body: &Value) -> Result<Option<Projection>> {
+    let include = body.get("include_attributes").filter(|v| !v.is_null());
+    let exclude = body.get("exclude_attributes").filter(|v| !v.is_null());
+    match (include, exclude) {
+        (Some(_), Some(_)) => Err(invalid(
+            "include_attributes and exclude_attributes are mutually exclusive",
+        )),
+        (Some(v), None) => serde_json::from_value(v.clone())
+            .map(|i| Some(Projection::Include(i)))
+            .map_err(|_| invalid("invalid include_attributes")),
+        (None, Some(v)) => serde_json::from_value(v.clone())
+            .map(|e| Some(Projection::Exclude(e)))
+            .map_err(|_| invalid("exclude_attributes must be an array of strings")),
+        (None, None) => Ok(None),
+    }
+}
+fn project(data: &mut Value, projection: Option<&Projection>, schema: &Schema) {
+    let all = |key: &String| schema.get(key).is_none_or(|field| field.scalar());
     data.as_object_mut().unwrap().retain(|key, _| {
         key == "id"
-            || match include {
-                Some(IncludeAttributes::All(true)) => {
-                    schema.get(key).is_none_or(|field| field.scalar())
+            || match projection {
+                Some(Projection::Include(IncludeAttributes::All(true))) => all(key),
+                Some(Projection::Include(IncludeAttributes::Fields(fields))) => {
+                    fields.contains(key)
                 }
-                Some(IncludeAttributes::Fields(fields)) => fields.contains(key),
+                Some(Projection::Exclude(fields)) => all(key) && !fields.contains(key),
                 _ => false,
             }
     });
@@ -1090,9 +1115,11 @@ impl TurbopufferClient for PgvectorClient {
         filters: Option<&Value>,
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage> {
-        let include = include_attributes
-            .map(|fields| IncludeAttributes::Fields(fields.to_vec()))
-            .unwrap_or(IncludeAttributes::All(true));
+        let include = Projection::Include(
+            include_attributes
+                .map(|fields| IncludeAttributes::Fields(fields.to_vec()))
+                .unwrap_or(IncludeAttributes::All(true)),
+        );
         let page_size = page_size as usize;
         // The cursor is the last row's opaque id sort key, so numeric 7 and
         // string "7" page distinctly.

@@ -64,7 +64,9 @@ pub(super) fn compile(
     let op = a[1]
         .as_str()
         .ok_or_else(|| invalid("filter operator must be a string"))?;
-    if !["Eq", "NotEq", "Gt", "Gte", "Lt", "Lte", "In", "NotIn"].contains(&op) {
+    if !["Eq", "NotEq", "Gt", "Gte", "Lt", "Lte", "In", "NotIn"].contains(&op)
+        && !ARRAY_OPS.contains(&op)
+    {
         return Err(unsupported(op));
     }
     // IDs keep their JSON type. All other values are compared using declared
@@ -87,6 +89,18 @@ pub(super) fn compile(
     if field.is_some_and(|f| !f.filterable()) {
         return Err(invalid(format!("attribute {name} is not filterable")));
     }
+    if ARRAY_OPS.contains(&op) {
+        let field = field
+            .filter(|f| f.array())
+            .ok_or_else(|| invalid(format!("{op} requires an array attribute")))?;
+        return contains(sql, field, op, &a[2], refs);
+    }
+    if field.is_some_and(|f| f.array()) {
+        return Err(unsupported_detail(
+            op,
+            "array attributes take Contains, NotContains, ContainsAny and NotContainsAny",
+        ));
+    }
     if ["In", "NotIn"].contains(&op) {
         let values = a[2]
             .as_array()
@@ -108,6 +122,46 @@ pub(super) fn compile(
     } else {
         comparison(sql, schema, field, op, &a[2], refs)?;
     }
+    Ok(())
+}
+
+const ARRAY_OPS: [&str; 4] = ["Contains", "NotContains", "ContainsAny", "NotContainsAny"];
+
+/// Array membership, as on Turbopuffer: `Contains` holds when the array has
+/// the value (`@>`), `ContainsAny` when it shares an element with the list
+/// (`&&`). A missing or null array contains nothing, so an empty list matches
+/// no row; each `Not` form is the exact inverse.
+fn contains(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    field: &schema::Field,
+    op: &str,
+    v: &Value,
+    refs: Refs,
+) -> Result<()> {
+    let any = op.ends_with("Any");
+    let items: &[Value] = if any {
+        v.as_array()
+            .ok_or_else(|| invalid(format!("{op} requires an array")))?
+    } else {
+        std::slice::from_ref(v)
+    };
+    for item in items {
+        field.validate_element(item)?;
+    }
+    let own = if refs == Refs::Excluded { "cur." } else { "" };
+    if op.starts_with("Not") {
+        sql.push("NOT ");
+    }
+    sql.push("COALESCE(").push(field.order_expr(own));
+    if any {
+        sql.push(" && ");
+        field.bind(sql, v);
+    } else {
+        sql.push(" @> ARRAY[");
+        field.bind_element(sql, v);
+        sql.push("]");
+    }
+    sql.push(",FALSE)");
     Ok(())
 }
 

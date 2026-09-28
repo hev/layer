@@ -21,7 +21,9 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
     use crate::capabilities::{Coverage, WireFeature::*};
     match feature {
         NamespaceCrud | UpsertRows | UpsertColumns | DeleteIds | Fetch | Dense | DistanceMetric
-        | Fts | Projection | ScalarFilters | NotFilters | OrderedScan => Coverage::supported(),
+        | Fts | Projection | ScalarFilters | NotFilters | ArrayFilters | OrderedScan => {
+            Coverage::supported()
+        }
         ConditionalWrites => Coverage::approximate(CONDITIONAL_WRITES_UPSERT_AND_DELETE),
         // Mirrors the phase-one gate in the gateway's run_hybrid_text.
         Hybrid => Coverage::approximate(HYBRID_TEXT_FUZZINESS_ZERO_ONLY),

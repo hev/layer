@@ -24,10 +24,10 @@ request does once a turbopuffer key is set.
 | BM25 text rank | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
 | Explicit native Postgres text fallback | [api/query](https://hevlayer.com/docs/api/query) | no | no |
 | HybridText rank operator (gateway dense + text RRF) | [api/query](https://hevlayer.com/docs/api/query) | partial | yes |
-| Attribute projection | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
+| Attribute projection (include_attributes / exclude_attributes) | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
 | Eq / NotEq / Gt / Gte / Lt / Lte / In; And / Or | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
 | Not / NotIn filters | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Contains / ContainsAny filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
+| Contains / ContainsAny filters and their Not forms | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
 | Regex filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Other filter operators | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Fuzzy text filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |

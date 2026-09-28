@@ -262,18 +262,35 @@ for key, value, feature in [
     ("queries", [ann, ann], "multi_query"),
     ("aggregate_by", {"n": ["Sum", "n"]}, "aggregate_by"),
     ("group_by", ["n"], "aggregate_by"),
-    ("exclude_attributes", ["text"], "exclude_attributes"),
     ("consistency", {"level": "strong"}, "consistency"),
     ("vector_encoding", "base64", "vector_encoding"),
 ]:
     q("reject query " + key, query={key: value}, status=422, feature=feature)
-for op in ["Contains", "ContainsAny", "Fuzzy"]:
-    q(
-        "reject " + op,
-        query={"filters": ["text", op, "database"]},
-        status=422,
-        feature=op,
-    )
+q(
+    "reject Fuzzy",
+    query={"filters": ["text", "Fuzzy", "database"]},
+    status=422,
+    feature="Fuzzy",
+)
+# Array operators need an array attribute; on a scalar they are malformed.
+for op, value in [("Contains", "database"), ("ContainsAny", ["database"])]:
+    q(op + " on a scalar is validation error", query={"filters": ["text", op, value]}, status=400)
+add(
+    "exclude_attributes drops the listed names",
+    "query",
+    {
+        "rank_by": ["vector", "ANN", [1, 0]],
+        "filters": ["id", "Eq", "a"],
+        "exclude_attributes": ["text", "tag"],
+    },
+    ids=["a"],
+    fields=["id", "$dist", "n", "active"],
+)
+q(
+    "include_attributes with exclude_attributes is validation error",
+    query={"exclude_attributes": ["text"]},
+    status=400,
+)
 q(
     "unsupported filter",
     query={"filters": ["text", "Regex", ".*"]},
@@ -457,6 +474,86 @@ add(
     count=0,
 )
 q("nonfilterable scalar rejected", query={"filters": ["n", "Eq", 10]}, status=400)
+
+# LYR-137 and LYR-138, in a namespace of its own (`"ns": "sessions"`) shaped
+# like hev kit's sessions namespace: array attributes, the dashboard's
+# exclude_attributes session list and its ContainsAny filter by tool.
+def sessions_case(name, op, body=None, **expected):
+    add(name, op, body, ns="sessions", **expected)
+
+
+sessions_case(
+    "array attributes declared and inferred",
+    "write",
+    {
+        "schema": {"tool_names": "[]string", "prompt_ts": {"type": "[]uint"}},
+        "upsert_rows": [
+            {"id": "s1", "start": 30, "first_prompt": "one", "tool_names": ["Bash", "Read"], "prompt_ts": [1, 2], "vector": [1, 0]},
+            {"id": "s2", "start": 20, "first_prompt": "two", "tool_names": ["Edit"], "prompt_ts": [3], "vector": [0, 1]},
+            {"id": "s3", "start": 10, "first_prompt": "three", "tool_names": [], "vector": [1, 1], "scores": [0.5, 2]},
+            {"id": "s4", "start": 0, "first_prompt": "four", "vector": [1, 2]},
+        ],
+    },
+    count=4,
+)
+sessions_case("schema lists an inferred array", "schema", field="scores")
+sessions_case(
+    "kit session list with exclude_attributes",
+    "query",
+    {"rank_by": ["start", "desc"], "top_k": 1000, "exclude_attributes": ["first_prompt", "vector"]},
+    order=["s1", "s2", "s3", "s4"],
+    fields=["id", "start", "tool_names", "prompt_ts"],
+)
+sessions_case(
+    "ANN with exclude_attributes",
+    "query",
+    {"rank_by": ["vector", "ANN", [1, 0]], "top_k": 1, "exclude_attributes": ["tool_names", "prompt_ts"]},
+    ids=["s1"],
+    fields=["id", "$dist", "start", "first_prompt"],
+)
+for name, f, order in [
+    ("ContainsAny", ["tool_names", "ContainsAny", ["Bash"]], ["s1"]),
+    ("ContainsAny several", ["tool_names", "ContainsAny", ["Edit", "Read", "Grep"]], ["s1", "s2"]),
+    ("ContainsAny empty list matches nothing", ["tool_names", "ContainsAny", []], []),
+    ("NotContainsAny includes empty and missing", ["tool_names", "NotContainsAny", ["Bash", "Edit"]], ["s3", "s4"]),
+    ("NotContainsAny empty list matches all", ["tool_names", "NotContainsAny", []], ["s1", "s2", "s3", "s4"]),
+    ("Contains", ["tool_names", "Contains", "Read"], ["s1"]),
+    ("NotContains", ["tool_names", "NotContains", "Read"], ["s2", "s3", "s4"]),
+    ("Contains on uint array", ["prompt_ts", "Contains", 3], ["s2"]),
+    ("ContainsAny on inferred float array", ["scores", "ContainsAny", [2]], ["s3"]),
+    ("array filter composes", ["And", [["tool_names", "ContainsAny", ["Bash", "Edit"]], ["start", "Lt", 30]]], ["s2"]),
+]:
+    sessions_case(
+        name,
+        "query",
+        {"rank_by": ["start", "desc"], "top_k": 10, "filters": f},
+        order=order,
+    )
+sessions_case(
+    "array element type mismatch is validation error",
+    "query",
+    {"top_k": 10, "filters": ["tool_names", "ContainsAny", [1]]},
+    status=400,
+)
+sessions_case(
+    "Eq on an array attribute unsupported",
+    "query",
+    {"top_k": 10, "filters": ["tool_names", "Eq", ["Bash"]]},
+    status=422,
+    feature="Eq",
+)
+sessions_case(
+    "conditional upsert on an array attribute",
+    "write",
+    {
+        "upsert_rows": [
+            {"id": "s1", "start": 31, "tool_names": ["Bash"]},
+            {"id": "s2", "start": 21, "tool_names": ["Edit"]},
+        ],
+        "upsert_condition": ["tool_names", "Contains", "Edit"],
+    },
+    count=1,
+)
 
 # RFC 0118 steps C and E: schema `embed` on Postgres, in a namespace of its own
 # (`"ns": "embed"`), since an embedded namespace holds no client vectors. The

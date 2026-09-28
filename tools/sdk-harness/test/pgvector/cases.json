@@ -1392,27 +1392,6 @@
     "feature": "aggregate_by"
   },
   {
-    "name": "reject query exclude_attributes",
-    "op": "query",
-    "body": {
-      "rank_by": [
-        "vector",
-        "ANN",
-        [
-          1,
-          0
-        ]
-      ],
-      "top_k": 20,
-      "include_attributes": true,
-      "exclude_attributes": [
-        "text"
-      ]
-    },
-    "status": 422,
-    "feature": "exclude_attributes"
-  },
-  {
     "name": "reject query consistency",
     "op": "query",
     "body": {
@@ -1453,52 +1432,6 @@
     "feature": "vector_encoding"
   },
   {
-    "name": "reject Contains",
-    "op": "query",
-    "body": {
-      "rank_by": [
-        "vector",
-        "ANN",
-        [
-          1,
-          0
-        ]
-      ],
-      "top_k": 20,
-      "include_attributes": true,
-      "filters": [
-        "text",
-        "Contains",
-        "database"
-      ]
-    },
-    "status": 422,
-    "feature": "Contains"
-  },
-  {
-    "name": "reject ContainsAny",
-    "op": "query",
-    "body": {
-      "rank_by": [
-        "vector",
-        "ANN",
-        [
-          1,
-          0
-        ]
-      ],
-      "top_k": 20,
-      "include_attributes": true,
-      "filters": [
-        "text",
-        "ContainsAny",
-        "database"
-      ]
-    },
-    "status": 422,
-    "feature": "ContainsAny"
-  },
-  {
     "name": "reject Fuzzy",
     "op": "query",
     "body": {
@@ -1520,6 +1453,104 @@
     },
     "status": 422,
     "feature": "Fuzzy"
+  },
+  {
+    "name": "Contains on a scalar is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "Contains",
+        "database"
+      ]
+    },
+    "status": 400
+  },
+  {
+    "name": "ContainsAny on a scalar is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "filters": [
+        "text",
+        "ContainsAny",
+        [
+          "database"
+        ]
+      ]
+    },
+    "status": 400
+  },
+  {
+    "name": "exclude_attributes drops the listed names",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "filters": [
+        "id",
+        "Eq",
+        "a"
+      ],
+      "exclude_attributes": [
+        "text",
+        "tag"
+      ]
+    },
+    "ids": [
+      "a"
+    ],
+    "fields": [
+      "id",
+      "$dist",
+      "n",
+      "active"
+    ]
+  },
+  {
+    "name": "include_attributes with exclude_attributes is validation error",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 20,
+      "include_attributes": true,
+      "exclude_attributes": [
+        "text"
+      ]
+    },
+    "status": 400
   },
   {
     "name": "unsupported filter",
@@ -2075,6 +2106,431 @@
       ]
     },
     "status": 400
+  },
+  {
+    "name": "array attributes declared and inferred",
+    "op": "write",
+    "body": {
+      "schema": {
+        "tool_names": "[]string",
+        "prompt_ts": {
+          "type": "[]uint"
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "s1",
+          "start": 30,
+          "first_prompt": "one",
+          "tool_names": [
+            "Bash",
+            "Read"
+          ],
+          "prompt_ts": [
+            1,
+            2
+          ],
+          "vector": [
+            1,
+            0
+          ]
+        },
+        {
+          "id": "s2",
+          "start": 20,
+          "first_prompt": "two",
+          "tool_names": [
+            "Edit"
+          ],
+          "prompt_ts": [
+            3
+          ],
+          "vector": [
+            0,
+            1
+          ]
+        },
+        {
+          "id": "s3",
+          "start": 10,
+          "first_prompt": "three",
+          "tool_names": [],
+          "vector": [
+            1,
+            1
+          ],
+          "scores": [
+            0.5,
+            2
+          ]
+        },
+        {
+          "id": "s4",
+          "start": 0,
+          "first_prompt": "four",
+          "vector": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    "ns": "sessions",
+    "count": 4
+  },
+  {
+    "name": "schema lists an inferred array",
+    "op": "schema",
+    "ns": "sessions",
+    "field": "scores"
+  },
+  {
+    "name": "kit session list with exclude_attributes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 1000,
+      "exclude_attributes": [
+        "first_prompt",
+        "vector"
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s1",
+      "s2",
+      "s3",
+      "s4"
+    ],
+    "fields": [
+      "id",
+      "start",
+      "tool_names",
+      "prompt_ts"
+    ]
+  },
+  {
+    "name": "ANN with exclude_attributes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "vector",
+        "ANN",
+        [
+          1,
+          0
+        ]
+      ],
+      "top_k": 1,
+      "exclude_attributes": [
+        "tool_names",
+        "prompt_ts"
+      ]
+    },
+    "ns": "sessions",
+    "ids": [
+      "s1"
+    ],
+    "fields": [
+      "id",
+      "$dist",
+      "start",
+      "first_prompt"
+    ]
+  },
+  {
+    "name": "ContainsAny",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "ContainsAny",
+        [
+          "Bash"
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s1"
+    ]
+  },
+  {
+    "name": "ContainsAny several",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "ContainsAny",
+        [
+          "Edit",
+          "Read",
+          "Grep"
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s1",
+      "s2"
+    ]
+  },
+  {
+    "name": "ContainsAny empty list matches nothing",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "ContainsAny",
+        []
+      ]
+    },
+    "ns": "sessions",
+    "order": []
+  },
+  {
+    "name": "NotContainsAny includes empty and missing",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "NotContainsAny",
+        [
+          "Bash",
+          "Edit"
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s3",
+      "s4"
+    ]
+  },
+  {
+    "name": "NotContainsAny empty list matches all",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "NotContainsAny",
+        []
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s1",
+      "s2",
+      "s3",
+      "s4"
+    ]
+  },
+  {
+    "name": "Contains",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "Contains",
+        "Read"
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s1"
+    ]
+  },
+  {
+    "name": "NotContains",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "NotContains",
+        "Read"
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s2",
+      "s3",
+      "s4"
+    ]
+  },
+  {
+    "name": "Contains on uint array",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "prompt_ts",
+        "Contains",
+        3
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s2"
+    ]
+  },
+  {
+    "name": "ContainsAny on inferred float array",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "scores",
+        "ContainsAny",
+        [
+          2
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s3"
+    ]
+  },
+  {
+    "name": "array filter composes",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "start",
+        "desc"
+      ],
+      "top_k": 10,
+      "filters": [
+        "And",
+        [
+          [
+            "tool_names",
+            "ContainsAny",
+            [
+              "Bash",
+              "Edit"
+            ]
+          ],
+          [
+            "start",
+            "Lt",
+            30
+          ]
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "order": [
+      "s2"
+    ]
+  },
+  {
+    "name": "array element type mismatch is validation error",
+    "op": "query",
+    "body": {
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "ContainsAny",
+        [
+          1
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "status": 400
+  },
+  {
+    "name": "Eq on an array attribute unsupported",
+    "op": "query",
+    "body": {
+      "top_k": 10,
+      "filters": [
+        "tool_names",
+        "Eq",
+        [
+          "Bash"
+        ]
+      ]
+    },
+    "ns": "sessions",
+    "status": 422,
+    "feature": "Eq"
+  },
+  {
+    "name": "conditional upsert on an array attribute",
+    "op": "write",
+    "body": {
+      "upsert_rows": [
+        {
+          "id": "s1",
+          "start": 31,
+          "tool_names": [
+            "Bash"
+          ]
+        },
+        {
+          "id": "s2",
+          "start": 21,
+          "tool_names": [
+            "Edit"
+          ]
+        }
+      ],
+      "upsert_condition": [
+        "tool_names",
+        "Contains",
+        "Edit"
+      ]
+    },
+    "ns": "sessions",
+    "count": 1
   },
   {
     "name": "embed schema-only write",

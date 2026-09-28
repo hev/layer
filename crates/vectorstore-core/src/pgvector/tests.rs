@@ -53,6 +53,224 @@ fn schema_accepts_several_full_text_search_fields() {
         .is_err());
     assert!(Schema::parse(&json!({"n": {"type":"int","full_text_search":true}})).is_err());
 }
+#[test]
+fn schema_declares_and_infers_array_types() {
+    let schema = Schema::parse(&json!({"tags":"[]string","ts":{"type":"[]uint"}})).unwrap();
+    assert!(schema.get("tags").unwrap().array());
+    assert!(
+        schema.get("tags").unwrap().scalar(),
+        "arrays are not vectors"
+    );
+    for row in [
+        json!({"id":"a","tags":["x","y"],"ts":[1,2]}),
+        json!({"id":"a","tags":[],"ts":null}),
+    ] {
+        schema.validate_row(&row, "cosine_distance").unwrap();
+    }
+    for row in [
+        json!({"id":"a","tags":"x"}),
+        json!({"id":"a","tags":[1]}),
+        json!({"id":"a","tags":["x",null]}),
+        json!({"id":"a","ts":[-1]}),
+    ] {
+        assert!(
+            schema.validate_row(&row, "cosine_distance").is_err(),
+            "{row}"
+        );
+    }
+    for kind in ["[]uuid", "[]datetime", "[][2]f32", "[]f32"] {
+        assert!(Schema::parse(&json!({ "a": kind }))
+            .unwrap_err()
+            .to_string()
+            .contains("UnsupportedByStore: pgvector: schema.type"));
+    }
+    assert!(Schema::parse(&json!({"a":{"type":"[]string","full_text_search":true}})).is_err());
+    let inferred = Schema::default()
+        .merge(
+            None,
+            &[json!({"id":"a","s":["x"],"i":[-1,2],"u":[1,18446744073709551615u64],"f":[1,2.5],"b":[true],"vector":[1,0]})],
+        )
+        .unwrap()
+        .value();
+    assert_eq!(
+        inferred,
+        json!({"s":{"type":"[]string"},"i":{"type":"[]int"},"u":{"type":"[]uint"},"f":{"type":"[]float"},"b":{"type":"[]bool"},"vector":{"type":"[2]f32"}})
+    );
+    for row in [json!({"id":"a","e":[]}), json!({"id":"a","m":["x",1]})] {
+        assert!(Schema::default().merge(None, &[row]).is_err());
+    }
+}
+
+#[test]
+fn array_filters_compile_to_overlap_and_containment() {
+    let schema = Schema::parse(&json!({"tags":"[]string","n":"int"})).unwrap();
+    let sql = |filter: Value| {
+        let mut q = QueryBuilder::<Postgres>::new("");
+        filter::compile(&mut q, &schema, &filter, 0, filter::Refs::Rejected)
+            .map(|_| q.sql().to_owned())
+    };
+    let any = sql(json!(["tags", "ContainsAny", ["Bash", "Read"]])).unwrap();
+    assert!(
+        any.starts_with("COALESCE(") && any.contains(" && "),
+        "{any}"
+    );
+    assert!(any.contains("::text[]") && any.contains("$1"), "{any}");
+    let not_any = sql(json!(["tags", "NotContainsAny", []])).unwrap();
+    assert!(not_any.starts_with("NOT COALESCE("), "{not_any}");
+    let one = sql(json!(["tags", "Contains", "Bash"])).unwrap();
+    assert!(
+        one.contains(" @> ARRAY[") && one.contains("::text]"),
+        "{one}"
+    );
+    assert!(sql(json!(["tags", "NotContains", "Bash"]))
+        .unwrap()
+        .starts_with("NOT "));
+    assert!(sql(json!(["Not", ["tags", "Contains", "x"]])).is_ok());
+    // Malformed is 400, not a store gap.
+    for filter in [
+        json!(["n", "ContainsAny", [1]]),
+        json!(["id", "Contains", "a"]),
+        json!(["tags", "ContainsAny", "Bash"]),
+        json!(["tags", "Contains", 7]),
+        json!(["tags", "ContainsAny", ["x", null]]),
+        json!(["tags", "Contains", {"$ref_new": "tags"}]),
+    ] {
+        let e = sql(filter.clone()).unwrap_err().to_string();
+        assert!(!e.contains("UnsupportedByStore"), "{filter}: {e}");
+    }
+    // Scalar operators on an array attribute are a declared gap.
+    let e = sql(json!(["tags", "Eq", ["x"]])).unwrap_err().to_string();
+    assert!(e.contains("UnsupportedByStore: pgvector: Eq"), "{e}");
+    assert!(sql(json!(["tags", "ContainsAll", ["x"]]))
+        .unwrap_err()
+        .to_string()
+        .contains("UnsupportedByStore: pgvector: ContainsAll"));
+}
+
+#[test]
+fn exclude_attributes_drops_listed_names_from_the_full_projection() {
+    let schema = Schema::parse(&json!({"vector":"[2]f32","a":"string","b":"string"})).unwrap();
+    let row = json!({"id":"x","vector":[1,0],"a":"1","b":"2","c":3});
+    let projected = |body: Value| {
+        let mut data = row.clone();
+        project(&mut data, projection(&body).unwrap().as_ref(), &schema);
+        data
+    };
+    assert_eq!(
+        projected(json!({"exclude_attributes":["a","vector"]})),
+        json!({"id":"x","b":"2","c":3})
+    );
+    // The same set as include_attributes: true, so vectors stay out.
+    assert_eq!(
+        projected(json!({"exclude_attributes":["b"]})),
+        json!({"id":"x","a":"1","c":3})
+    );
+    assert_eq!(
+        projected(json!({"exclude_attributes":["id","nope"]})),
+        json!({"id":"x","a":"1","b":"2","c":3})
+    );
+    assert_eq!(
+        projected(json!({"exclude_attributes":[]})),
+        projected(json!({"include_attributes":true}))
+    );
+    assert_eq!(projected(json!({})), json!({"id":"x"}));
+    for body in [
+        json!({"include_attributes":["a"],"exclude_attributes":["b"]}),
+        json!({"exclude_attributes":"a"}),
+    ] {
+        assert!(!projection(&body)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("UnsupportedByStore"));
+    }
+}
+
+#[tokio::test]
+async fn include_with_exclude_is_a_400_before_sql() {
+    let client = PgvectorClient {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap(),
+        scope: "projection-test".into(),
+    };
+    let response = client
+        .passthrough(
+            "POST",
+            "/v2/namespaces/ns/query",
+            None,
+            Some(json!({"rank_by":["start","desc"],"top_k":10,"include_attributes":["a"],"exclude_attributes":["b"]})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 400);
+}
+
+/// LYR-137 and LYR-138 against the pinned ParadeDB service:
+/// PGVECTOR_TEST_URL=postgresql://... cargo test -p vectorstore-core --features pgvector pgvector_live -- --ignored
+#[tokio::test]
+#[ignore = "requires pinned ParadeDB; set PGVECTOR_TEST_URL"]
+async fn pgvector_live_array_filters_and_exclude_attributes() {
+    let url = std::env::var("PGVECTOR_TEST_URL").expect("PGVECTOR_TEST_URL required");
+    let a = PgvectorClient::connect(&url, "test/lyr138/store")
+        .await
+        .unwrap();
+    let ns = format!("scratch-lyr138-rust-{}", std::process::id());
+    let result: Result<()> = async {
+        a.write(&ns, &json!({"schema":{"tool_names":"[]string","prompt_ts":{"type":"[]uint"}},"upsert_rows":[
+            {"id":"s1","start":3,"first_prompt":"one","tool_names":["Bash","Read"],"prompt_ts":[1,2],"vector":[1,0]},
+            {"id":"s2","start":2,"first_prompt":"two","tool_names":["Edit"],"prompt_ts":[18446744073709551615u64],"vector":[0,1]},
+            {"id":"s3","start":1,"first_prompt":"three","tool_names":[],"vector":[1,1]},
+            {"id":"s4","start":0,"first_prompt":"four","vector":[1,2],"labels":[1.5,2]}
+        ]})).await?;
+        let schema = a.metadata(&ns).await?["schema"].clone();
+        assert_eq!(schema["labels"], json!({"type":"[]float"}));
+        let q = |body: Value| {
+            let (a, ns) = (&a, &ns);
+            async move { a.query_wire(ns, &body).await }
+        };
+        // kit's session list (LYR-137).
+        let found = q(json!({"rank_by":["start","desc"],"top_k":1000,"exclude_attributes":["first_prompt","vector"]})).await?;
+        assert_eq!(ids(&found), vec![json!("s1"), json!("s2"), json!("s3"), json!("s4")]);
+        assert_eq!(found["rows"][0], json!({"id":"s1","start":3,"tool_names":["Bash","Read"],"prompt_ts":[1,2]}));
+        assert_eq!(found["rows"][1]["prompt_ts"], json!([18446744073709551615u64]));
+        // Ranked queries take the projection too.
+        let found = q(json!({"rank_by":["vector","ANN",[1,0]],"top_k":1,"exclude_attributes":["tool_names","prompt_ts","labels"]})).await?;
+        assert_eq!(found["rows"][0]["first_prompt"], json!("one"));
+        assert!(found["rows"][0].get("tool_names").is_none() && found["rows"][0].get("$dist").is_some());
+        // Array filters (LYR-138). A missing or empty array contains nothing.
+        let hits = |filters: Value| {
+            let q = &q;
+            async move { Ok::<_, TurbopufferError>(ids(&q(json!({"rank_by":["start","desc"],"top_k":10,"filters":filters})).await?)) }
+        };
+        assert_eq!(hits(json!(["tool_names","ContainsAny",["Bash"]])).await?, vec![json!("s1")]);
+        assert_eq!(hits(json!(["tool_names","ContainsAny",["Edit","Read","Grep"]])).await?, vec![json!("s1"), json!("s2")]);
+        assert_eq!(hits(json!(["tool_names","ContainsAny",[]])).await?, Vec::<Value>::new());
+        assert_eq!(hits(json!(["tool_names","NotContainsAny",["Bash","Edit"]])).await?, vec![json!("s3"), json!("s4")]);
+        assert_eq!(hits(json!(["tool_names","NotContainsAny",[]])).await?.len(), 4);
+        assert_eq!(hits(json!(["tool_names","Contains","Read"])).await?, vec![json!("s1")]);
+        assert_eq!(hits(json!(["tool_names","NotContains","Read"])).await?, vec![json!("s2"), json!("s3"), json!("s4")]);
+        assert_eq!(hits(json!(["Not",["tool_names","Contains","Read"]])).await?, vec![json!("s2"), json!("s3"), json!("s4")]);
+        assert_eq!(hits(json!(["prompt_ts","Contains",18446744073709551615u64])).await?, vec![json!("s2")]);
+        assert_eq!(hits(json!(["labels","ContainsAny",[2]])).await?, vec![json!("s4")]);
+        assert_eq!(hits(json!(["And",[["tool_names","ContainsAny",["Bash","Edit"]],["start","Lt",3]]])).await?, vec![json!("s2")]);
+        // Array conditions guard writes too.
+        let written = a.write(&ns, &json!({"upsert_condition":["tool_names","Contains","Edit"],"upsert_rows":[{"id":"s1","start":9},{"id":"s2","start":8}]})).await?;
+        assert_eq!(written["rows_upserted"], json!(1));
+        assert_eq!(hits(json!(["start","Eq",8])).await?, vec![json!("s2")]);
+        let err = q(json!({"rank_by":["tool_names","asc"],"top_k":10})).await.unwrap_err();
+        assert!(!err.to_string().contains("UnsupportedByStore"));
+        Ok(())
+    }
+    .await;
+    let response = a
+        .passthrough("DELETE", &format!("/v2/namespaces/{ns}"), None, None)
+        .await
+        .unwrap();
+    assert!(response.status == 200 || response.status == 404);
+    result.unwrap();
+}
+
 fn rows_for_test() -> Result<Vec<Value>> {
     schema::rows(&json!({"upsert_columns":{"id":["a","b"],"n":[1]}}))
 }
@@ -533,10 +751,6 @@ async fn rejections_carry_a_typed_feature() {
         (
             json!({"rank_by": ["vector", "ANN", [1, 0]], "group_by": ["n"]}),
             "aggregate_by",
-        ),
-        (
-            json!({"rank_by": ["vector", "ANN", [1, 0]], "exclude_attributes": ["n"]}),
-            "exclude_attributes",
         ),
     ] {
         let response = client

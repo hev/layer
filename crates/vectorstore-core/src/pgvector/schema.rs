@@ -21,19 +21,27 @@ impl Field {
             .parse()
             .ok()
     }
+    /// The element type of an array attribute (`[]string` is `string`).
+    pub fn element(&self) -> Option<&str> {
+        self.kind.strip_prefix("[]")
+    }
     fn sql_type(&self) -> String {
         if let Some(d) = self.dimension() {
             return format!("vector({d})");
         }
-        match self.kind.as_str() {
+        let (kind, array) = match self.element() {
+            Some(element) => (element, "[]"),
+            None => (self.kind.as_str(), ""),
+        };
+        let base = match kind {
             "string" => "text",
             "int" => "bigint",
             "uint" => "numeric(20,0)",
             "float" => "double precision",
             "bool" => "boolean",
             _ => unreachable!(),
-        }
-        .into()
+        };
+        format!("{base}{array}")
     }
     pub fn validate(&self, v: &Value) -> Result<()> {
         if v.is_null() {
@@ -42,13 +50,11 @@ impl Field {
         if self.dimension().is_some() {
             return self.validate_vector(v, "euclidean_squared");
         }
-        let valid = match self.kind.as_str() {
-            "string" => v.is_string(),
-            "int" => v.as_i64().is_some(),
-            "uint" => v.as_u64().is_some(),
-            "float" => v.as_f64().is_some_and(|v| v.is_finite()),
-            "bool" => v.is_boolean(),
-            _ => false,
+        let valid = match self.element() {
+            Some(element) => v
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| scalar_valid(element, item))),
+            None => scalar_valid(&self.kind, v),
         };
         if valid {
             Ok(())
@@ -56,6 +62,18 @@ impl Field {
             Err(invalid(format!(
                 "schema mismatch for {}: expected {}",
                 self.name, self.kind
+            )))
+        }
+    }
+    /// Validate one element of an array attribute, as `Contains` compares it.
+    pub fn validate_element(&self, v: &Value) -> Result<()> {
+        let element = self.element().unwrap_or(&self.kind);
+        if scalar_valid(element, v) {
+            Ok(())
+        } else {
+            Err(invalid(format!(
+                "schema mismatch for {}: expected {element} element",
+                self.name
             )))
         }
     }
@@ -73,13 +91,17 @@ impl Field {
         }
     }
     fn scalar_index(&self) -> bool {
-        self.scalar() && self.kind != "string" && self.filterable()
+        self.scalar() && !self.array() && self.kind != "string" && self.filterable()
     }
     pub fn filterable(&self) -> bool {
         self.declaration.get("filterable") != Some(&Value::Bool(false))
     }
+    /// Not a vector: arrays count, since they are projected and filtered.
     pub fn scalar(&self) -> bool {
         self.dimension().is_none()
+    }
+    pub fn array(&self) -> bool {
+        self.element().is_some()
     }
     pub fn validate_vector(&self, v: &Value, metric: &str) -> Result<()> {
         let dim = self
@@ -111,6 +133,14 @@ impl Field {
             })
             .push("::")
             .push(self.sql_type());
+        } else if self.array() {
+            // A JSON array becomes a native array, element order kept; JSON
+            // null stays SQL NULL and `[]` an empty array.
+            sql.push("(SELECT CASE WHEN jsonb_typeof(v)='array' THEN ARRAY(SELECT jsonb_array_elements_text(v))::")
+                .push(self.sql_type())
+                .push(" END FROM (SELECT ")
+                .push_bind(value.clone())
+                .push("::jsonb AS v) j)");
         } else {
             sql.push("(")
                 .push_bind(value.clone())
@@ -118,7 +148,26 @@ impl Field {
                 .push(self.sql_type());
         }
     }
+    /// Bind one element of an array attribute, cast to the element type.
+    pub fn bind_element(&self, sql: &mut QueryBuilder<'_, Postgres>, value: &Value) {
+        let sql_type = self.sql_type();
+        sql.push("(")
+            .push_bind(value.clone())
+            .push("::jsonb #>> '{}')::")
+            .push(sql_type.strip_suffix("[]").unwrap_or(&sql_type).to_owned());
+    }
 }
+fn scalar_valid(kind: &str, v: &Value) -> bool {
+    match kind {
+        "string" => v.is_string(),
+        "int" => v.as_i64().is_some(),
+        "uint" => v.as_u64().is_some(),
+        "float" => v.as_f64().is_some_and(|v| v.is_finite()),
+        "bool" => v.is_boolean(),
+        _ => false,
+    }
+}
+const SCALAR_TYPES: [&str; 5] = ["string", "int", "uint", "float", "bool"];
 impl Schema {
     pub fn parse(value: &Value) -> Result<Self> {
         let mut fields = BTreeMap::new();
@@ -159,7 +208,8 @@ impl Schema {
                 text,
                 declaration: decl.clone(),
             };
-            if !["string", "int", "uint", "float", "bool"].contains(&kind)
+            let element = kind.strip_prefix("[]").unwrap_or(kind);
+            if !SCALAR_TYPES.contains(&element)
                 && !f.dimension().is_some_and(|d| d > 0 && d <= 2000)
             {
                 return Err(unsupported_detail("schema.type", kind));
@@ -210,23 +260,19 @@ impl Schema {
                 if k == "id" || value.get(k).is_some() || v.is_null() {
                     continue;
                 }
-                let kind = if k == "vector" && v.is_array() {
-                    format!("[{}]f32", v.as_array().unwrap().len())
-                } else if v.is_string() {
-                    "string".into()
-                } else if v.is_boolean() {
-                    "bool".into()
-                } else if v.as_i64().is_some() {
-                    "int".into()
-                } else if v.as_u64().is_some() {
-                    "uint".into()
-                } else if v.is_number() {
-                    "float".into()
-                } else {
-                    return Err(unsupported_detail(
-                        "schema.type",
-                        &format!("inferred from attribute {k}"),
-                    ));
+                let kind = match v.as_array() {
+                    Some(items) if k == "vector" => format!("[{}]f32", items.len()),
+                    Some(items) => match infer_array(items) {
+                        Some(element) => format!("[]{element}"),
+                        None => {
+                            return Err(invalid(format!(
+                                "cannot infer the type of array attribute {k}; declare it in schema"
+                            )))
+                        }
+                    },
+                    None => infer(v).map(str::to_owned).ok_or_else(|| {
+                        unsupported_detail("schema.type", &format!("inferred from attribute {k}"))
+                    })?,
                 };
                 value[k] = json!({"type":kind});
             }
@@ -277,6 +323,14 @@ impl Schema {
                     };
                     sqlx::query(&format!("CREATE INDEX ON layer_pgvector.\"{table}\" USING hnsw (\"{col}\" {ops}) WITH (m=16,ef_construction=64)"))
                         .execute(&mut **tx).await.map_err(db)?;
+                } else if f.array() && f.filterable() {
+                    // Serves Contains (@>) and ContainsAny (&&).
+                    sqlx::query(&format!(
+                        "CREATE INDEX ON layer_pgvector.\"{table}\" USING gin (\"{col}\")"
+                    ))
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(db)?;
                 } else if f.scalar_index() {
                     // Text attributes can exceed PostgreSQL's B-tree tuple
                     // limit. BM25 owns text indexing; scalar text filters scan.
@@ -323,6 +377,37 @@ impl Schema {
                 .execute(&mut **tx).await.map_err(db)?;
         }
         Ok(())
+    }
+}
+/// The scalar type Turbopuffer infers for an undeclared JSON value.
+fn infer(v: &Value) -> Option<&'static str> {
+    if v.is_string() {
+        Some("string")
+    } else if v.is_boolean() {
+        Some("bool")
+    } else if v.as_i64().is_some() {
+        Some("int")
+    } else if v.as_u64().is_some() {
+        Some("uint")
+    } else if v.is_number() {
+        Some("float")
+    } else {
+        None
+    }
+}
+/// The element type of an undeclared array: the one type every element
+/// shares, widened to uint or float when the numbers mix.
+fn infer_array(items: &[Value]) -> Option<&'static str> {
+    let kinds: Vec<_> = items.iter().map(infer).collect::<Option<_>>()?;
+    let first = *kinds.first()?;
+    if kinds.iter().all(|k| *k == first) {
+        Some(first)
+    } else if items.iter().all(|v| v.as_u64().is_some()) {
+        Some("uint")
+    } else if items.iter().all(Value::is_number) {
+        Some("float")
+    } else {
+        None
     }
 }
 pub(super) fn rows(body: &Value) -> Result<Vec<Value>> {
