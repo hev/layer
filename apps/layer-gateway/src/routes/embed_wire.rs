@@ -391,7 +391,7 @@ async fn prepare_write_profiles(
 
     let mut performance = json!({});
     for profile in gateway_profiles {
-        let inputs = prepare_write_inputs(body, profile)?;
+        let inputs = prepare_write_inputs(body, profile, store)?;
         if inputs.values.is_empty() {
             continue;
         }
@@ -1490,14 +1490,42 @@ struct PreparedWriteInputs {
 fn prepare_write_inputs(
     body: &mut Value,
     profile: &EmbeddingProfile,
+    store: EmbedStore,
 ) -> Result<PreparedWriteInputs, AppError> {
     if let Some(chunk) = profile.chunk.as_ref() {
         return prepare_chunk_rows(body, profile, chunk);
     }
     if let Some(rows) = body.get("upsert_rows").and_then(Value::as_array) {
-        let values = rows
-            .iter()
-            .map(|row| {
+        let mut values = Vec::new();
+        let mut row_indices = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            // Stock image workers own image decoding and cache the CLIP vector.
+            // A query profile must not force them to fetch/embed the image again.
+            // Source-bearing writes retain normal automatic embedding semantics.
+            if store != EmbedStore::Search
+                && profile.modality == EmbeddingModality::Image
+                && profile.serving == ServingPreference::Local
+                && row.get(&profile.source).is_none()
+                && row.get(&profile.target).is_some()
+            {
+                let vector = row[&profile.target].as_array().ok_or_else(|| {
+                    AppError::Validation(
+                        "precomputed image embedding must be a numeric vector".into(),
+                    )
+                })?;
+                if profile.dims != Some(vector.len() as u64)
+                    || vector.is_empty()
+                    || !vector
+                        .iter()
+                        .all(|v| v.as_f64().is_some_and(|n| (n as f32).is_finite()))
+                {
+                    return Err(AppError::Validation(
+                        "precomputed image embedding must match declared embed.dims and contain finite numbers".into(),
+                    ));
+                }
+                continue;
+            }
+            values.push(
                 row.get(&profile.source)
                     .and_then(Value::as_str)
                     .map(str::to_string)
@@ -1506,11 +1534,12 @@ fn prepare_write_inputs(
                             "upsert row must include string attribute `{}` for embedding",
                             profile.source
                         ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    })?,
+            );
+            row_indices.push(index);
+        }
         return Ok(PreparedWriteInputs {
-            row_indices: (0..values.len()).collect(),
+            row_indices,
             values,
         });
     }
@@ -2314,6 +2343,57 @@ fn profile_key(namespace: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_image_vectors_validate_dimensions_and_preserve_mixed_row_positions() {
+        let profile = validate_embed(
+            "image_url",
+            &json!({
+                "model":"openai/clip-vit-base-patch32", "dims":2,
+                "modality":"image", "serving":{"prefer":"local"}
+            }),
+        )
+        .unwrap();
+        let mut body = json!({"upsert_rows":[
+            {"id":"cached", "embed_image_url":[0.6,0.8]},
+            {"id":"fresh", "image_url":"https://example.test/photo.jpg", "embed_image_url":[1.,0.]}
+        ]});
+        let inputs = prepare_write_inputs(&mut body, &profile, EmbedStore::Native).unwrap();
+        assert_eq!(inputs.row_indices, vec![1]);
+        assert_eq!(inputs.values.len(), 1);
+        apply_write_vectors(
+            &mut body,
+            &profile,
+            &inputs.row_indices,
+            &[vec![0.8, 0.6]],
+            EmbedStore::Native,
+        )
+        .unwrap();
+        assert_eq!(body["upsert_rows"][0]["embed_image_url"], json!([0.6, 0.8]));
+        assert_eq!(body["upsert_rows"][1]["embed_image_url"], json!([0.8, 0.6]));
+        for vector in [
+            json!([]),
+            json!([1.]),
+            json!([1., 2., 3.]),
+            json!(["bad", 0.]),
+            json!([1e100, 0.]),
+            Value::Null,
+        ] {
+            let mut invalid = json!({"upsert_rows":[{"id":"bad", "embed_image_url":vector}]});
+            assert!(prepare_write_inputs(&mut invalid, &profile, EmbedStore::Native).is_err());
+        }
+        let text = validate_embed(
+            "text",
+            &json!({"model":"openai/text-embedding-3-small", "dims":2,"serving":{"prefer":"local"}}),
+        )
+        .unwrap();
+        assert!(prepare_write_inputs(
+            &mut json!({"upsert_rows":[{"id":"a", "embed_text":[1.,0.]}]}),
+            &text,
+            EmbedStore::Native
+        )
+        .is_err());
+    }
 
     #[test]
     fn native_serving_is_consumed_but_tpuf_fields_remain() {
