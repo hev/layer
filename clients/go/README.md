@@ -84,6 +84,7 @@ and pipeline/scan/warm-cache helper methods.
 - `PauseUdf`
 - `PutBlob`
 - `PutPipelineDocumentChunks`
+- `PutPipelineDocumentRows`
 - `PutPipelineDocumentVectors`
 - `PutSnapshotPolicy`
 - `Query`

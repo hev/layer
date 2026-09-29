@@ -114,6 +114,7 @@ asyncio.run(main())
 - `pause_udf`
 - `put_blob`
 - `put_pipeline_document_chunks`
+- `put_pipeline_document_rows`
 - `put_pipeline_document_vectors`
 - `put_snapshot_policy`
 - `query`

@@ -1247,6 +1247,20 @@ export class Hevlayer {
   }
 
 
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.TurbopufferWriteResponse>;
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.TurbopufferWriteResponse>>;
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>> {
+    return this.requestJson<Models.TurbopufferWriteResponse>({
+      method: "PUT",
+      path: "/v2/pipelines/" + encodeURIComponent(String(pipelineId)) + "/documents/" + encodeURIComponent(String(docId)) + "/rows",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>>;
+  }
+
+
   async putPipelineDocumentVectors(pipelineId: string, docId: string, body: Models.PutVectorsRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.StatusResponse>;
   async putPipelineDocumentVectors(pipelineId: string, docId: string, body: Models.PutVectorsRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.StatusResponse>>;
   async putPipelineDocumentVectors(pipelineId: string, docId: string, body: Models.PutVectorsRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.StatusResponse | LayerResponse<Models.StatusResponse>> {

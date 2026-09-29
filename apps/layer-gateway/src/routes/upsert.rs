@@ -97,7 +97,20 @@ pub async fn upsert_or_delete(
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
     grant: Option<Extension<CallerGrant>>,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
+) -> Result<Response, AppError> {
+    write_namespace(state, namespace, uri, grant, body, false).await
+}
+
+/// Pipeline rows are already staged by the gateway and may carry parent metadata.
+/// Only internal callers can enable this; the public route always passes false.
+pub(crate) async fn write_namespace(
+    state: Arc<AppState>,
+    namespace: String,
+    uri: axum::http::Uri,
+    grant: Option<Extension<CallerGrant>>,
+    mut body: Value,
+    staged_rows: bool,
 ) -> Result<Response, AppError> {
     // Branch and copy bodies are classified before anything can rewrite
     // them, and forwarded byte-for-byte on their own path (RFC 0124).
@@ -212,7 +225,7 @@ pub async fn upsert_or_delete(
     let mut plan = native_write_plan(
         &mut body,
         effective_shard_count,
-        embed.generated_chunk_attributes,
+        embed.generated_chunk_attributes || staged_rows,
     )?;
     if !plan.is_managed() {
         let response = crate::routes::turbopuffer::passthrough(

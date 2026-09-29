@@ -489,6 +489,13 @@ export interface TurbopufferMetadataPatch {
   pinning?: unknown;
 }
 
+export interface PutPipelineRowsRequest {
+  [key: string]: unknown;
+  upsert_rows: Record<string, unknown>[];
+  schema?: Record<string, unknown>;
+  distance_metric?: "cosine_distance" | "euclidean_squared";
+}
+
 export type TurbopufferWriteRequest = Record<string, unknown>;
 
 export interface TurbopufferBranchFromRequest {

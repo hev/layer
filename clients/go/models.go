@@ -421,6 +421,12 @@ type TurbopufferMetadataPatch struct {
 	Pinning interface{} `json:"pinning,omitempty"`
 }
 
+type PutPipelineRowsRequest struct {
+	UpsertRows []map[string]interface{} `json:"upsert_rows"`
+	Schema map[string]interface{} `json:"schema,omitempty"`
+	DistanceMetric string `json:"distance_metric,omitempty"`
+}
+
 type TurbopufferWriteRequest map[string]interface{}
 
 type TurbopufferBranchFromRequest struct {

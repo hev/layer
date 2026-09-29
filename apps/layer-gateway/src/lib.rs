@@ -747,6 +747,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
                 get(routes::pipeline::get_chunks),
             )
             .route(
+                "/v2/pipelines/{id}/documents/{doc_id}/rows",
+                put(routes::pipeline::write_rows),
+            )
+            .route(
                 "/v2/pipelines/{id}/documents/{doc_id}/vectors",
                 put(routes::pipeline::write_vectors),
             );

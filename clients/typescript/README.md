@@ -105,6 +105,7 @@ console.log(response.data.rows);
 - `pauseUdf`
 - `putBlob`
 - `putPipelineDocumentChunks`
+- `putPipelineDocumentRows`
 - `putPipelineDocumentVectors`
 - `putSnapshotPolicy`
 - `query`

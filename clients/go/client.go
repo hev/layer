@@ -2029,6 +2029,24 @@ func (client *Client) PutPipelineDocumentChunksWithPerf(ctx context.Context, pip
 }
 
 
+func (client *Client) PutPipelineDocumentRows(ctx context.Context, pipelineID string, docID string, body *PutPipelineRowsRequest, options ...RequestOption) (*TurbopufferWriteResponse, error) {
+	out := TurbopufferWriteResponse{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/rows", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PutPipelineDocumentRowsWithPerf(ctx context.Context, pipelineID string, docID string, body *PutPipelineRowsRequest, options ...RequestOption) (*LayerResponse[TurbopufferWriteResponse], error) {
+	out := TurbopufferWriteResponse{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/rows", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[TurbopufferWriteResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) PutPipelineDocumentVectors(ctx context.Context, pipelineID string, docID string, body *PutVectorsRequest, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
 	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/vectors", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...); err != nil {
