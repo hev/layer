@@ -1263,7 +1263,23 @@ class RestWarehouseAuth(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     in_: Literal["query", "header"] = Field(..., alias="in")
     name: str
+    secretRef: WarehouseSecretRef | None = None
+    prefix: str | None = None
+    login: RestWarehouseLogin | None = None
+
+class RestWarehouseLogin(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    path: str
+    body: dict[str, Any]
     secretRef: WarehouseSecretRef
+    tokenPath: str
+    expiresInPath: str | None = None
+    refresh: RestWarehouseRefresh | None = None
+
+class RestWarehouseRefresh(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    path: str
+    body: dict[str, Any]
 
 class RestWarehouseRateLimit(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)

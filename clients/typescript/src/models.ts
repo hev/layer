@@ -1424,7 +1424,25 @@ export interface RestWarehouseAuth {
   [key: string]: unknown;
   "in": "query" | "header";
   name: string;
+  secretRef?: WarehouseSecretRef;
+  prefix?: string;
+  login?: RestWarehouseLogin;
+}
+
+export interface RestWarehouseLogin {
+  [key: string]: unknown;
+  path: string;
+  body: Record<string, unknown>;
   secretRef: WarehouseSecretRef;
+  tokenPath: string;
+  expiresInPath?: string;
+  refresh?: RestWarehouseRefresh;
+}
+
+export interface RestWarehouseRefresh {
+  [key: string]: unknown;
+  path: string;
+  body: Record<string, unknown>;
 }
 
 export interface RestWarehouseRateLimit {

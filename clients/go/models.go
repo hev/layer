@@ -1248,7 +1248,23 @@ type RestWarehouse struct {
 type RestWarehouseAuth struct {
 	In string `json:"in"`
 	Name string `json:"name"`
+	SecretRef WarehouseSecretRef `json:"secretRef,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
+	Login RestWarehouseLogin `json:"login,omitempty"`
+}
+
+type RestWarehouseLogin struct {
+	Path string `json:"path"`
+	Body map[string]interface{} `json:"body"`
 	SecretRef WarehouseSecretRef `json:"secretRef"`
+	TokenPath string `json:"tokenPath"`
+	ExpiresInPath string `json:"expiresInPath,omitempty"`
+	Refresh RestWarehouseRefresh `json:"refresh,omitempty"`
+}
+
+type RestWarehouseRefresh struct {
+	Path string `json:"path"`
+	Body map[string]interface{} `json:"body"`
 }
 
 type RestWarehouseRateLimit struct {

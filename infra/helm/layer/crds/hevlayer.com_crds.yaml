@@ -625,7 +625,7 @@ spec:
                 nullable: true
                 properties:
                   auth:
-                    description: Optional static credential applied to every probe and source request.
+                    description: Optional static credential or login applied to probes and source requests.
                     nullable: true
                     properties:
                       in:
@@ -633,9 +633,50 @@ spec:
                         - query
                         - header
                         type: string
+                      login:
+                        nullable: true
+                        properties:
+                          body:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                          expiresInPath:
+                            nullable: true
+                            type: string
+                          path:
+                            type: string
+                          refresh:
+                            nullable: true
+                            properties:
+                              body:
+                                type: object
+                                x-kubernetes-preserve-unknown-fields: true
+                              path:
+                                type: string
+                            required:
+                            - body
+                            - path
+                            type: object
+                          secretRef:
+                            properties:
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          tokenPath:
+                            type: string
+                        required:
+                        - body
+                        - path
+                        - secretRef
+                        - tokenPath
+                        type: object
                       name:
                         type: string
+                      prefix:
+                        type: string
                       secretRef:
+                        nullable: true
                         properties:
                           name:
                             type: string
@@ -645,8 +686,10 @@ spec:
                     required:
                     - in
                     - name
-                    - secretRef
                     type: object
+                    x-kubernetes-validations:
+                    - message: set exactly one of secretRef or login
+                      rule: has(self.secretRef) != has(self.login)
                   baseUrl:
                     description: JSON API origin, for example `https://api.fda.gov`.
                     type: string
