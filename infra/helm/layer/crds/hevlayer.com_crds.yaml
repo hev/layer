@@ -145,6 +145,7 @@ spec:
     storage: true
     subresources:
       status: {}
+
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -536,6 +537,51 @@ spec:
         properties:
           spec:
             properties:
+              clouddrive:
+                nullable: true
+                properties:
+                  msgraph:
+                    properties:
+                      clientId:
+                        type: string
+                      credentialSecretRef:
+                        description: 'Same-namespace Secret: certificate.pem + private-key.pem, or client-secret.'
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      tenantId:
+                        type: string
+                    required:
+                    - clientId
+                    - credentialSecretRef
+                    - tenantId
+                    type: object
+                  provider:
+                    enum:
+                    - msgraph
+                    type: string
+                  rateLimit:
+                    nullable: true
+                    properties:
+                      concurrentDownloads:
+                        format: uint32
+                        minimum: 1.0
+                        type: integer
+                      requestsPerSecond:
+                        format: double
+                        minimum: 0.001
+                        type: number
+                    required:
+                    - concurrentDownloads
+                    - requestsPerSecond
+                    type: object
+                required:
+                - msgraph
+                - provider
+                type: object
               huggingface:
                 nullable: true
                 properties:
@@ -560,7 +606,7 @@ spec:
               kind:
                 description: |-
                   Warehouse source kind. `databricks` and `iceberg` remain reserved;
-                  `snowflake`, `huggingface`, `rss`, `youtube`, and `rest` are admitted
+                  `snowflake`, `huggingface`, `rss`, `youtube`, `rest`, and `clouddrive` are admitted
                   and reconciled.
                 enum:
                 - snowflake
@@ -568,12 +614,13 @@ spec:
                 - rss
                 - youtube
                 - rest
+                - clouddrive
                 - databricks
                 - iceberg
                 type: string
                 x-kubernetes-validations:
-                - message: spec.kind is reserved but not implemented; v1 supports snowflake, huggingface, rss, youtube, and rest
-                  rule: self in ['snowflake', 'huggingface', 'rss', 'youtube', 'rest']
+                - message: spec.kind is reserved but not implemented; v1 supports snowflake, huggingface, rss, youtube, rest, and clouddrive
+                  rule: self in ['snowflake', 'huggingface', 'rss', 'youtube', 'rest', 'clouddrive']
               rest:
                 nullable: true
                 properties:
@@ -770,6 +817,12 @@ spec:
                 - Verified
                 - Failed
                 type: string
+              roles:
+                default: []
+                description: Application roles from the latest Microsoft Graph token exchange.
+                items:
+                  type: string
+                type: array
               sourceRevisions:
                 additionalProperties:
                   type: string
