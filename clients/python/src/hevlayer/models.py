@@ -124,6 +124,7 @@ class PutVectorsRequest(BaseModel):
 class CreateUdfRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     id: str
+    paused: bool | None = False
     spec: UdfSpec
 
 class UpdateUdfRequest(BaseModel):

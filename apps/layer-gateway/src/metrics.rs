@@ -2588,6 +2588,19 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn create_udf_paused(
+        &self,
+        id: &str,
+        spec: &crate::models::UdfSpec,
+        paused: bool,
+    ) -> Result<crate::udf::UdfResource, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.create_udf_paused(id, spec, paused).await;
+        self.metrics
+            .observe_pg_query("create_udf", udf_pg_status(&result), elapsed(start));
+        result
+    }
+
     async fn upsert_udf(
         &self,
         id: &str,
@@ -2652,6 +2665,28 @@ impl UdfStore for MetricsUdfStore {
             elapsed(start),
         );
         result
+    }
+
+    async fn claim_discovery(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::udf::UdfDiscoveryLease>, UdfStoreError> {
+        self.inner.claim_discovery(id).await
+    }
+
+    async fn renew_discovery(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+    ) -> Result<bool, UdfStoreError> {
+        self.inner.renew_discovery(lease).await
+    }
+
+    async fn finish_discovery(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        success: bool,
+    ) -> Result<(), UdfStoreError> {
+        self.inner.finish_discovery(lease, success).await
     }
 
     async fn enqueue_items(

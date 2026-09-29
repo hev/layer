@@ -1266,6 +1266,8 @@ fn default_scan_page_size() -> u32 {
 pub struct CreateUdfRequest {
     pub id: String,
     pub spec: UdfSpec,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Debug, Deserialize)]

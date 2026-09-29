@@ -119,6 +119,7 @@ type PutVectorsRequest struct {
 
 type CreateUdfRequest struct {
 	ID string `json:"id"`
+	Paused bool `json:"paused,omitempty"`
 	Spec UdfSpec `json:"spec"`
 }
 

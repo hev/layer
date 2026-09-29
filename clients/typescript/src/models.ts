@@ -146,6 +146,7 @@ export interface PutVectorsRequest {
 export interface CreateUdfRequest {
   [key: string]: unknown;
   id: string;
+  paused?: boolean;
   spec: UdfSpec;
 }
 
