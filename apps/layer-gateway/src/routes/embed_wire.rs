@@ -31,6 +31,7 @@ const PROFILE_PREFIX: &str = "embedding-profiles";
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ServingPreference {
     Native,
+    Worker,
     #[serde(alias = "autoscaler")]
     Turbopuffer,
     #[serde(alias = "lattice")]
@@ -41,6 +42,7 @@ impl ServingPreference {
     fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
+            Self::Worker => "worker",
             Self::Turbopuffer => "turbopuffer",
             Self::Local => "local",
         }
@@ -245,6 +247,9 @@ async fn prepare_write_profiles(
                 parsed.declaration = Some(embed.clone());
                 prepare_native_wire_profile(state, &route, &mut parsed, previous.as_ref()).await?;
             }
+            if parsed.serving == ServingPreference::Worker {
+                pin_worker_profile(state, &mut parsed, previous.as_ref()).await?;
+            }
             if parsed.serving == ServingPreference::Local {
                 match local_leg(state, &parsed.model) {
                     LocalLeg::Lattice => {
@@ -307,9 +312,13 @@ async fn prepare_write_profiles(
                     && parsed.revision.is_none()
                     && parsed.instructions == EmbeddingInstructions::default()
                     && parsed.chunk.is_none();
-                if parsed.serving != ServingPreference::Turbopuffer && !local_clip_image {
+                if !matches!(
+                    parsed.serving,
+                    ServingPreference::Turbopuffer | ServingPreference::Worker
+                ) && !local_clip_image
+                {
                     return Err(AppError::Validation(format!(
-                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `turbopuffer` (`autoscaler` is an alias), except CLIP image embeddings may use `local`"
+                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `worker` or `turbopuffer` (`autoscaler` is an alias), except CLIP image embeddings may use `local`"
                     )));
                 }
                 if parsed.serving == ServingPreference::Turbopuffer
@@ -390,6 +399,7 @@ async fn prepare_write_profiles(
     }
 
     let mut performance = json!({});
+    let mut pending_cache = Vec::new();
     for profile in gateway_profiles {
         let inputs = prepare_write_inputs(body, profile, store)?;
         if inputs.values.is_empty() {
@@ -410,8 +420,10 @@ async fn prepare_write_profiles(
             &mut performance,
         )
         .await?;
-        apply_write_vectors(body, profile, &inputs.row_indices, &vectors, store)?;
+        apply_write_vectors(body, profile, &inputs.row_indices, &vectors.vectors, store)?;
+        pending_cache.extend(vectors.cache);
     }
+    commit_embedding_cache(state, pending_cache);
 
     let requires_distance_check = native_embed_schema
         || profiles
@@ -783,7 +795,8 @@ async fn prepare_rank_by(
         &mut preparation.performance,
     )
     .await?;
-    rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
+    rank_by[2] = serde_json::to_value(&vectors.vectors[0]).expect("vector is JSON");
+    commit_embedding_cache(state, vectors.cache);
     if store == EmbedStore::Search {
         rank_by[0] = Value::String("vector".to_string());
     } else {
@@ -1071,6 +1084,66 @@ async fn pin_local_profile(
     Ok(())
 }
 
+async fn worker_for_profile(
+    state: &AppState,
+    profile: &EmbeddingProfile,
+    count_demand: bool,
+) -> Result<crate::embedding::worker::WorkerEmbedder, AppError> {
+    let worker = state
+        .worker_embedders
+        .resolve(&profile.model)
+        .await
+        .map_err(|error| map_worker_error(error, &profile.source))?;
+    if count_demand || worker.image_digest.is_none() {
+        state.metrics.record_embedder_demand(&worker.name);
+    }
+    worker
+        .check(&EmbeddingRequest {
+            model: &profile.model,
+            dims: profile.dims,
+            revision: profile.revision.as_deref(),
+            modality: profile.modality,
+            purpose: EmbeddingPurpose::Document,
+            artifact: profile.artifact_sha256.as_deref(),
+        })
+        .map_err(|error| map_worker_error(error, &profile.source))?;
+    Ok(worker)
+}
+
+async fn pin_worker_profile(
+    state: &AppState,
+    parsed: &mut EmbeddingProfile,
+    previous: Option<&EmbeddingProfile>,
+) -> Result<(), AppError> {
+    let worker = worker_for_profile(state, parsed, false).await?;
+    if let Some(previous) = previous.filter(|p| p.materialized) {
+        if previous.model != parsed.model
+            || previous.serving != parsed.serving
+            || previous.artifact_sha256 != worker.image_digest
+            || previous.dims != Some(worker.dims)
+            || previous.instructions != parsed.instructions
+        {
+            return Err(AppError::Validation(
+                "worker embedding profile changed; re-index into a fresh namespace".into(),
+            ));
+        }
+    }
+    parsed.dims = Some(worker.dims);
+    parsed.artifact_sha256 = worker.image_digest;
+    Ok(())
+}
+
+fn map_worker_error(error: EmbeddingError, attribute: &str) -> AppError {
+    match error {
+        EmbeddingError::Unavailable(message) => AppError::RetryableUpstream {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            retry_after: Some("5".into()),
+        },
+        error => map_embedding_provider_error(error, attribute),
+    }
+}
+
 /// RFC 0118 rules for a declaration on a store that cannot embed natively,
 /// all before any provider call: chunking requires the explicit Turbopuffer route,
 /// `native` resolved to a
@@ -1082,12 +1155,17 @@ async fn prepare_native_wire_profile(
     parsed: &mut EmbeddingProfile,
     previous: Option<&EmbeddingProfile>,
 ) -> Result<(), AppError> {
-    if parsed.chunk.is_some() && parsed.serving != ServingPreference::Turbopuffer {
+    if parsed.chunk.is_some()
+        && !matches!(
+            parsed.serving,
+            ServingPreference::Turbopuffer | ServingPreference::Worker
+        )
+    {
         return Err(AppError::unsupported_feature(
             "pgvector",
             Some(route.to_string()),
             "embed.chunk",
-            "chunked embedding requires embed.serving.prefer: turbopuffer",
+            "chunked embedding requires embed.serving.prefer: turbopuffer or worker",
         ));
     }
     resolve_native_wire_serving(state, parsed, previous).await?;
@@ -1230,9 +1308,7 @@ fn parse_serving_preference(
     match prefer {
         "native" => Ok(ServingPreference::Native),
         "turbopuffer" | "autoscaler" => Ok(ServingPreference::Turbopuffer),
-        "worker" => Err(AppError::EmbedWorkerUnavailable(format!(
-            "schema attribute `{attribute}`: `embed.serving.prefer: worker` requires the GPU-embedder integration, which is not available; no fallback is performed"
-        ))),
+        "worker" => Ok(ServingPreference::Worker),
         "local" | "lattice" => Ok(ServingPreference::Local),
         _ => Err(AppError::Validation(format!(
             "schema attribute `{attribute}` has unsupported `embed.serving.prefer` value `{prefer}`"
@@ -1891,6 +1967,17 @@ fn apply_write_vectors(
     Ok(())
 }
 
+struct ResolvedVectors {
+    vectors: Vec<Vec<f64>>,
+    cache: Vec<(String, Arc<Vec<f64>>)>,
+}
+
+fn commit_embedding_cache(state: &AppState, cache: Vec<(String, Arc<Vec<f64>>)>) {
+    for (key, vector) in cache {
+        state.embedding_cache.insert(key, (Instant::now(), vector));
+    }
+}
+
 async fn resolve_vectors(
     state: &AppState,
     namespace: &str,
@@ -1899,7 +1986,8 @@ async fn resolve_vectors(
     purpose: EmbeddingPurpose,
     texts: &[String],
     performance: &mut Value,
-) -> Result<Vec<Vec<f64>>, AppError> {
+) -> Result<ResolvedVectors, AppError> {
+    let mut pending_cache = Vec::new();
     let request = EmbeddingRequest {
         model: &profile.model,
         dims: profile.dims,
@@ -1908,6 +1996,17 @@ async fn resolve_vectors(
         purpose,
         artifact: profile.artifact_sha256.as_deref(),
     };
+    let worker_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>> =
+        if profile.serving == ServingPreference::Worker {
+            let worker = worker_for_profile(state, profile, true).await?;
+            worker
+                .validate_inputs(texts)
+                .and_then(|()| worker.require_ready())
+                .map_err(|e| map_worker_error(e, &profile.source))?;
+            Some(Arc::new(worker))
+        } else {
+            None
+        };
     let provider_model = request.provider_model();
     let mut vectors = vec![None; texts.len()];
     let mut misses = Vec::new();
@@ -1943,6 +2042,7 @@ async fn resolve_vectors(
     if !misses.is_empty() {
         let http_provider;
         let provider: &Arc<dyn crate::embedding::EmbeddingProvider> = match profile.serving {
+            ServingPreference::Worker => worker_provider.as_ref().expect("worker resolved before cache lookup"),
             ServingPreference::Local => match local_leg(state, &profile.model) {
                 LocalLeg::Lattice => state.lattice_embedding_provider.as_ref().ok_or_else(|| {
                     AppError::Validation(
@@ -1986,7 +2086,13 @@ async fn resolve_vectors(
         } else {
             provider.embed(&request, &misses).await
         }
-        .map_err(|error| map_embedding_provider_error(error, &profile.source))?;
+        .map_err(|error| {
+            if profile.serving == ServingPreference::Worker {
+                map_worker_error(error, &profile.source)
+            } else {
+                map_embedding_provider_error(error, &profile.source)
+            }
+        })?;
         if batch.vectors.len() != misses.len() {
             return Err(AppError::Upstream(format!(
                 "embedding provider returned {} vectors for {} inputs",
@@ -2007,20 +2113,22 @@ async fn resolve_vectors(
         for ((position, vector), key) in
             miss_positions.into_iter().zip(batch.vectors).zip(miss_keys)
         {
-            state
-                .embedding_cache
-                .insert(key, (Instant::now(), Arc::new(vector.clone())));
+            pending_cache.push((key, Arc::new(vector.clone())));
             vectors[position] = Some(vector);
         }
     }
 
-    vectors
+    let vectors = vectors
         .into_iter()
         .map(|vector| {
             vector
                 .ok_or_else(|| AppError::Upstream("embedding cache resolution failed".to_string()))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok(ResolvedVectors {
+        vectors,
+        cache: pending_cache,
+    })
 }
 
 /// Map a classified provider failure to the public error envelope: validation
@@ -2080,6 +2188,7 @@ fn cache_key(
 fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
     match serving {
         ServingPreference::Native => "native",
+        ServingPreference::Worker => "worker:openai:v1",
         // Keep existing cache entries shared by both spellings.
         ServingPreference::Turbopuffer => "autoscaler",
         ServingPreference::Local if model == crate::embedding::LatticeEmbeddingProvider::MODEL => {

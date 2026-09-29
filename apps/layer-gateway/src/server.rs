@@ -317,6 +317,7 @@ pub async fn run_with_options(options: ServerOptions) {
         Arc::new(crate::agent::DisabledAgentProvider);
 
     let state = Arc::new(AppState {
+        worker_embedders: Arc::new(Default::default()),
         draining: Arc::new(AtomicBool::new(false)),
         drain_marker_path: config.drain_marker_path.clone(),
         metrics: Arc::clone(&metrics),

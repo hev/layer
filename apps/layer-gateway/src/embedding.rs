@@ -14,6 +14,7 @@ use crate::clients::turbopuffer::{
 
 mod http;
 mod local_clip;
+pub mod worker;
 pub use http::{HttpEmbeddingOptions, HttpEmbeddingProvider, ProfilePin};
 pub(crate) use local_clip::is_clip_model;
 pub use local_clip::LocalClipEmbeddingProvider;

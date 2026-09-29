@@ -150,6 +150,8 @@ pub struct LayerMetrics {
     agent_query_duration: HistogramVec,
     agent_turns: HistogramVec,
     agent_tokens_total: IntCounterVec,
+    embedder_demand: IntGaugeVec,
+    embedder_requests: DashMap<String, Vec<Instant>>,
     embed_tokens_total: IntCounterVec,
     embed_compute_seconds_total: CounterVec,
     embed_model_hints: DashMap<String, String>,
@@ -412,6 +414,12 @@ impl LayerMetrics {
             "hevlayer_agent_tokens_total",
             "Model tokens reported by the inference provider for agentic search.",
             &["agent", "turn", "token_type"],
+        );
+        let embedder_demand = gauge_vec(
+            &registry,
+            "hevlayer_embedder_demand",
+            "Embedding requests arriving in the last 60 seconds, including waking requests.",
+            &["embedder"],
         );
         let embed_tokens_total = counter(
             &registry,
@@ -707,6 +715,8 @@ impl LayerMetrics {
             agent_query_duration,
             agent_turns,
             agent_tokens_total,
+            embedder_demand,
+            embedder_requests: DashMap::new(),
             embed_tokens_total,
             embed_compute_seconds_total,
             embed_model_hints: DashMap::new(),
@@ -766,7 +776,19 @@ impl LayerMetrics {
         self.namespace_purge_discovery_ready.set(i64::from(ready));
     }
 
+    pub fn record_embedder_demand(&self, embedder: &str) {
+        let mut requests = self.embedder_requests.entry(embedder.into()).or_default();
+        requests.retain(|t| t.elapsed().as_secs() < 60);
+        requests.push(Instant::now());
+    }
+
     pub fn encode(&self) -> Result<String, String> {
+        for mut requests in self.embedder_requests.iter_mut() {
+            requests.retain(|t| t.elapsed().as_secs() < 60);
+            self.embedder_demand
+                .with_label_values(&[requests.key()])
+                .set(requests.len() as i64);
+        }
         let encoder = TextEncoder::new();
         encoder
             .encode_to_string(&self.registry.gather())
@@ -2793,6 +2815,24 @@ mod tests {
     #[test]
     fn registered_metrics_must_have_catalog_docs() {
         let _ = LayerMetrics::new();
+    }
+
+    #[test]
+    fn embedder_demand_expires_without_another_request() {
+        let metrics = LayerMetrics::new();
+        metrics.record_embedder_demand("bge");
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("hevlayer_embedder_demand{embedder=\"bge\"} 1"));
+        metrics.embedder_requests.insert(
+            "bge".into(),
+            vec![std::time::Instant::now() - std::time::Duration::from_secs(61)],
+        );
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("hevlayer_embedder_demand{embedder=\"bge\"} 0"));
     }
 
     #[test]

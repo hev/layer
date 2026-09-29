@@ -536,6 +536,15 @@ const CATALOG: &[MetricDoc] = &[
         alert: None,
     },
     MetricDoc {
+        name: "hevlayer_embedder_demand",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Query,
+        labels: &["embedder"],
+        description: "Embedding requests arriving in the last 60 seconds, including waking requests.",
+        example_promql: "sum by (embedder) (hevlayer_embedder_demand)",
+        alert: None,
+    },
+    MetricDoc {
         name: "hevlayer_embed_tokens_total",
         kind: MetricKind::Counter,
         family: MetricFamily::Cost,

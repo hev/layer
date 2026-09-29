@@ -27,6 +27,11 @@ rules:
     resources: ["agents/status", "functions/status", "pipelines/status"]
     verbs: ["get"]
   {{- end }}
+  {{- if .Values.gateway.indexConfig.enabled }}
+  - apiGroups: ["hevlayer.com"]
+    resources: ["infrarules"]
+    verbs: ["get"]
+  {{- end }}
   {{- if $indexVerbs }}
   - apiGroups: ["hevlayer.com"]
     resources: ["indexes"]

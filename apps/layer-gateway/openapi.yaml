@@ -2384,18 +2384,23 @@ components:
         once, when the attribute is declared, through the `LAYER_EMBED_URL` embedder
         when it lists the model, otherwise the configured Turbopuffer embedding provider;
         Postgres takes one embedded attribute per namespace, no client vector beside
-        it; `chunk` requires explicit `turbopuffer` serving. `local` is resolved in-process
-        by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
+        it; `chunk` requires explicit `turbopuffer` or `worker` serving. `local` is
+        resolved in-process by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
         while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`; `lattice` remains
         an alias for `local`. `serving.prefer` accepts exactly `native` (default),
-        `turbopuffer` (alias `autoscaler`), or `local` (alias `lattice`); `worker`
-        returns `422 embed_worker_unavailable` until GPU workers are supported. There
-        is no fallback between explicit providers. The Turbopuffer provider path accepts
-        supported Hugging Face checkpoints, including finetuned models, and sends
-        only concrete vectors to the active store. The Layer-only revision, instruction,
-        modality, and chunking fields are never forwarded upstream; local CLIP supports
-        image modality while the remaining extensions require the Turbopuffer provider
-        leg.
+        `turbopuffer` (alias `autoscaler`), `local` (alias `lattice`), or `worker`.
+        Worker routes to the InfraRules embedder whose model matches, using its OpenAI-compatible
+        /v1/embeddings endpoint. Worker profiles pin the image digest; changing it
+        requires re-indexing. Waking workers return 503 with Retry-After. Invalid
+        vectors return 502 before cache insertion or store writes. There is no fallback
+        between explicit providers. The Turbopuffer provider path accepts supported
+        Hugging Face checkpoints, including finetuned models, and sends only concrete
+        vectors to the active store. The Layer-only revision, instruction, modality,
+        and chunking fields are never forwarded upstream; local CLIP supports image
+        modality while worker supports text instructions and chunking; revision selection
+        belongs in the worker image. Worker prepared inputs use a conservative UTF-8
+        byte budget plus two special tokens against maxInputTokens; oversized inputs
+        are rejected, never truncated.
 
         '
     TurbopufferBranchFromRequest:
