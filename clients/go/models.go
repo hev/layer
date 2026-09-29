@@ -380,7 +380,7 @@ type Document struct {
 }
 
 type FetchDocumentsRequest struct {
-	Ids []string `json:"ids"`
+	Ids []interface{} `json:"ids"`
 	IncludeAttributes []string `json:"include_attributes,omitempty"`
 }
 

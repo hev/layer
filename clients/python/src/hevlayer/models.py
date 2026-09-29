@@ -385,7 +385,7 @@ class Document(BaseModel):
 
 class FetchDocumentsRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    ids: list[str]
+    ids: list[str | int]
     include_attributes: list[str] | None = None
 
 class FetchDocumentsResponse(BaseModel):

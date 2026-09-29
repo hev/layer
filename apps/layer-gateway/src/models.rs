@@ -248,9 +248,30 @@ fn default_top_k() -> u32 {
 
 #[derive(Debug, Deserialize)]
 pub struct FetchManyRequest {
+    #[serde(deserialize_with = "deserialize_fetch_ids")]
     pub ids: Vec<String>,
     #[serde(default)]
     pub include_attributes: Option<Vec<String>>,
+}
+
+fn deserialize_fetch_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        String(String),
+        Integer(u64),
+    }
+    Vec::<Id>::deserialize(deserializer).map(|ids| {
+        ids.into_iter()
+            .map(|id| match id {
+                Id::String(id) => id,
+                Id::Integer(id) => id.to_string(),
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]

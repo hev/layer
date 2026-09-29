@@ -2274,9 +2274,14 @@ components:
         ids:
           type: array
           items:
-            type: string
+            oneOf:
+            - type: string
+            - type: integer
+              minimum: 0
+              maximum: 18446744073709551615
           minItems: 1
-          description: Document IDs to retrieve
+          description: Document IDs to retrieve. Integer IDs are resolved using the
+            namespace ID type.
         include_attributes:
           type: array
           items:

@@ -442,7 +442,7 @@ export interface Document {
 
 export interface FetchDocumentsRequest {
   [key: string]: unknown;
-  ids: string[];
+  ids: (string | number)[];
   include_attributes?: string[];
 }
 

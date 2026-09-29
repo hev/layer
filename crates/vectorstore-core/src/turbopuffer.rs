@@ -895,6 +895,7 @@ pub struct HttpTurbopufferClient {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    id_types: RwLock<HashMap<String, (std::time::Instant, bool)>>,
 }
 
 impl HttpTurbopufferClient {
@@ -922,6 +923,49 @@ impl HttpTurbopufferClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
+            id_types: RwLock::new(HashMap::new()),
+        }
+    }
+
+    // ID types are immutable for a namespace's lifetime. Bound the cache and
+    // expire entries so namespaces recreated outside this client are rechecked.
+    // Request-scoped credentials bypass it: namespace names can overlap across
+    // upstream accounts, and a cache hit must not bypass their authorization.
+    async fn integer_ids(&self, namespace: &str) -> Result<bool, TurbopufferError> {
+        const TTL: Duration = Duration::from_secs(60);
+        if self.api_key.is_some() {
+            if let Some((at, integer)) = self.id_types.read().unwrap().get(namespace) {
+                if at.elapsed() < TTL {
+                    return Ok(*integer);
+                }
+            }
+        }
+        let meta = self.head_namespace(namespace).await?;
+        let integer = match meta.raw["schema"]["id"]["type"].as_str() {
+            Some("uint") => true,
+            Some("string" | "uuid") => false,
+            _ => {
+                return Err(TurbopufferError::Other(
+                    "namespace metadata has no supported id type".to_string(),
+                ))
+            }
+        };
+        if self.api_key.is_some() {
+            let mut cache = self.id_types.write().unwrap();
+            cache.retain(|_, (at, _)| at.elapsed() < TTL);
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+            cache.insert(namespace.to_string(), (std::time::Instant::now(), integer));
+        }
+        Ok(integer)
+    }
+
+    fn wire_id(id: &str, integer: bool) -> Option<Value> {
+        if integer {
+            id.parse::<u64>().ok().map(Value::from)
+        } else {
+            Some(Value::String(id.to_string()))
         }
     }
 
@@ -1071,6 +1115,11 @@ impl TurbopufferClient for HttpTurbopufferClient {
         query: Option<&str>,
         body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        if method == "DELETE" {
+            if let Some(namespace) = path.strip_prefix("/v2/namespaces/") {
+                self.id_types.write().unwrap().remove(namespace);
+            }
+        }
         let mut url = format!("{}{}", self.base_url, path);
         if let Some(query) = query {
             if !query.is_empty() {
@@ -1422,10 +1471,14 @@ impl TurbopufferClient for HttpTurbopufferClient {
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
         self.capabilities()
             .require(crate::capabilities::WireFeature::Fetch)?;
+        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
+            // String-only system markers cannot exist in an integer namespace.
+            return Ok(None);
+        };
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": 1,
-            "filters": ["id", "Eq", id],
+            "filters": ["id", "Eq", wire_id],
             "include_attributes": true,
             "consistency": {"level": "eventual"},
         });
@@ -1483,10 +1536,18 @@ impl TurbopufferClient for HttpTurbopufferClient {
             return Ok(HashMap::new());
         }
 
+        let integer = self.integer_ids(namespace).await?;
+        let wire_ids: Vec<Value> = ids
+            .iter()
+            .filter_map(|id| Self::wire_id(id, integer))
+            .collect();
+        if wire_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": ids.len(),
-            "filters": ["id", "In", ids],
+            "filters": ["id", "In", wire_ids],
             "include_attributes": true,
             "consistency": {"level": "eventual"},
         });
@@ -1541,10 +1602,14 @@ impl TurbopufferClient for HttpTurbopufferClient {
         // query rows unless requested. This is the *only* place the gateway
         // pulls a vector out of upstream; everywhere else, `is_system_column`
         // drops it before it reaches the caller.
+        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
+            // String-only system markers cannot exist in an integer namespace.
+            return Ok(None);
+        };
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": 1,
-            "filters": ["id", "Eq", id],
+            "filters": ["id", "Eq", wire_id],
             "include_attributes": ["vector"],
             "consistency": {"level": "eventual"},
         });
@@ -1601,7 +1666,15 @@ impl TurbopufferClient for HttpTurbopufferClient {
         self.capabilities()
             .require(crate::capabilities::WireFeature::OrderedScan)?;
         // Build filter: Id > cursor AND any user filters
-        let cursor_filter = cursor.map(|c| serde_json::json!(["id", "Gt", c]));
+        let cursor_filter = if let Some(cursor) = cursor {
+            let id =
+                Self::wire_id(cursor, self.integer_ids(namespace).await?).ok_or_else(|| {
+                    TurbopufferError::Other("invalid integer id scan cursor".to_string())
+                })?;
+            Some(serde_json::json!(["id", "Gt", id]))
+        } else {
+            None
+        };
 
         let combined_filter = match (cursor_filter, filters) {
             (Some(cf), Some(uf)) => Some(serde_json::json!(["And", [cf, uf.clone()]])),
