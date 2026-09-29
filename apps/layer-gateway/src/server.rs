@@ -20,7 +20,7 @@ use crate::index_config::{IndexConfigSource, StaticIndexConfigSource};
 use crate::metrics::LayerMetrics;
 use crate::telemetry::{Telemetry, TelemetryCounters};
 use crate::vector_store::{resolve_vector_stores_from_yaml, ResolvedVectorStoreKind};
-use crate::{build_router, AppState, RestoreRunState};
+use crate::{AppState, RestoreRunState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServerOptions {
@@ -72,6 +72,8 @@ pub async fn run_with_options(options: ServerOptions) {
         .init();
 
     let config = Config::from_env();
+    let mcp_registry = crate::mcp::registry_from_env()
+        .unwrap_or_else(|err| panic!("failed to load MCP registry: {err}"));
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let metrics = Arc::new(LayerMetrics::new());
     let telemetry_counters = Arc::new(TelemetryCounters::default());
@@ -424,7 +426,7 @@ pub async fn run_with_options(options: ServerOptions) {
     }
 
     let _purge_worker = crate::namespace_purge::spawn_worker(&state);
-    let app = build_router(state);
+    let app = crate::build_router_with_mcp(state, mcp_registry);
 
     info!(addr = %addr, "Hevlayer gateway starting");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

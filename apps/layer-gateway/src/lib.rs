@@ -11,6 +11,7 @@ pub mod index_config;
 pub mod index_gc;
 pub mod keys;
 pub mod lineage;
+pub mod mcp;
 pub mod metrics;
 pub mod models;
 pub mod namespace_purge;
@@ -634,6 +635,10 @@ async fn count_telemetry_usage(
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with_mcp(state, None)
+}
+
+pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegistry>>) -> Router {
     let mut public = Router::new()
         .route("/health", get(routes::health::health))
         .route("/ready", get(routes::health::ready))
@@ -699,6 +704,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     #[cfg(not(feature = "pro"))]
     #[allow(unused_mut)]
     let mut router = router.route("/v2/license", get(open_gateway_license));
+
+    if let Some(registry) = mcp {
+        router = router
+            .route("/mcp/{name}", post(mcp::handle))
+            .layer(axum::Extension(registry));
+    }
 
     #[cfg(feature = "pro")]
     if state.pipeline_store.is_some() {
