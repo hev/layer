@@ -1,6 +1,6 @@
 //! Validation and routing for Turbopuffer-compatible native embeddings.
 //!
-//! Native requests remain transparent on Turbopuffer stores. Autoscaler and
+//! Native requests remain transparent on Turbopuffer stores. Turbopuffer and
 //! Lattice requests (plus native requests targeting hev search or Postgres,
 //! which cannot embed) are resolved through their selected gateway provider
 //! and lowered to concrete vectors, so Layer-only serving policy and `embed` /
@@ -31,7 +31,8 @@ const PROFILE_PREFIX: &str = "embedding-profiles";
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ServingPreference {
     Native,
-    Autoscaler,
+    #[serde(alias = "autoscaler")]
+    Turbopuffer,
     #[serde(alias = "lattice")]
     Local,
 }
@@ -40,7 +41,7 @@ impl ServingPreference {
     fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
-            Self::Autoscaler => "autoscaler",
+            Self::Turbopuffer => "turbopuffer",
             Self::Local => "local",
         }
     }
@@ -306,16 +307,16 @@ async fn prepare_write_profiles(
                     && parsed.revision.is_none()
                     && parsed.instructions == EmbeddingInstructions::default()
                     && parsed.chunk.is_none();
-                if parsed.serving != ServingPreference::Autoscaler && !local_clip_image {
+                if parsed.serving != ServingPreference::Turbopuffer && !local_clip_image {
                     return Err(AppError::Validation(format!(
-                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `autoscaler`, except CLIP image embeddings may use `local`"
+                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `turbopuffer` (`autoscaler` is an alias), except CLIP image embeddings may use `local`"
                     )));
                 }
-                if parsed.serving == ServingPreference::Autoscaler
+                if parsed.serving == ServingPreference::Turbopuffer
                     && state.embedding_provider.is_none()
                 {
                     return Err(AppError::ServiceUnavailable(
-                        "Layer embedding extensions require a configured production autoscaler inference provider"
+                        "Layer embedding extensions require a configured Turbopuffer embedding provider"
                             .to_string(),
                     ));
                 }
@@ -1071,7 +1072,8 @@ async fn pin_local_profile(
 }
 
 /// RFC 0118 rules for a declaration on a store that cannot embed natively,
-/// all before any provider call: no chunking (rule 5), `native` resolved to a
+/// all before any provider call: chunking requires the explicit Turbopuffer route,
+/// `native` resolved to a
 /// configured provider, and no model, dims or provider change once the
 /// namespace holds vectors (rule 9).
 async fn prepare_native_wire_profile(
@@ -1080,12 +1082,12 @@ async fn prepare_native_wire_profile(
     parsed: &mut EmbeddingProfile,
     previous: Option<&EmbeddingProfile>,
 ) -> Result<(), AppError> {
-    if parsed.chunk.is_some() {
+    if parsed.chunk.is_some() && parsed.serving != ServingPreference::Turbopuffer {
         return Err(AppError::unsupported_feature(
             "pgvector",
             Some(route.to_string()),
             "embed.chunk",
-            "chunked embedding writes more than one row shape",
+            "chunked embedding requires embed.serving.prefer: turbopuffer",
         ));
     }
     resolve_native_wire_serving(state, parsed, previous).await?;
@@ -1222,12 +1224,15 @@ fn parse_serving_preference(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: autoscaler`, or `prefer: local` (`lattice` is an alias)"
+                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: turbopuffer` (`autoscaler` is an alias), or `prefer: local` (`lattice` is an alias)"
             ))
         })?;
     match prefer {
         "native" => Ok(ServingPreference::Native),
-        "autoscaler" => Ok(ServingPreference::Autoscaler),
+        "turbopuffer" | "autoscaler" => Ok(ServingPreference::Turbopuffer),
+        "worker" => Err(AppError::EmbedWorkerUnavailable(format!(
+            "schema attribute `{attribute}`: `embed.serving.prefer: worker` requires the GPU-embedder integration, which is not available; no fallback is performed"
+        ))),
         "local" | "lattice" => Ok(ServingPreference::Local),
         _ => Err(AppError::Validation(format!(
             "schema attribute `{attribute}` has unsupported `embed.serving.prefer` value `{prefer}`"
@@ -1468,7 +1473,7 @@ fn reject_source_patches(body: &Value, profiles: &[&EmbeddingProfile]) -> Result
                     .is_some_and(|patch| patch.contains_key(source));
             if patches_source {
                 return Err(AppError::Validation(format!(
-                    "patching autoscaler-embedded source attribute `{source}` is unsupported; upsert the full row so Layer can recompute `{}`",
+                    "patching gateway-embedded source attribute `{source}` is unsupported; upsert the full row so Layer can recompute `{}`",
                     profile.target
                 )));
             }
@@ -1933,7 +1938,7 @@ async fn resolve_vectors(
                     &http_provider
                 }
             },
-            ServingPreference::Native | ServingPreference::Autoscaler => state
+            ServingPreference::Native | ServingPreference::Turbopuffer => state
                 .embedding_provider
                 .as_ref()
                 .ok_or_else(|| {
@@ -2046,7 +2051,8 @@ fn cache_key(
 fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
     match serving {
         ServingPreference::Native => "native",
-        ServingPreference::Autoscaler => "autoscaler",
+        // Keep existing cache entries shared by both spellings.
+        ServingPreference::Turbopuffer => "autoscaler",
         ServingPreference::Local if model == crate::embedding::LatticeEmbeddingProvider::MODEL => {
             "local:lattice:fp32"
         }
@@ -2331,14 +2337,18 @@ mod tests {
     }
 
     #[test]
-    fn serving_preference_accepts_local_and_lattice_alias() {
+    fn serving_preference_accepts_canonical_routes_and_aliases() {
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "native"})), "title").unwrap(),
             ServingPreference::Native
         );
         assert_eq!(
+            parse_serving_preference(Some(&json!({"prefer": "turbopuffer"})), "title").unwrap(),
+            ServingPreference::Turbopuffer
+        );
+        assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "autoscaler"})), "title").unwrap(),
-            ServingPreference::Autoscaler
+            ServingPreference::Turbopuffer
         );
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "local"})), "title").unwrap(),
@@ -2366,7 +2376,7 @@ mod tests {
     #[test]
     fn embedding_cache_includes_local_clip_variant() {
         let autoscaler = cache_key(
-            ServingPreference::Autoscaler,
+            ServingPreference::Turbopuffer,
             "openai/clip-vit-base-patch32",
             Some(512),
             EmbeddingModality::Image,

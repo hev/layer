@@ -71,7 +71,7 @@ request does once a turbopuffer key is set.
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
-- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.
+- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding requires explicit turbopuffer serving (autoscaler alias).
 - **One-call search (embed, text legs, RRF, rerank)** on pgvector (local): BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).
 
 ## Full-text ranking

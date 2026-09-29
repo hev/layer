@@ -2374,20 +2374,23 @@ components:
         The first row write establishing an embedded schema requires `distance_metric`
         (Postgres defaults it to `cosine_distance`). `serving.prefer: native` is consumed
         by Layer and the tpuf-compatible fields are forwarded on a Turbopuffer store.
-        `autoscaler` and native-on-search are resolved through a configured Turbopuffer
-        embedding provider. Native-on-Postgres is resolved once, when the attribute
-        is declared, through the `LAYER_EMBED_URL` embedder when it lists the model,
-        otherwise the configured Turbopuffer embedding provider; Postgres takes one
-        embedded attribute per namespace, no client vector beside it, and no `chunk`.
-        `local` is resolved in-process by model family: `erikkaum/lattice-retrieval`
-        uses `LAYER_LATTICE_MODEL_PATH`, while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`;
-        `lattice` remains an alias for `local`. `serving.prefer` accepts exactly `native`,
-        `autoscaler`, `local`, or the `lattice` alias; there is no fallback between
-        them. The autoscaler path accepts supported Hugging Face checkpoints, including
-        finetuned models, and sends only concrete vectors to the active store. The
-        Layer-only revision, instruction, modality, and chunking fields are never
-        forwarded upstream; local CLIP supports image modality while the remaining
-        extensions require the autoscaler leg.
+        `turbopuffer` (alias `autoscaler`) and native-on-search are resolved through
+        a configured Turbopuffer embedding provider. Native-on-Postgres is resolved
+        once, when the attribute is declared, through the `LAYER_EMBED_URL` embedder
+        when it lists the model, otherwise the configured Turbopuffer embedding provider;
+        Postgres takes one embedded attribute per namespace, no client vector beside
+        it; `chunk` requires explicit `turbopuffer` serving. `local` is resolved in-process
+        by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
+        while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`; `lattice` remains
+        an alias for `local`. `serving.prefer` accepts exactly `native` (default),
+        `turbopuffer` (alias `autoscaler`), or `local` (alias `lattice`); `worker`
+        returns `422 embed_worker_unavailable` until GPU workers are supported. There
+        is no fallback between explicit providers. The Turbopuffer provider path accepts
+        supported Hugging Face checkpoints, including finetuned models, and sends
+        only concrete vectors to the active store. The Layer-only revision, instruction,
+        modality, and chunking fields are never forwarded upstream; local CLIP supports
+        image modality while the remaining extensions require the Turbopuffer provider
+        leg.
 
         '
     TurbopufferBranchFromRequest:

@@ -35,6 +35,9 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("GPU embedding worker unavailable: {0}")]
+    EmbedWorkerUnavailable(String),
+
     #[error("Unsupported by store: {message}")]
     UnsupportedByStore {
         store: Option<String>,
@@ -311,6 +314,14 @@ impl IntoResponse for AppError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation_error",
                 msg.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::EmbedWorkerUnavailable(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "embed_worker_unavailable",
+                message.clone(),
                 None,
                 None,
                 None,
