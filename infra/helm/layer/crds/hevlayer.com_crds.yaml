@@ -1380,6 +1380,31 @@ spec:
                     type: integer
                 type: object
               sourceRef:
+                properties:
+                  pagination:
+                    properties:
+                      allowEmptySnapshot:
+                        default: false
+                        type: boolean
+                      kind:
+                        description: REST supports offset, page, and searchAfter pagination.
+                        type: string
+                      pageParam:
+                        minLength: 1
+                        type: string
+                      pageSize:
+                        minimum: 1.0
+                        type: integer
+                      pageSizeParam:
+                        minLength: 1
+                        type: string
+                      startPage:
+                        default: 1
+                        minimum: 0.0
+                        type: integer
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
                 x-kubernetes-preserve-unknown-fields: true
               target:
                 properties:
