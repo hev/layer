@@ -118,6 +118,7 @@ console.log(response.data.rows);
 - `resetFailedUdf`
 - `resumeUdf`
 - `revokeKey`
+- `searchNamespace`
 - `setDocumentsStage`
 - `updateTurbopufferNamespaceMetadata`
 - `updateTurbopufferNamespaceSchema`

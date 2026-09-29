@@ -15,6 +15,7 @@ pub mod namespaces;
 pub mod query;
 pub mod query_router;
 pub mod scans;
+pub mod search;
 pub mod snapshot_policy;
 pub mod turbopuffer;
 pub mod upsert;

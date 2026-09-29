@@ -1433,6 +1433,89 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/search":
+    post:
+      operationId: searchNamespace
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+      summary: Search a namespace with one query string
+      description: |
+        Layer-native search in one call. The gateway embeds `query` from the namespace schema's `embed:` attribute, runs one BM25 leg per `full_text_search` attribute plus fuzzy legs per token and one ANN leg under a 16-leg budget, scatters every leg across the namespace's shards under one stable-read cut, fuses with RRF (`rank_constant` 60) deduplicating by id, cuts the fused list to `pool` candidates, and reranks the pool with the configured provider. Rows carry the reranker's calibrated probability as `score`.
+        The response always carries four echo blocks: `routing` (advisory; every leg always runs), `plan`, `hybrid` and `rerank`. If the provider fails and `rerank.required` is false the response is `200` in fused order with `rerank.executed: false` and `x-layer-warning: rerank_degraded`.
+        `/query` is unaffected by this operation. Reserved `_hevlayer_*` attributes are never a text leg and never reranker input. One search history entry is written per request with `raw_query` taken from the body.
+      tags:
+      - namespaces
+      - query
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: x-hevlayer-tags
+        in: header
+        required: false
+        schema:
+          type: string
+        description: 'Comma-separated search-history tags, as on the query operation.
+
+          '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SearchRequest"
+      responses:
+        '200':
+          description: Ranked, scored rows with the four echo blocks.
+          headers:
+            traceparent:
+              schema:
+                type: string
+              description: Trace context generated or propagated for search/clickstream
+                correlation.
+            x-layer-stable-as-of:
+              "$ref": "#/components/headers/LayerStableAsOf"
+            x-layer-warning:
+              "$ref": "#/components/headers/LayerWarning"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SearchResponse"
+        '404':
+          description: The namespace does not exist.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: 'The `error` field is the machine code. `embed_attribute_missing`:
+            the schema declares no `embed:` attribute. `embed_attribute_invalid`:
+            `embed.attribute` names an attribute without `embed:`, or several exist
+            and none is named. `full_text_attribute_missing`: the schema has no `full_text_search`
+            attribute. `rerank_unconfigured`: the rerank stage is on and no provider
+            key is set. `UnsupportedByStore`: the store cannot serve an ANN or a BM25
+            leg. `validation_error`: `top_k` exceeds `pool`, a value is out of range,
+            a field is unknown, the provider or question is unknown, or `query` yields
+            no tokens.
+
+            '
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: VectorStore query failed
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '503':
+          description: "`rerank_unavailable`: the rerank provider failed and `rerank.required`
+            is true. The message names the provider and its HTTP status; the provider's
+            response body is never relayed.\n"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
   "/v2/namespaces/{namespace}/explain_query":
     post:
       operationId: explainTurbopufferQuery
@@ -2102,13 +2185,15 @@ components:
         to adjust. Present when the gateway silently dropped a field the caller asked
         for. Today only `vector_attribute_dropped` is defined: the caller listed `vector`
         in `include_attributes`, the gateway never returns vectors, so the field was
-        removed from the response.
+        removed from the response. `rerank_degraded` is set by the search operation
+        when the rerank provider failed and the rows are in fused order instead.
 
         '
       schema:
         type: string
         enum:
         - vector_attribute_dropped
+        - rerank_degraded
     LayerPartial:
       description: "`true` when a federated best-effort query returned successful
         namespace legs and reported one or more failed legs in `errors`.\n"
@@ -3820,6 +3905,421 @@ components:
           "$ref": "#/components/schemas/HybridEcho"
         routing:
           "$ref": "#/components/schemas/RoutingEcho"
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: 'The search text. Embedded for the ANN leg, ranked as-is by
+            the BM25 legs, tokenized for the fuzzy legs.
+
+            '
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+          description: Rows returned. Must not exceed `pool`.
+        filters:
+          description: 'Filter expression in the query grammar. A hard filter, replicated
+            to every leg.
+
+            '
+        include_attributes:
+          description: "`true` (default), `false`, or a list of attribute names returned
+            under each row's `attributes`. Reserved `_hevlayer_*` attributes are returned
+            only when named; vector columns are never returned.\n"
+          oneOf:
+          - type: boolean
+          - type: array
+            items:
+              type: string
+        pool:
+          type: integer
+          minimum: 50
+          maximum: 200
+          default: 50
+          description: 'Candidates handed to the reranker after the L1 cut. Also sets
+            per-leg depth: `clamp(5 × pool, 50, 200)`.
+
+            '
+        embed:
+          "$ref": "#/components/schemas/SearchEmbedOptions"
+        text:
+          "$ref": "#/components/schemas/SearchTextOptions"
+        rerank:
+          description: "`false` disables the rerank stage; otherwise an options object."
+          oneOf:
+          - type: boolean
+          - "$ref": "#/components/schemas/SearchRerankOptions"
+        explain:
+          type: boolean
+          default: false
+          description: "`true` adds the L1 feature vector to every row."
+    SearchEmbedOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        attribute:
+          type: string
+          description: 'Which `embed:` attribute embeds `query`. Required when the
+            schema declares several.
+
+            '
+    SearchTextOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        fuzziness:
+          description: '`"auto"` (default) or an edit distance `0..2`, as in `HybridText`.'
+          oneOf:
+          - type: string
+            enum:
+            - auto
+          - type: integer
+            minimum: 0
+            maximum: 2
+        stopwords:
+          description: '`"en"` (default), `false`, or a list. Suppresses fuzzy legs
+            for stop words; BM25 legs are unaffected.
+
+            '
+          oneOf:
+          - type: string
+            enum:
+            - en
+          - type: boolean
+          - type: array
+            items:
+              type: string
+    SearchRerankOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          enum:
+          - jev
+          default: jev
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0
+          description: Drop rows whose probability is below this, before `top_k`.
+        attributes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: 'Attributes whose text the reranker reads. Default: every full-text
+            attribute, `title` first, then schema order. `_hevlayer_*` names are rejected.
+
+            '
+        docs_per_call:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 30
+        max_chars:
+          type: integer
+          minimum: 1
+          maximum: 20000
+          default: 2000
+          description: Per-document character budget for reranker text.
+        question:
+          type: string
+          enum:
+          - generic-1
+          default: generic-1
+        required:
+          type: boolean
+          default: false
+          description: "`true` turns a provider failure into `503 rerank_unavailable`."
+    SearchResponse:
+      type: object
+      required:
+      - rows
+      - routing
+      - plan
+      - hybrid
+      - rerank
+      - performance
+      properties:
+        rows:
+          type: array
+          items:
+            "$ref": "#/components/schemas/SearchRow"
+        routing:
+          "$ref": "#/components/schemas/SearchRoutingEcho"
+        plan:
+          "$ref": "#/components/schemas/SearchPlanEcho"
+        hybrid:
+          "$ref": "#/components/schemas/SearchHybridEcho"
+        rerank:
+          "$ref": "#/components/schemas/SearchRerankEcho"
+        performance:
+          "$ref": "#/components/schemas/SearchPerformance"
+    SearchRow:
+      type: object
+      required:
+      - id
+      - score
+      - attributes
+      properties:
+        id:
+          description: Document id, in the type the store holds it.
+        score:
+          type: number
+          description: 'The reranker''s probability in `[0, 1]` when `rerank.executed`
+            is true; otherwise the RRF sum. Never mixed in one response.
+
+            '
+        attributes:
+          type: object
+          additionalProperties: true
+        explain:
+          "$ref": "#/components/schemas/SearchRowExplain"
+    SearchRowExplain:
+      type: object
+      required:
+      - features
+      - contributions
+      - l1_score
+      - legs
+      properties:
+        features:
+          "$ref": "#/components/schemas/SearchL1Features"
+        contributions:
+          "$ref": "#/components/schemas/SearchL1Features"
+        l1_score:
+          type: number
+        legs:
+          type: array
+          items:
+            type: object
+            required:
+            - label
+            - rank
+            properties:
+              label:
+                type: string
+              rank:
+                type: integer
+                format: int64
+                description: 1-based rank within the leg after the shard merge.
+              score:
+                type:
+                - number
+                - 'null'
+                description: The leg's own score (BM25 score or ANN distance).
+    SearchL1Features:
+      type: object
+      description: An absent feature is absent, not zero.
+      required:
+      - rrf_sum
+      properties:
+        rrf_sum:
+          type: number
+        fetch_count_30d:
+          type: number
+          description: 'Reserved. This release keeps no fetch counter, so the feature
+            is never returned.
+
+            '
+        age_seconds:
+          type: number
+          description: 'Seconds since the row''s write stamp. Present on Turbopuffer-backed
+            namespaces; absent on hev search and pgvector.
+
+            '
+    SearchRoutingEcho:
+      type: object
+      required:
+      - route
+      - policy
+      - tokens
+      - executed
+      - advisory
+      properties:
+        route:
+          type: string
+          enum:
+          - hybrid_text
+          - semantic
+          - fused
+        policy:
+          type: string
+        tokens:
+          type: integer
+        executed:
+          type: boolean
+        advisory:
+          type: boolean
+          description: Always true. `/search` runs every leg regardless of the route.
+    SearchPlanEcho:
+      type: object
+      required:
+      - executed
+      properties:
+        executed:
+          type: boolean
+        reason:
+          type: string
+          description: "`unconfigured` in this release."
+    SearchHybridEcho:
+      type: object
+      required:
+      - tokens
+      - tokens_dropped
+      - stopwords
+      - stopwords_dropped
+      - fuzziness
+      - rank_constant
+      - per_leg_limit
+      - legs
+      - dropped_legs
+      - surfaced
+      properties:
+        tokens:
+          type: array
+          items:
+            type: string
+        tokens_dropped:
+          type: integer
+        stopwords:
+          description: The effective stop-word policy, as on `HybridText`.
+        stopwords_dropped:
+          type: array
+          items:
+            type: string
+        fuzziness:
+          description: The effective fuzziness (`"auto"` or an integer).
+        fuzziness_clamped:
+          type: boolean
+          description: Present and true only when a store forced `fuzziness` to 0.
+        rank_constant:
+          type: integer
+        per_leg_limit:
+          type: integer
+        legs:
+          type: array
+          items:
+            "$ref": "#/components/schemas/SearchLegEcho"
+        dropped_legs:
+          type: integer
+          description: Legs the 16-leg budget, or the store, did not run.
+        threads:
+          type: integer
+          description: Shard fan-out width. Present on sharded namespaces only.
+        surfaced:
+          type: boolean
+    SearchLegEcho:
+      type: object
+      required:
+      - label
+      - kind
+      - rows
+      properties:
+        label:
+          type: string
+        kind:
+          type: string
+          enum:
+          - ann
+          - bm25
+          - fuzzy
+        attribute:
+          type: string
+        rows:
+          type: integer
+          description: Rows the leg returned after the shard merge.
+    SearchRerankEcho:
+      type: object
+      required:
+      - provider
+      - question
+      - executed
+      - pool
+      - calls
+      - docs_per_call
+      - threshold
+      - pruned
+      - input_tokens
+      - latency_ms
+      properties:
+        provider:
+          type: string
+        model:
+          type: string
+          description: The model that answered. Absent when the stage did not execute.
+        question:
+          type: string
+        executed:
+          type: boolean
+        reason:
+          type: string
+          enum:
+          - disabled
+          - empty_pool
+          - provider_error
+          - timeout
+          - rate_limited
+          - queue_timeout
+          description: 'Present when `executed` is false. `queue_timeout` means a
+            call waited out its allowance for a gateway-wide in-flight slot and never
+            reached the provider; `timeout` is the provider''s own per-call deadline,
+            which starts once the slot is held.
+
+            '
+        pool:
+          type: integer
+        calls:
+          type: integer
+        docs_per_call:
+          type: integer
+        threshold:
+          type: number
+        pruned:
+          type: integer
+        input_tokens:
+          type: integer
+          format: int64
+        latency_ms:
+          type: integer
+          format: int64
+    SearchPerformance:
+      type: object
+      required:
+      - legs_ms
+      - fuse_ms
+      - l1_ms
+      - rerank_ms
+      - total_ms
+      properties:
+        embedding_tokens:
+          type: number
+        embedding_ms:
+          type: number
+        legs_ms:
+          type: integer
+          format: int64
+        fuse_ms:
+          type: integer
+          format: int64
+        l1_ms:
+          type: integer
+          format: int64
+        rerank_ms:
+          type: integer
+          format: int64
+        total_ms:
+          type: integer
+          format: int64
     Error:
       type: object
       required:

@@ -72,7 +72,7 @@ fn turbopuffer_coverage(
         | Pagination | OrderedScan | Aggregate | PatchRows | PatchColumns | ConditionalWrites
         | Copy | Branch | Encryption | Export | Warm | Consistency | Snapshots | Udf
         | Passthrough | Embed | NearestToId | Temporal | LegBreakdown | Auto | Threads
-        | VectorEncoding => Coverage::supported(),
+        | VectorEncoding | Search => Coverage::supported(),
         DeleteByFilter | Facet => Coverage::approximate(
             "Native wire request only; the optional portable adapter primitive is unavailable.",
         ),
@@ -1783,6 +1783,12 @@ pub struct MockTurbopufferClient {
     scan_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
     scan_include_attributes: tokio::sync::RwLock<Vec<Option<Vec<String>>>>,
     ranked_query_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
+    /// Every `ranked_query` call as the store received it, in arrival order.
+    ranked_query_calls: tokio::sync::RwLock<Vec<Value>>,
+    /// Test override for the store declaration and the native-wire flag, so
+    /// a route's per-store behaviour is testable without a second adapter.
+    capabilities_override: std::sync::RwLock<Option<crate::capabilities::Capabilities>>,
+    native_wire_override: std::sync::atomic::AtomicBool,
     missing_include_attributes: tokio::sync::RwLock<HashMap<String, HashSet<String>>>,
     scan_page_delay: tokio::sync::RwLock<Option<Duration>>,
     scan_page_active: AtomicUsize,
@@ -1854,6 +1860,9 @@ impl MockTurbopufferClient {
             scan_filters: tokio::sync::RwLock::new(Vec::new()),
             scan_include_attributes: tokio::sync::RwLock::new(Vec::new()),
             ranked_query_filters: tokio::sync::RwLock::new(Vec::new()),
+            ranked_query_calls: tokio::sync::RwLock::new(Vec::new()),
+            capabilities_override: std::sync::RwLock::new(None),
+            native_wire_override: std::sync::atomic::AtomicBool::new(false),
             missing_include_attributes: tokio::sync::RwLock::new(HashMap::new()),
             scan_page_delay: tokio::sync::RwLock::new(None),
             scan_page_active: AtomicUsize::new(0),
@@ -1915,6 +1924,27 @@ impl MockTurbopufferClient {
 
     pub async fn ranked_query_filters(&self) -> Vec<Option<Value>> {
         self.ranked_query_filters.read().await.clone()
+    }
+
+    /// Full request shape of every `ranked_query` call (`namespace`,
+    /// `rank_by`, `top_k`, `filters`, `include_attributes`), for tests that
+    /// pin the upstream wire.
+    pub async fn ranked_query_calls(&self) -> Vec<Value> {
+        self.ranked_query_calls.read().await.clone()
+    }
+
+    /// Answer `capabilities()` with another store's declaration.
+    pub fn set_capabilities(&self, capabilities: crate::capabilities::Capabilities) {
+        *self
+            .capabilities_override
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capabilities);
+    }
+
+    /// Answer `requires_native_wire` as a native SQL adapter would.
+    pub fn set_native_wire(&self, native: bool) {
+        self.native_wire_override
+            .store(native, AtomicOrdering::SeqCst);
     }
 
     pub async fn arm_missing_include_attribute(&self, namespace: &str, field: &str) {
@@ -2055,7 +2085,14 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
     fn capabilities(&self) -> crate::capabilities::Capabilities {
-        self.declared
+        self.capabilities_override
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or(self.declared)
+    }
+
+    fn requires_native_wire(&self, _namespace: &str) -> bool {
+        self.native_wire_override.load(AtomicOrdering::SeqCst)
     }
 
     fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
@@ -2363,7 +2400,7 @@ impl TurbopufferClient for MockTurbopufferClient {
         rank_by: &Value,
         top_k: u32,
         filters: Option<&Value>,
-        _include_attributes: Option<&IncludeAttributes>,
+        include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
         let _guard = enter_counter(&self.ranked_query_active, &self.ranked_query_max_active);
         if let Some(delay) = *self.ranked_query_delay.read().await {
@@ -2373,6 +2410,19 @@ impl TurbopufferClient for MockTurbopufferClient {
             .write()
             .await
             .push(filters.cloned());
+        self.ranked_query_calls
+            .write()
+            .await
+            .push(serde_json::json!({
+                "namespace": namespace,
+                "rank_by": rank_by,
+                "top_k": top_k,
+                "filters": filters,
+                "include_attributes": include_attributes.map(|include| match include {
+                    IncludeAttributes::All(all) => Value::Bool(*all),
+                    IncludeAttributes::Fields(fields) => serde_json::json!(fields),
+                }),
+            }));
         // Honor a one-shot 429 arm if present (consumes the flag), so existing
         // tests that probe retry behavior keep working through this path.
         if self

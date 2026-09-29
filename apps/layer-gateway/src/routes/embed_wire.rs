@@ -493,6 +493,20 @@ pub(crate) async fn clear_profiles(state: &AppState, namespace: &str) -> Result<
     Ok(())
 }
 
+/// Source attributes with a gateway-held embedding profile. `/search` unions
+/// these with the store schema's `embed:` attributes. This also reloads
+/// profiles persisted by Postgres after a gateway restart without S3.
+pub(crate) async fn declared_embed_sources(
+    state: &AppState,
+    namespace: &str,
+) -> Result<Vec<String>, AppError> {
+    Ok(load_profiles(state, namespace)
+        .await?
+        .into_iter()
+        .map(|profile| profile.source)
+        .collect())
+}
+
 pub(crate) fn metadata_has_embed_schema(metadata: &Value) -> bool {
     metadata
         .get("schema")

@@ -72,6 +72,7 @@ wire_features! {
     Auto => ("auto", "Auto query routing", "api/query"),
     Threads => ("threads", "Query scatter/gather", "api/query"),
     VectorEncoding => ("vector_encoding", "Wire vector encoding", "api/query"),
+    Search => ("search_endpoint", "One-call search (embed, text legs, RRF, rerank)", "api/search"),
 }
 
 impl WireFeature {
@@ -460,6 +461,20 @@ pub const SCHEMA_FIELDS: &[(&str, &[(&str, WireFeature)])] = &[
             ("vector_encoding", WireFeature::VectorEncoding),
         ],
     ),
+    (
+        "SearchRequest",
+        &[
+            ("query", WireFeature::Search),
+            ("top_k", WireFeature::Search),
+            ("filters", WireFeature::Search),
+            ("include_attributes", WireFeature::Search),
+            ("pool", WireFeature::Search),
+            ("embed", WireFeature::Search),
+            ("text", WireFeature::Search),
+            ("rerank", WireFeature::Search),
+            ("explain", WireFeature::Search),
+        ],
+    ),
     ("TurbopufferQueryRequest", &[]),
     ("TurbopufferWriteRequest", &[]),
     (
@@ -505,7 +520,7 @@ mod tests {
         // Served with the limits stated in the cell: HybridText with
         // fuzziness 0, any number of text fields but one vector field, and
         // gateway-served embed on one attribute (RFC 0118 step C).
-        let approximate = [Hybrid, MultipleFields, Embed];
+        let approximate = [Hybrid, MultipleFields, Embed, Search];
         for &feature in WireFeature::ALL {
             let coverage = PGVECTOR_CAPABILITIES.get(feature);
             assert_eq!(
@@ -541,6 +556,35 @@ mod tests {
         assert_eq!(limits.max_gateway_embed_attributes, Some(1));
         assert_eq!(limits.max_full_text_search_fields, None);
         assert_eq!(limits.max_vector_fields, Some(1));
+    }
+
+    /// RFC 0116's S3 Vectors / Pinecone row. Neither adapter exists; what
+    /// holds the row is that the gate is generic: any store that does not
+    /// declare `search_endpoint` is refused with the UnsupportedByStore wire.
+    #[test]
+    fn a_store_without_a_bm25_leg_is_refused_search() {
+        const VECTOR_ONLY: Capabilities = Capabilities {
+            kind: "s3vectors",
+            coverage: |feature| match feature {
+                WireFeature::Dense | WireFeature::Fetch | WireFeature::UpsertRows => {
+                    Coverage::supported()
+                }
+                _ => Coverage::unsupported(),
+            },
+            ..UNDECLARED
+        };
+        let error = VECTOR_ONLY.require(WireFeature::Search).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("UnsupportedByStore: s3vectors: search_endpoint"));
+        assert!(UNDECLARED.require(WireFeature::Search).is_err());
+        for store in [
+            TURBOPUFFER_CAPABILITIES,
+            SEARCH_CAPABILITIES,
+            PGVECTOR_CAPABILITIES,
+        ] {
+            assert!(store.require(WireFeature::Search).is_ok(), "{}", store.kind);
+        }
     }
 
     #[tokio::test]

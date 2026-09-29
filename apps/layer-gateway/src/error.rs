@@ -47,6 +47,17 @@ pub enum AppError {
         message: String,
     },
 
+    /// A `/search` precondition the namespace or gateway does not meet
+    /// (RFC 0116). `code` is the body's `error` string, the machine code:
+    /// `embed_attribute_missing`, `embed_attribute_invalid`,
+    /// `full_text_attribute_missing`, `rerank_unconfigured`.
+    #[error("Search rejected ({code}): {message}")]
+    SearchRejected { code: &'static str, message: String },
+
+    /// The rerank provider failed and the request set `rerank.required`.
+    #[error("Rerank unavailable: {0}")]
+    RerankUnavailable(String),
+
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
@@ -315,6 +326,22 @@ impl IntoResponse for AppError {
                 message.clone(),
                 store.clone(),
                 route.clone(),
+                None,
+            ),
+            AppError::SearchRejected { code, message } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                *code,
+                message.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::RerankUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rerank_unavailable",
+                msg.clone(),
+                None,
+                None,
                 None,
             ),
             AppError::Forbidden(msg) => (

@@ -131,6 +131,20 @@ pub struct Config {
     /// `distribution` and `distributionVersion` telemetry properties.
     pub telemetry_source: Option<String>,
     pub telemetry_source_version: Option<String>,
+    /// Gateway-wide rerank provider key for `/search` (`TYPESAFE_API_KEY`).
+    /// Unset means a rerank request answers `422 rerank_unconfigured`.
+    /// `Debug` is redacted.
+    pub rerank_api_key: Option<crate::rerank::RerankKey>,
+    /// `LAYER_RERANK_PROVIDER`; `jev` is the only provider.
+    pub rerank_provider: String,
+    /// `LAYER_RERANK_MODEL`: the model name sent to the provider.
+    pub rerank_model: String,
+    /// `TYPESAFE_BASE_URL`, the TypeSafe SDK's own override.
+    pub rerank_base_url: String,
+    /// `LAYER_RERANK_MAX_INFLIGHT`: provider calls in flight gateway-wide.
+    pub rerank_max_inflight: usize,
+    /// `LAYER_RERANK_TIMEOUT_MS`: per-call deadline, retries included.
+    pub rerank_timeout_ms: u64,
 }
 
 impl Config {
@@ -363,6 +377,31 @@ impl Config {
             telemetry_source_version: env::var("LAYER_TELEMETRY_SOURCE_VERSION")
                 .ok()
                 .and_then(trimmed_non_empty),
+            rerank_api_key: env::var("TYPESAFE_API_KEY")
+                .ok()
+                .and_then(crate::rerank::RerankKey::new),
+            rerank_provider: env::var("LAYER_RERANK_PROVIDER")
+                .ok()
+                .and_then(trimmed_non_empty)
+                .unwrap_or_else(|| crate::rerank::DEFAULT_PROVIDER.to_string()),
+            rerank_model: env::var("LAYER_RERANK_MODEL")
+                .ok()
+                .and_then(trimmed_non_empty)
+                .unwrap_or_else(|| crate::rerank::DEFAULT_MODEL.to_string()),
+            rerank_base_url: env::var("TYPESAFE_BASE_URL")
+                .ok()
+                .and_then(trimmed_non_empty)
+                .unwrap_or_else(|| crate::rerank::DEFAULT_BASE_URL.to_string()),
+            rerank_max_inflight: env::var("LAYER_RERANK_MAX_INFLIGHT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(crate::rerank::DEFAULT_MAX_INFLIGHT),
+            rerank_timeout_ms: env::var("LAYER_RERANK_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(crate::rerank::DEFAULT_TIMEOUT_MS),
         }
     }
 }

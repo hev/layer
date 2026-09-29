@@ -17,6 +17,7 @@ pub mod namespace_purge;
 pub mod pipeline;
 #[cfg(feature = "pro")]
 pub mod pipeline_segments;
+pub mod rerank;
 pub mod routes;
 pub mod server;
 pub mod shards;
@@ -87,6 +88,9 @@ pub struct AppState {
     pub embedding_cache_ttl: std::time::Duration,
     pub wire_embedding_profiles:
         Arc<DashMap<String, Vec<crate::routes::embed_wire::EmbeddingProfile>>>,
+    /// `/search` runtime: the rerank provider, its in-flight cap and the
+    /// short-lived namespace search-schema cache.
+    pub search: Arc<routes::search::SearchRuntime>,
     pub aerospike: Arc<dyn AerospikeClient>,
     pub aerospike_runtime: Arc<AerospikeRuntime>,
     pub s3: Arc<dyn S3Client>,
@@ -928,6 +932,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v2/namespaces/{namespace}/query",
             post(routes::query::query),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/search",
+            post(routes::search::search),
         )
         .route("/v2/query", post(routes::federated_query::query))
         .route(

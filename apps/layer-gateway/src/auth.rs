@@ -173,9 +173,17 @@ fn is_read_route(method: &Method, path: &str) -> bool {
             || path.ends_with("/multi_query")
             || path.ends_with("/explain_query")
             || path.ends_with("/scans")
-            || path.contains("/scans/");
+            || path.contains("/scans/")
+            || is_namespace_search_route(path);
     }
     false
+}
+
+/// `POST /v2/namespaces/{namespace}/search` exactly, so a write to a
+/// namespace named `search` stays a write.
+fn is_namespace_search_route(path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    matches!(segments.as_slice(), ["v2", "namespaces", _, "search"])
 }
 
 fn path_has_prefix_segments(path: &str, segments: &[&str]) -> bool {

@@ -31,6 +31,9 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
             Coverage::unsupported_because(crate::capabilities::MULTI_QUERY_USE_HYBRID_TEXT)
         }
         Branch => Coverage::unsupported_because(crate::capabilities::NO_NATIVE_BRANCH),
+        Search => Coverage::approximate(
+            "BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).",
+        ),
         _ => Coverage::unsupported(),
     }
 }

@@ -54,5 +54,9 @@ ed25519-dalek = "3"
 safetensors = "0.8"
 
 [[test]]
+name = "search_ce"
+path = "tests/integration/search_ce.rs"
+
+[[test]]
 name = "standalone_boot"
 path = "tests/integration/standalone_boot.rs"

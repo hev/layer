@@ -327,6 +327,9 @@ pub async fn run_with_options(options: ServerOptions) {
         embedding_cache: Arc::new(DashMap::new()),
         embedding_cache_ttl: std::time::Duration::from_millis(config.embedding_cache_ttl_ms),
         wire_embedding_profiles: Arc::new(DashMap::new()),
+        search: Arc::new(crate::routes::search::SearchRuntime::new(
+            crate::rerank::RerankRuntime::from_config(&config),
+        )),
         aerospike,
         aerospike_runtime,
         s3,

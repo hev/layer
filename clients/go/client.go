@@ -2295,6 +2295,24 @@ func (client *Client) RevokeKeyWithPerf(ctx context.Context, keyID string, optio
 }
 
 
+func (client *Client) SearchNamespace(ctx context.Context, namespace string, body *SearchRequest, options ...RequestOption) (*SearchResponse, error) {
+	out := SearchResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/search", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) SearchNamespaceWithPerf(ctx context.Context, namespace string, body *SearchRequest, options ...RequestOption) (*LayerResponse[SearchResponse], error) {
+	out := SearchResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/search", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[SearchResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) SetDocumentsStage(ctx context.Context, pipelineID string, body *SetDocumentsStageRequest, options ...RequestOption) (*DocumentsStageResponse, error) {
 	out := DocumentsStageResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/stage", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...); err != nil {

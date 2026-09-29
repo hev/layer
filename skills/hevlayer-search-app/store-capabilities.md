@@ -61,6 +61,7 @@ request does once a turbopuffer key is set.
 | Auto query routing | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Query scatter/gather | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Wire vector encoding | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
+| One-call search (embed, text legs, RRF, rerank) | [api/search](https://hevlayer.com/docs/api/search) | partial | yes |
 
 ## Notes
 
@@ -71,6 +72,7 @@ request does once a turbopuffer key is set.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
 - **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.
+- **One-call search (embed, text legs, RRF, rerank)** on pgvector (local): BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).
 
 ## Full-text ranking
 

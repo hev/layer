@@ -1443,6 +1443,20 @@ export class Hevlayer {
   }
 
 
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.SearchResponse>;
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.SearchResponse>>;
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.SearchResponse | LayerResponse<Models.SearchResponse>> {
+    return this.requestJson<Models.SearchResponse>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/search",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.SearchResponse | LayerResponse<Models.SearchResponse>>;
+  }
+
+
   async setDocumentsStage(pipelineId: string, body: Models.SetDocumentsStageRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.DocumentsStageResponse>;
   async setDocumentsStage(pipelineId: string, body: Models.SetDocumentsStageRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.DocumentsStageResponse>>;
   async setDocumentsStage(pipelineId: string, body: Models.SetDocumentsStageRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.DocumentsStageResponse | LayerResponse<Models.DocumentsStageResponse>> {

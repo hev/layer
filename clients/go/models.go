@@ -900,6 +900,126 @@ type QueryResponse struct {
 	Routing RoutingEcho `json:"routing,omitempty"`
 }
 
+type SearchRequest struct {
+	Query string `json:"query"`
+	TopK int64 `json:"top_k,omitempty"`
+	Filters interface{} `json:"filters,omitempty"`
+	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	Pool int64 `json:"pool,omitempty"`
+	Embed SearchEmbedOptions `json:"embed,omitempty"`
+	Text SearchTextOptions `json:"text,omitempty"`
+	Rerank interface{} `json:"rerank,omitempty"`
+	Explain bool `json:"explain,omitempty"`
+}
+
+type SearchEmbedOptions struct {
+	Attribute string `json:"attribute,omitempty"`
+}
+
+type SearchTextOptions struct {
+	Fuzziness interface{} `json:"fuzziness,omitempty"`
+	Stopwords interface{} `json:"stopwords,omitempty"`
+}
+
+type SearchRerankOptions struct {
+	Provider string `json:"provider,omitempty"`
+	Threshold float64 `json:"threshold,omitempty"`
+	Attributes []string `json:"attributes,omitempty"`
+	DocsPerCall int64 `json:"docs_per_call,omitempty"`
+	MaxChars int64 `json:"max_chars,omitempty"`
+	Question string `json:"question,omitempty"`
+	Required bool `json:"required,omitempty"`
+}
+
+type SearchResponse struct {
+	Rows []SearchRow `json:"rows"`
+	Routing SearchRoutingEcho `json:"routing"`
+	Plan SearchPlanEcho `json:"plan"`
+	Hybrid SearchHybridEcho `json:"hybrid"`
+	Rerank SearchRerankEcho `json:"rerank"`
+	Performance SearchPerformance `json:"performance"`
+}
+
+type SearchRow struct {
+	ID interface{} `json:"id"`
+	Score float64 `json:"score"`
+	Attributes map[string]interface{} `json:"attributes"`
+	Explain SearchRowExplain `json:"explain,omitempty"`
+}
+
+type SearchRowExplain struct {
+	Features SearchL1Features `json:"features"`
+	Contributions SearchL1Features `json:"contributions"`
+	L1Score float64 `json:"l1_score"`
+	Legs []map[string]interface{} `json:"legs"`
+}
+
+type SearchL1Features struct {
+	RrfSum float64 `json:"rrf_sum"`
+	FetchCount30d float64 `json:"fetch_count_30d,omitempty"`
+	AgeSeconds float64 `json:"age_seconds,omitempty"`
+}
+
+type SearchRoutingEcho struct {
+	Route string `json:"route"`
+	Policy string `json:"policy"`
+	Tokens int64 `json:"tokens"`
+	Executed bool `json:"executed"`
+	Advisory bool `json:"advisory"`
+}
+
+type SearchPlanEcho struct {
+	Executed bool `json:"executed"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type SearchHybridEcho struct {
+	Tokens []string `json:"tokens"`
+	TokensDropped int64 `json:"tokens_dropped"`
+	Stopwords interface{} `json:"stopwords"`
+	StopwordsDropped []string `json:"stopwords_dropped"`
+	Fuzziness interface{} `json:"fuzziness"`
+	FuzzinessClamped bool `json:"fuzziness_clamped,omitempty"`
+	RankConstant int64 `json:"rank_constant"`
+	PerLegLimit int64 `json:"per_leg_limit"`
+	Legs []SearchLegEcho `json:"legs"`
+	DroppedLegs int64 `json:"dropped_legs"`
+	Threads int64 `json:"threads,omitempty"`
+	Surfaced bool `json:"surfaced"`
+}
+
+type SearchLegEcho struct {
+	Label string `json:"label"`
+	Kind string `json:"kind"`
+	Attribute string `json:"attribute,omitempty"`
+	Rows int64 `json:"rows"`
+}
+
+type SearchRerankEcho struct {
+	Provider string `json:"provider"`
+	Model string `json:"model,omitempty"`
+	Question string `json:"question"`
+	Executed bool `json:"executed"`
+	Reason string `json:"reason,omitempty"`
+	Pool int64 `json:"pool"`
+	Calls int64 `json:"calls"`
+	DocsPerCall int64 `json:"docs_per_call"`
+	Threshold float64 `json:"threshold"`
+	Pruned int64 `json:"pruned"`
+	InputTokens int64 `json:"input_tokens"`
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+type SearchPerformance struct {
+	EmbeddingTokens float64 `json:"embedding_tokens,omitempty"`
+	EmbeddingMs float64 `json:"embedding_ms,omitempty"`
+	LegsMs int64 `json:"legs_ms"`
+	FuseMs int64 `json:"fuse_ms"`
+	L1Ms int64 `json:"l1_ms"`
+	RerankMs int64 `json:"rerank_ms"`
+	TotalMs int64 `json:"total_ms"`
+}
+
 type Error struct {
 	Error string `json:"error"`
 	Message string `json:"message"`

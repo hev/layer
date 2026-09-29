@@ -47,7 +47,7 @@ const MIN_TOKEN_CHARS: usize = 2;
 /// time so we never emit a token longer than any term the index stored.
 const MAX_TOKEN_LENGTH_BYTES: usize = 39;
 
-const DEFAULT_RANK_CONSTANT: u64 = 60;
+pub(crate) const DEFAULT_RANK_CONSTANT: u64 = 60;
 const PER_LEG_LIMIT_FLOOR: u64 = 50;
 const PER_LEG_LIMIT_CEIL: u64 = 200;
 const FUSED_CURSOR_MAX_OFFSET: u32 = 10_000;
@@ -114,7 +114,7 @@ impl StopwordsOption {
         }
     }
 
-    fn echo(&self) -> Value {
+    pub(crate) fn echo(&self) -> Value {
         match self {
             Self::English => Value::String("en".to_string()),
             Self::Off => Value::Bool(false),
@@ -206,7 +206,7 @@ impl Fuzziness {
     /// edit distance 2; `Fixed(d)` caps the ladder at `d`, so `Fixed(0)` is
     /// exact-only. A term below the smallest `min_query_chars` (3) gets no rule
     /// and matches exactly, mirroring upstream.
-    fn max_edit_distance(self) -> Value {
+    pub(crate) fn max_edit_distance(self) -> Value {
         let cap = match self {
             Self::Auto => 2,
             Self::Fixed(d) => d,
@@ -217,7 +217,7 @@ impl Fuzziness {
         Value::Array(rules)
     }
 
-    fn echo(self) -> Value {
+    pub(crate) fn echo(self) -> Value {
         match self {
             Self::Auto => Value::String("auto".to_string()),
             Self::Fixed(d) => Value::from(d),
@@ -743,7 +743,7 @@ fn ensure_fusable(mut legs: Vec<Value>) -> Vec<Value> {
     legs
 }
 
-fn is_unsupported_by_store(error: &TurbopufferError) -> bool {
+pub(crate) fn is_unsupported_by_store(error: &TurbopufferError) -> bool {
     AppError::is_store_support_error(error)
 }
 
@@ -1005,7 +1005,7 @@ async fn run_surfacing_fused(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn collect_surfacing_leg(
+pub(crate) async fn collect_surfacing_leg(
     state: &AppState,
     namespace: &str,
     spec: &LegSpec,
@@ -1114,7 +1114,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// and merge to the global per-leg ranking: sort by the leg's score order
 /// (BM25 descending, ANN ascending) and truncate to `per_leg_limit`, the
 /// same view upstream fusion ranks.
-async fn scatter_leg(
+pub(crate) async fn scatter_leg(
     state: &AppState,
     namespace: &str,
     spec: &LegSpec,

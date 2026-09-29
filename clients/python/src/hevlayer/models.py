@@ -910,6 +910,126 @@ class QueryResponse(BaseModel):
     hybrid: HybridEcho | None = None
     routing: RoutingEcho | None = None
 
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    query: str
+    top_k: int | None = 10
+    filters: Any | None = None
+    include_attributes: bool | list[str] | None = None
+    pool: int | None = 50
+    embed: SearchEmbedOptions | None = None
+    text: SearchTextOptions | None = None
+    rerank: bool | SearchRerankOptions | None = None
+    explain: bool | None = False
+
+class SearchEmbedOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    attribute: str | None = None
+
+class SearchTextOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    fuzziness: Literal["auto"] | int | None = None
+    stopwords: Literal["en"] | bool | list[str] | None = None
+
+class SearchRerankOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    provider: Literal["jev"] | None = "jev"
+    threshold: float | None = 0
+    attributes: list[str] | None = None
+    docs_per_call: int | None = 30
+    max_chars: int | None = 2000
+    question: Literal["generic-1"] | None = "generic-1"
+    required: bool | None = False
+
+class SearchResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    rows: list[SearchRow]
+    routing: SearchRoutingEcho
+    plan: SearchPlanEcho
+    hybrid: SearchHybridEcho
+    rerank: SearchRerankEcho
+    performance: SearchPerformance
+
+class SearchRow(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: Any
+    score: float
+    attributes: dict[str, Any]
+    explain: SearchRowExplain | None = None
+
+class SearchRowExplain(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    features: SearchL1Features
+    contributions: SearchL1Features
+    l1_score: float
+    legs: list[dict[str, Any]]
+
+class SearchL1Features(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    rrf_sum: float
+    fetch_count_30d: float | None = None
+    age_seconds: float | None = None
+
+class SearchRoutingEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    route: Literal["hybrid_text", "semantic", "fused"]
+    policy: str
+    tokens: int
+    executed: bool
+    advisory: bool
+
+class SearchPlanEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    executed: bool
+    reason: str | None = None
+
+class SearchHybridEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    tokens: list[str]
+    tokens_dropped: int
+    stopwords: Any
+    stopwords_dropped: list[str]
+    fuzziness: Any
+    fuzziness_clamped: bool | None = None
+    rank_constant: int
+    per_leg_limit: int
+    legs: list[SearchLegEcho]
+    dropped_legs: int
+    threads: int | None = None
+    surfaced: bool
+
+class SearchLegEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    label: str
+    kind: Literal["ann", "bm25", "fuzzy"]
+    attribute: str | None = None
+    rows: int
+
+class SearchRerankEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    provider: str
+    model: str | None = None
+    question: str
+    executed: bool
+    reason: Literal["disabled", "empty_pool", "provider_error", "timeout", "rate_limited", "queue_timeout"] | None = None
+    pool: int
+    calls: int
+    docs_per_call: int
+    threshold: float
+    pruned: int
+    input_tokens: int
+    latency_ms: int
+
+class SearchPerformance(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    embedding_tokens: float | None = None
+    embedding_ms: float | None = None
+    legs_ms: int
+    fuse_ms: int
+    l1_ms: int
+    rerank_ms: int
+    total_ms: int
+
 class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     error: str

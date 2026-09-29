@@ -1028,6 +1028,140 @@ export interface QueryResponse {
   routing?: RoutingEcho;
 }
 
+export interface SearchRequest {
+  [key: string]: unknown;
+  query: string;
+  top_k?: number;
+  filters?: TurbopufferFilter;
+  include_attributes?: boolean | string[];
+  pool?: number;
+  embed?: SearchEmbedOptions;
+  text?: SearchTextOptions;
+  rerank?: boolean | SearchRerankOptions;
+  explain?: boolean;
+}
+
+export interface SearchEmbedOptions {
+  [key: string]: unknown;
+  attribute?: string;
+}
+
+export interface SearchTextOptions {
+  [key: string]: unknown;
+  fuzziness?: "auto" | number;
+  stopwords?: "en" | boolean | string[];
+}
+
+export interface SearchRerankOptions {
+  [key: string]: unknown;
+  provider?: "jev";
+  threshold?: number;
+  attributes?: string[];
+  docs_per_call?: number;
+  max_chars?: number;
+  question?: "generic-1";
+  required?: boolean;
+}
+
+export interface SearchResponse {
+  [key: string]: unknown;
+  rows: SearchRow[];
+  routing: SearchRoutingEcho;
+  plan: SearchPlanEcho;
+  hybrid: SearchHybridEcho;
+  rerank: SearchRerankEcho;
+  performance: SearchPerformance;
+}
+
+export interface SearchRow {
+  [key: string]: unknown;
+  id: unknown;
+  score: number;
+  attributes: Record<string, unknown>;
+  explain?: SearchRowExplain;
+}
+
+export interface SearchRowExplain {
+  [key: string]: unknown;
+  features: SearchL1Features;
+  contributions: SearchL1Features;
+  l1_score: number;
+  legs: Record<string, unknown>[];
+}
+
+export interface SearchL1Features {
+  [key: string]: unknown;
+  rrf_sum: number;
+  fetch_count_30d?: number;
+  age_seconds?: number;
+}
+
+export interface SearchRoutingEcho {
+  [key: string]: unknown;
+  route: "hybrid_text" | "semantic" | "fused";
+  policy: string;
+  tokens: number;
+  executed: boolean;
+  advisory: boolean;
+}
+
+export interface SearchPlanEcho {
+  [key: string]: unknown;
+  executed: boolean;
+  reason?: string;
+}
+
+export interface SearchHybridEcho {
+  [key: string]: unknown;
+  tokens: string[];
+  tokens_dropped: number;
+  stopwords: unknown;
+  stopwords_dropped: string[];
+  fuzziness: unknown;
+  fuzziness_clamped?: boolean;
+  rank_constant: number;
+  per_leg_limit: number;
+  legs: SearchLegEcho[];
+  dropped_legs: number;
+  threads?: number;
+  surfaced: boolean;
+}
+
+export interface SearchLegEcho {
+  [key: string]: unknown;
+  label: string;
+  kind: "ann" | "bm25" | "fuzzy";
+  attribute?: string;
+  rows: number;
+}
+
+export interface SearchRerankEcho {
+  [key: string]: unknown;
+  provider: string;
+  model?: string;
+  question: string;
+  executed: boolean;
+  reason?: "disabled" | "empty_pool" | "provider_error" | "timeout" | "rate_limited" | "queue_timeout";
+  pool: number;
+  calls: number;
+  docs_per_call: number;
+  threshold: number;
+  pruned: number;
+  input_tokens: number;
+  latency_ms: number;
+}
+
+export interface SearchPerformance {
+  [key: string]: unknown;
+  embedding_tokens?: number;
+  embedding_ms?: number;
+  legs_ms: number;
+  fuse_ms: number;
+  l1_ms: number;
+  rerank_ms: number;
+  total_ms: number;
+}
+
 export interface Error {
   [key: string]: unknown;
   error: string;

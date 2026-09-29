@@ -139,6 +139,12 @@ pub struct LayerMetrics {
     multi_query_upstream_calls: HistogramVec,
     hybrid_text_total: IntCounterVec,
     hybrid_text_tokens: HistogramVec,
+    search_total: IntCounterVec,
+    search_stage_seconds: HistogramVec,
+    rerank_documents_total: IntCounterVec,
+    rerank_pruned_total: IntCounterVec,
+    rerank_tokens_total: IntCounterVec,
+    rerank_degraded_total: IntCounterVec,
     query_router_total: IntCounterVec,
     agent_query_total: IntCounterVec,
     agent_query_duration: HistogramVec,
@@ -335,6 +341,45 @@ impl LayerMetrics {
             "Token count per hybrid text query after the tokenizer policy.",
             &["namespace", "store_kind"],
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 8.0, 10.0, 15.0],
+        );
+        let search_total = counter(
+            &registry,
+            "hevlayer_search_total",
+            "Search endpoint requests by namespace and status.",
+            &["namespace", "store_kind", "status"],
+        );
+        let search_stage_seconds = histogram(
+            &registry,
+            "hevlayer_search_stage_seconds",
+            "Search endpoint stage duration in seconds (embed, legs, fuse, l1, rerank).",
+            &["namespace", "store_kind", "stage"],
+            vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+            ],
+        );
+        let rerank_documents_total = counter(
+            &registry,
+            "hevlayer_rerank_documents_total",
+            "Documents scored by the rerank provider.",
+            &["namespace", "store_kind"],
+        );
+        let rerank_pruned_total = counter(
+            &registry,
+            "hevlayer_rerank_pruned_total",
+            "Reranked rows dropped below the request threshold.",
+            &["namespace", "store_kind"],
+        );
+        let rerank_tokens_total = counter(
+            &registry,
+            "hevlayer_rerank_tokens_total",
+            "Rerank provider input tokens by provider and configured model.",
+            &["namespace", "store_kind", "provider", "model"],
+        );
+        let rerank_degraded_total = counter(
+            &registry,
+            "hevlayer_rerank_degraded_total",
+            "Search requests whose rerank stage failed (fused-order fallback, or 503 when required), by reason: provider_error, timeout, rate_limited, queue_timeout.",
+            &["namespace", "store_kind", "reason"],
         );
         let query_router_total = counter(
             &registry,
@@ -651,6 +696,12 @@ impl LayerMetrics {
             multi_query_upstream_calls,
             hybrid_text_total,
             hybrid_text_tokens,
+            search_total,
+            search_stage_seconds,
+            rerank_documents_total,
+            rerank_pruned_total,
+            rerank_tokens_total,
+            rerank_degraded_total,
             query_router_total,
             agent_query_total,
             agent_query_duration,
@@ -869,6 +920,54 @@ impl LayerMetrics {
                 .with_label_values(&[&namespace, &store_kind])
                 .observe(tokens as f64);
         }
+    }
+
+    pub fn observe_search(&self, namespace: &str, status: &str) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.search_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), status])
+            .inc();
+    }
+
+    /// `stage` is one of `embed`, `legs`, `fuse`, `l1`, `rerank` (`plan`
+    /// joins when the planner does).
+    pub fn observe_search_stage(&self, namespace: &str, stage: &str, elapsed: std::time::Duration) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.search_stage_seconds
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), stage])
+            .observe(elapsed.as_secs_f64());
+    }
+
+    pub fn observe_rerank(
+        &self,
+        namespace: &str,
+        provider: &str,
+        model: &str,
+        documents: u64,
+        pruned: u64,
+        input_tokens: u64,
+    ) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.rerank_documents_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str()])
+            .inc_by(documents);
+        self.rerank_pruned_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str()])
+            .inc_by(pruned);
+        self.rerank_tokens_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), provider, model])
+            .inc_by(input_tokens);
+    }
+
+    pub fn observe_rerank_degraded(&self, namespace: &str, reason: &str) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.rerank_degraded_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), reason])
+            .inc();
     }
 
     pub fn observe_query_router(&self, namespace: &str, route: &str, executed: bool) {
