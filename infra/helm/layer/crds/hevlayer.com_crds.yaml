@@ -94,6 +94,70 @@ spec:
                 - replicationFactor
                 - scaling
                 type: object
+              embedders:
+                default: []
+                items:
+                  description: A customer container serving OpenAI-compatible embeddings and GET /health.
+                  properties:
+                    dims:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    image:
+                      type: string
+                    maxInputTokens:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    model:
+                      type: string
+                    name:
+                      type: string
+                    port:
+                      default: 8080
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    scaling:
+                      properties:
+                        mode:
+                          default: autoscale
+                          enum:
+                          - autoscale
+                          - fixed
+                          - disabled
+                          type: string
+                        pool:
+                          type: string
+                        replicas:
+                          properties:
+                            max:
+                              format: int32
+                              type: integer
+                            min:
+                              default: 0
+                              format: int32
+                              type: integer
+                          required:
+                          - max
+                          type: object
+                        warmWindowSeconds:
+                          format: int32
+                          nullable: true
+                          type: integer
+                      required:
+                      - replicas
+                      type: object
+                  required:
+                  - dims
+                  - image
+                  - maxInputTokens
+                  - model
+                  - name
+                  - scaling
+                  type: object
+                type: array
             type: object
           status:
             nullable: true
@@ -127,6 +191,51 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              embedders:
+                default: []
+                items:
+                  properties:
+                    conditions:
+                      default: []
+                      items:
+                        properties:
+                          lastTransitionTime:
+                            nullable: true
+                            type: string
+                          message:
+                            nullable: true
+                            type: string
+                          reason:
+                            nullable: true
+                            type: string
+                          status:
+                            type: string
+                          type:
+                            type: string
+                        required:
+                        - status
+                        - type
+                        type: object
+                      type: array
+                    endpoint:
+                      type: string
+                    image:
+                      description: The declared image this status describes; changing it resets digest identity.
+                      type: string
+                    imageDigest:
+                      nullable: true
+                      type: string
+                    model:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - endpoint
+                  - image
+                  - model
+                  - name
+                  type: object
+                type: array
               observedGeneration:
                 format: int64
                 nullable: true
