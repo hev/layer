@@ -6,7 +6,7 @@ use vectorstore_core::capabilities::{StoreRejection, UNSUPPORTED_BY_STORE};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("Upstream HTTP response: {status}")]
+    #[error("Upstream HTTP response {status}: {}", String::from_utf8_lossy(.body))]
     UpstreamResponse {
         status: u16,
         content_type: Option<String>,
@@ -145,7 +145,13 @@ impl AppError {
         match error {
             crate::clients::turbopuffer::TurbopufferError::Response(response) => {
                 Self::UpstreamResponse {
-                    status: response.status,
+                    // Caller errors retain the origin status. Origin failures
+                    // are bad-gateway responses, with the original body intact.
+                    status: if (400..500).contains(&response.status) {
+                        response.status
+                    } else {
+                        StatusCode::BAD_GATEWAY.as_u16()
+                    },
                     content_type: response.content_type,
                     body: response.body,
                 }

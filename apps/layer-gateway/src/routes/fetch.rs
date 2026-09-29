@@ -148,7 +148,7 @@ pub async fn fetch_document(
         .turbopuffer()
         .fetch(&namespace, &doc_id)
         .await
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer fetch failed: {}", e)))?;
+        .map_err(|e| AppError::from_turbopuffer(e, "Turbopuffer fetch failed"))?;
 
     let doc = upstream_doc.ok_or_else(|| {
         AppError::NotFound(format!(
@@ -338,7 +338,7 @@ pub async fn fetch_many_documents(
             .turbopuffer()
             .fetch_many(&namespace, &missing_ids)
             .await
-            .map_err(|e| AppError::Upstream(format!("Turbopuffer fetch failed: {}", e)))?;
+            .map_err(|e| AppError::from_turbopuffer(e, "Turbopuffer fetch failed"))?;
 
         // Backfill Aerospike cache (best-effort). Skip when the earlier cache
         // call already errored — see fetch_document.

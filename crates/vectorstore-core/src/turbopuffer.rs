@@ -554,11 +554,21 @@ impl PatchColumns {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurbopufferPassthroughResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for TurbopufferPassthroughResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurbopufferPassthroughResponse")
+            .field("status", &self.status)
+            .field("content_type", &self.content_type)
+            .field("body", &String::from_utf8_lossy(&self.body))
+            .finish()
+    }
 }
 
 pub struct RoutingTurbopufferClient {

@@ -207,7 +207,7 @@ pub async fn upsert_or_delete(
     }
     let effective_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
         .await
-        .map_err(|e| AppError::Upstream(format!("namespace marker read failed: {e}")))?
+        .map_err(|e| AppError::from_turbopuffer(e, "namespace marker read failed"))?
         .unwrap_or(state.shard_count);
     let mut plan = native_write_plan(
         &mut body,
