@@ -1855,6 +1855,7 @@ pub struct MockTurbopufferClient {
     /// `TurbopufferError::Other`. Used by tests that exercise the gateway's
     /// per-row `metadata_error` fallback in `/v2/namespaces`.
     head_failure: tokio::sync::RwLock<HashMap<String, String>>,
+    patch_failure_once: tokio::sync::RwLock<HashMap<String, bool>>,
     /// Per-namespace flag: when set, `head_namespace` returns
     /// `TurbopufferError::NotFound`, mirroring upstream's 404 for a missing
     /// namespace. Used by tests of the metadata route's 404 mapping.
@@ -1938,6 +1939,7 @@ impl MockTurbopufferClient {
             metadata_overrides: tokio::sync::RwLock::new(HashMap::new()),
             rate_limit_once: tokio::sync::RwLock::new(HashMap::new()),
             head_failure: tokio::sync::RwLock::new(HashMap::new()),
+            patch_failure_once: tokio::sync::RwLock::new(HashMap::new()),
             head_not_found: tokio::sync::RwLock::new(std::collections::HashSet::new()),
             delete_namespace_status: tokio::sync::RwLock::new(HashMap::new()),
             scan_filters: tokio::sync::RwLock::new(Vec::new()),
@@ -2058,6 +2060,14 @@ impl MockTurbopufferClient {
     /// Arm `head_namespace` for this namespace to return an error on every
     /// call until cleared. Used to exercise the gateway's per-row
     /// `metadata_error` fallback in `/v2/namespaces`.
+    /// Fail one column patch before mutating the mock store.
+    pub async fn arm_patch_failure(&self, namespace: &str) {
+        self.patch_failure_once
+            .write()
+            .await
+            .insert(namespace.into(), true);
+    }
+
     pub async fn arm_head_failure(&self, namespace: &str, message: &str) {
         self.head_failure
             .write()
@@ -2368,6 +2378,17 @@ impl TurbopufferClient for MockTurbopufferClient {
         namespace: &str,
         columns: &PatchColumns,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        if self
+            .patch_failure_once
+            .write()
+            .await
+            .remove(namespace)
+            .unwrap_or(false)
+        {
+            return Err(TurbopufferError::Other(
+                "synthetic transient patch failure".into(),
+            ));
+        }
         let docs: Vec<PatchDoc> = columns
             .ids
             .iter()

@@ -196,6 +196,12 @@ pub struct LayerMetrics {
     #[allow(dead_code)]
     udf_queue_depth: IntGaugeVec,
     #[allow(dead_code)]
+    udf_processing_leases: IntGaugeVec,
+    #[allow(dead_code)]
+    udf_scheduled_lease_recoveries: IntGaugeVec,
+    #[allow(dead_code)]
+    udf_lease_observed_at_seconds: IntGaugeVec,
+    #[allow(dead_code)]
     udf_stage_count: IntGaugeVec,
     #[allow(dead_code)]
     indexed_seen: DashMap<String, u64>,
@@ -646,6 +652,24 @@ impl LayerMetrics {
             "Documents that landed in failed by pipeline and reason.",
             &["pipeline_id", "reason"],
         );
+        let udf_processing_leases = gauge_vec(
+            &registry,
+            "layer_udf_processing_leases",
+            "Processing leases classified by database expiry; unknown timestamps remain unknown.",
+            &["udf", "state"],
+        );
+        let udf_scheduled_lease_recoveries = gauge_vec(
+            &registry,
+            "layer_udf_scheduled_lease_recoveries",
+            "Durable cumulative scheduler lease recoveries per Function; use max across replicas.",
+            &["udf"],
+        );
+        let udf_lease_observed_at_seconds = gauge_vec(
+            &registry,
+            "layer_udf_lease_observed_at_seconds",
+            "Database observation time for lease counts and recovery receipts.",
+            &["udf"],
+        );
         let udf_queue_depth = gauge_vec(
             &registry,
             "layer_udf_queue_depth",
@@ -753,6 +777,9 @@ impl LayerMetrics {
             pipeline_indexed_total,
             pipeline_failed_total,
             udf_queue_depth,
+            udf_processing_leases,
+            udf_scheduled_lease_recoveries,
+            udf_lease_observed_at_seconds,
             udf_stage_count,
             indexed_seen: DashMap::new(),
             failed_seen: DashMap::new(),
@@ -1454,6 +1481,27 @@ impl LayerMetrics {
     #[cfg(feature = "pro")]
     pub fn refresh_udf_metrics(&self, snapshot: UdfMetricsSnapshot) {
         self.udf_stage_count.reset();
+        self.udf_processing_leases.reset();
+        self.udf_scheduled_lease_recoveries.reset();
+        self.udf_lease_observed_at_seconds.reset();
+        for row in snapshot.leases {
+            let udf = self.labels.pipeline(&row.udf_id);
+            for (state, count) in [
+                ("expired", row.expired),
+                ("live", row.live),
+                ("unknown", row.unknown),
+            ] {
+                self.udf_processing_leases
+                    .with_label_values(&[&udf, state])
+                    .set(count);
+            }
+            self.udf_scheduled_lease_recoveries
+                .with_label_values(&[&udf])
+                .set(row.recovered);
+            self.udf_lease_observed_at_seconds
+                .with_label_values(&[&udf])
+                .set(row.observed_at_seconds);
+        }
         self.udf_queue_depth.reset();
         for row in snapshot.stage_counts {
             let udf = self.labels.pipeline(&row.udf_id);
@@ -2760,6 +2808,17 @@ impl UdfStore for MetricsUdfStore {
             .await;
         self.metrics
             .observe_pg_query("enqueue_udf_items", udf_pg_status(&result), elapsed(start));
+        result
+    }
+
+    async fn recover_expired_items(&self) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.recover_expired_items().await;
+        self.metrics.observe_pg_query(
+            "recover_expired_udf_items",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
         result
     }
 
