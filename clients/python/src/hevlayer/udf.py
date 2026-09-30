@@ -99,6 +99,8 @@ async def run_udf_worker(
                     if inspect.isawaitable(output):
                         output = await output
                     complete_item: dict[str, Any] = {"namespace": item.namespace, "id": item.id}
+                    if item.input_revision is not None:
+                        complete_item["input_revision"] = item.input_revision
                     if output_kind == "embedding":
                         complete_item["vector"] = output
                     elif output_attr:

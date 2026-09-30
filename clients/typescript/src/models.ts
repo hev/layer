@@ -260,6 +260,7 @@ export interface UdfClaimedItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  input_revision?: number;
   input: Record<string, unknown>;
 }
 
@@ -292,6 +293,7 @@ export interface UdfCompleteItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  input_revision?: number;
   vector?: number[];
   vectors?: number[][];
   attributes?: Record<string, unknown>;

@@ -242,13 +242,19 @@ pub struct AppState {
 
 #[async_trait]
 pub trait WriteTrigger: Send + Sync {
+    async fn prepare_write(
+        &self,
+        state: Arc<AppState>,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<Box<dyn Send>, crate::error::AppError>;
     async fn enqueue_write_rows(
         &self,
         state: Arc<AppState>,
         namespace: &str,
         rows: Vec<HashMap<String, Value>>,
         partial_rows: bool,
-    );
+    ) -> Result<(), crate::error::AppError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

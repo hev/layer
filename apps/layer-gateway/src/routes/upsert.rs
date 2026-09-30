@@ -87,6 +87,31 @@ struct AffectedIds {
     deleted: HashSet<String>,
 }
 
+fn named_write_ids(body: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in ["upsert_rows", "patch_rows"] {
+        if let Some(rows) = body.get(key).and_then(Value::as_array) {
+            ids.extend(
+                rows.iter()
+                    .filter_map(|row| row.get("id").and_then(Value::as_str))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    for key in ["upsert_columns", "patch_columns"] {
+        if let Some(values) = body
+            .get(key)
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_array)
+        {
+            ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// POST /v2/namespaces/{namespace}
 ///
 /// Native Turbopuffer write bodies are the only public write surface. The
@@ -125,6 +150,16 @@ pub(crate) async fn write_namespace(
         )
         .await;
     }
+    let source_ids = named_write_ids(&body);
+    let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
+        Some(
+            trigger
+                .prepare_write(Arc::clone(&state), &namespace, &source_ids)
+                .await?,
+        )
+    } else {
+        None
+    };
     if state.turbopuffer().requires_native_wire(&namespace) {
         // RFC 0118: the gateway serves schema `embed` for a store that cannot
         // embed. Vectors are computed before the store's transaction, so a
@@ -186,6 +221,15 @@ pub(crate) async fn write_namespace(
                 }
             }
             state.namespace_list_cache.clear();
+            if let Some(trigger) = state.write_trigger.as_ref() {
+                let rows = source_ids
+                    .iter()
+                    .map(|id| HashMap::from([("id".into(), Value::String(id.clone()))]))
+                    .collect();
+                trigger
+                    .enqueue_write_rows(Arc::clone(&state), &namespace, rows, true)
+                    .await?;
+            }
         }
         return crate::routes::query::merge_embedding_performance(response, &embed.performance)
             .await;
@@ -376,7 +420,7 @@ pub(crate) async fn write_namespace(
     }
 
     state.consistency.register_due(&namespace);
-    enqueue_write_udfs(Arc::clone(&state), &namespace, &plan).await;
+    enqueue_write_udfs(Arc::clone(&state), &namespace, &plan).await?;
     observe_write_metric(
         &state,
         &namespace,
@@ -1068,7 +1112,11 @@ async fn delete_cache_ids(state: &Arc<AppState>, namespace: &str, ids: &[String]
     }
 }
 
-async fn enqueue_write_udfs(state: Arc<AppState>, namespace: &str, plan: &NativeWritePlan) {
+async fn enqueue_write_udfs(
+    state: Arc<AppState>,
+    namespace: &str,
+    plan: &NativeWritePlan,
+) -> Result<(), AppError> {
     if !plan.upserts.is_empty() {
         let rows: Vec<HashMap<String, Value>> = plan
             .upserts
@@ -1094,7 +1142,7 @@ async fn enqueue_write_udfs(state: Arc<AppState>, namespace: &str, plan: &Native
         if let Some(trigger) = state.write_trigger.clone() {
             trigger
                 .enqueue_write_rows(Arc::clone(&state), namespace, rows, false)
-                .await;
+                .await?;
         }
     }
 
@@ -1111,9 +1159,10 @@ async fn enqueue_write_udfs(state: Arc<AppState>, namespace: &str, plan: &Native
         if let Some(trigger) = state.write_trigger.clone() {
             trigger
                 .enqueue_write_rows(state, namespace, rows, true)
-                .await;
+                .await?;
         }
     }
+    Ok(())
 }
 
 fn affected_ids_from_response(body: &[u8]) -> AffectedIds {

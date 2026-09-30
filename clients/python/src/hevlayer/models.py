@@ -224,6 +224,7 @@ class UdfClaimedItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    input_revision: int | None = None
     input: dict[str, Any]
 
 class UdfClaimResponse(BaseModel):
@@ -251,6 +252,7 @@ class UdfCompleteItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    input_revision: int | None = None
     vector: list[float] | None = None
     vectors: list[list[float]] | None = None
     attributes: dict[str, Any] | None = {}

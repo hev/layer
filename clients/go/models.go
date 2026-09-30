@@ -219,6 +219,7 @@ type UdfClaimRequest struct {
 type UdfClaimedItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	InputRevision int64 `json:"input_revision,omitempty"`
 	Input map[string]interface{} `json:"input"`
 }
 
@@ -246,6 +247,7 @@ type UdfCompleteRequest struct {
 type UdfCompleteItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	InputRevision int64 `json:"input_revision,omitempty"`
 	Vector []float64 `json:"vector,omitempty"`
 	Vectors [][]float64 `json:"vectors,omitempty"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`

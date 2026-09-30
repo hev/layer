@@ -2711,6 +2711,42 @@ impl UdfStore for MetricsUdfStore {
         self.inner.finish_discovery(lease, success).await
     }
 
+    async fn lock_namespaces(&self, namespaces: &[String]) -> Result<Box<dyn Send>, UdfStoreError> {
+        self.inner.lock_namespaces(namespaces).await
+    }
+    async fn observe_input(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        document_id: &str,
+        digest: &str,
+    ) -> Result<bool, UdfStoreError> {
+        self.inner
+            .observe_input(udf_id, namespace, document_id, digest)
+            .await
+    }
+    async fn capture_input(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        document_id: &str,
+        digest: &str,
+    ) -> Result<u64, UdfStoreError> {
+        self.inner
+            .capture_input(udf_id, namespace, document_id, digest)
+            .await
+    }
+    async fn validate_completion(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        items: &[UdfItemKey],
+        revisions: &[Option<u64>],
+    ) -> Result<bool, UdfStoreError> {
+        self.inner
+            .validate_completion(udf_id, worker_id, items, revisions)
+            .await
+    }
     async fn enqueue_items(
         &self,
         udf_id: &str,

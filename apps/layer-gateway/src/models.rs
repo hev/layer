@@ -1341,6 +1341,7 @@ pub struct UdfClaimRequest {
 
 #[derive(Debug, Serialize)]
 pub struct UdfClaimedItem {
+    pub input_revision: u64,
     pub namespace: String,
     pub id: String,
     pub input: HashMap<String, Value>,
@@ -1379,6 +1380,8 @@ pub struct UdfCompleteRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UdfCompleteItem {
+    #[serde(default)]
+    pub input_revision: Option<u64>,
     pub namespace: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
