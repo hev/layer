@@ -2795,6 +2795,24 @@ impl UdfStore for MetricsUdfStore {
             .validate_completion(udf_id, worker_id, items, revisions)
             .await
     }
+    async fn prepare_completion(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        intents: &[crate::udf::UdfCompletionIntent],
+    ) -> Result<Vec<bool>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .prepare_completion(udf_id, worker_id, intents)
+            .await;
+        self.metrics.observe_pg_query(
+            "prepare_udf_completion",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
     async fn enqueue_items(
         &self,
         udf_id: &str,

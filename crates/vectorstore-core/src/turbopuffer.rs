@@ -3023,6 +3023,21 @@ async fn mock_write_body(
                     attributes,
                 },
             );
+            // Keep the mock's vector readback faithful to supported wire
+            // upserts, so output patch regressions can prove preservation.
+            if let Some(vector) = row_obj
+                .get("vector")
+                .and_then(Value::as_array)
+                .and_then(|values| values.iter().map(Value::as_f64).collect::<Option<Vec<_>>>())
+            {
+                client
+                    .vectors
+                    .write()
+                    .await
+                    .entry(namespace.to_string())
+                    .or_default()
+                    .insert(id.clone(), vector);
+            }
             upserted_ids.push(Value::String(id));
             rows_affected += 1;
         }

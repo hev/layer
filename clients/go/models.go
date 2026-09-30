@@ -1032,6 +1032,9 @@ type SearchPerformance struct {
 type Error struct {
 	Error string `json:"error"`
 	Message string `json:"message"`
+	UpstreamStatus int64 `json:"upstream_status,omitempty"`
+	UpstreamCategory string `json:"upstream_category,omitempty"`
+	Retryable bool `json:"retryable,omitempty"`
 	Feature string `json:"feature,omitempty"`
 }
 

@@ -4343,6 +4343,25 @@ components:
           type: string
         message:
           type: string
+        upstream_status:
+          type: integer
+          description: Structured backend HTTP status on Function completion failures,
+            when known. Never inferred from message text.
+        upstream_category:
+          type: string
+          enum:
+          - validation
+          - rate_limited
+          - unavailable
+          - timeout
+          - unknown
+          description: Bounded Function completion store failure category. Validation
+            includes backend schema/type rejection but does not assert the historical
+            customer root.
+        retryable:
+          type: boolean
+          description: Present only for classified completion store failures. Unknown
+            outcomes require retaining the owned receipt and stopping additional claims.
         feature:
           type: string
           description: 'Present on every `UnsupportedByStore` rejection that names

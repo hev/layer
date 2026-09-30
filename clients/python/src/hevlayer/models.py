@@ -1043,6 +1043,9 @@ class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     error: str
     message: str
+    upstream_status: int | None = None
+    upstream_category: Literal["validation", "rate_limited", "unavailable", "timeout", "unknown"] | None = None
+    retryable: bool | None = None
     feature: str | None = None
 
 class SnapshotHistoryEntry(BaseModel):

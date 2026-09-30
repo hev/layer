@@ -1176,6 +1176,9 @@ export interface Error {
   [key: string]: unknown;
   error: string;
   message: string;
+  upstream_status?: number;
+  upstream_category?: "validation" | "rate_limited" | "unavailable" | "timeout" | "unknown";
+  retryable?: boolean;
   feature?: string;
 }
 
