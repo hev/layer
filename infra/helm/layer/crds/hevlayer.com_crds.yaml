@@ -507,13 +507,13 @@ spec:
                   type: object
                 description: |-
                   Map keyed by target resource: `vectorstore.<name>`,
-                  `warehouse.<name>`, `agent.<name>`, or `layer`. Unknown prefixes
+                  `warehouse.<name>`, `agent.<name>`, `mcp.<name>`, or `layer`. Unknown prefixes
                   are rejected at admission; a missing target is an
                   `EntitlementTargetMissing` status condition, not an error.
                 type: object
                 x-kubernetes-validations:
-                - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', or 'agent.<name>'
-                  rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6))
+                - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', 'agent.<name>', or 'mcp.<name>'
+                  rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6) || (k.startsWith('mcp.') && k.size() > 4))
               expiresAfter:
                 default: 365d
                 description: |-
