@@ -3,6 +3,8 @@ pub enum ApiScope {
     Read,
     Write,
     Admin,
+    /// Constrained child-key management; never implies admin or data access.
+    Mint,
 }
 
 impl ApiScope {
@@ -11,6 +13,7 @@ impl ApiScope {
             ApiScope::Read => "read",
             ApiScope::Write => "write",
             ApiScope::Admin => "admin",
+            ApiScope::Mint => "mint",
         }
     }
 }

@@ -1530,7 +1530,7 @@ export interface WarehouseList {
 
 export interface ApiKeyEntitlement {
   [key: string]: unknown;
-  scopes?: ("read" | "write" | "admin")[];
+  scopes?: ("read" | "write" | "admin" | "mint")[];
   namespaces?: string[];
   claims?: string[];
 }

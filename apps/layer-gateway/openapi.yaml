@@ -1129,20 +1129,23 @@ paths:
         pgvector: supported
       x-turbopuffer-key: DELETE /v2/namespaces/{namespace}
       summary: Delete a namespace
-      description: 'Delete the upstream namespace even when object storage is not
-        configured. When S3 is configured, persist a durable cleanup intent first;
-        if that write fails, return 503 without deleting upstream. After upstream
-        deletion and synchronous in-memory invalidation, return 200 with a message
-        that snapshot and cache purge continues in the background and may take a few
-        minutes. Aerospike rows and snapshot mirrors, S3 namespace objects, and the
-        operator-discovered Index CR are cleaned up with retries. With S3 configured,
-        intent records survive gateway restarts and are removed only after cleanup
-        succeeds. Without S3, cleanup retries are in memory and do not survive restart.
-        Recovery verifies upstream absence; an intent whose upstream delete failed
-        remains pending until the client retries. Turbopuffer 404 is idempotent success;
-        other upstream failures return 502. Do not reuse namespace names until pending
-        cleanup drains. The existing /metrics scrape exposes layer_namespace_purge_pending
-        labeled by namespace for outstanding intents discovered by the gateway.
+      description: 'A vectorstore `mint` credential may delete only namespaces within
+        its literal namespace prefixes and served by that same store. Existing write
+        and admin authorization remains supported. Delete the upstream namespace even
+        when object storage is not configured. When S3 is configured, persist a durable
+        cleanup intent first; if that write fails, return 503 without deleting upstream.
+        After upstream deletion and synchronous in-memory invalidation, return 200
+        with a message that snapshot and cache purge continues in the background and
+        may take a few minutes. Aerospike rows and snapshot mirrors, S3 namespace
+        objects, and the operator-discovered Index CR are cleaned up with retries.
+        With S3 configured, intent records survive gateway restarts and are removed
+        only after cleanup succeeds. Without S3, cleanup retries are in memory and
+        do not survive restart. Recovery verifies upstream absence; an intent whose
+        upstream delete failed remains pending until the client retries. Turbopuffer
+        404 is idempotent success; other upstream failures return 502. Do not reuse
+        namespace names until pending cleanup drains. The existing /metrics scrape
+        exposes layer_namespace_purge_pending labeled by namespace for outstanding
+        intents discovered by the gateway.
 
         '
       tags:

@@ -1357,7 +1357,7 @@ class WarehouseList(BaseModel):
 
 class ApiKeyEntitlement(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    scopes: list[Literal["read", "write", "admin"]] | None = None
+    scopes: list[Literal["read", "write", "admin", "mint"]] | None = None
     namespaces: list[str] | None = None
     claims: list[str] | None = None
 

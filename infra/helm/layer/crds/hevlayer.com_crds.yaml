@@ -331,6 +331,7 @@ spec:
                             - read
                             - write
                             - admin
+                            - mint
                             type: string
                           type: array
                         secretRef:
@@ -502,6 +503,7 @@ spec:
                         - read
                         - write
                         - admin
+                        - mint
                         type: string
                       type: array
                   type: object
