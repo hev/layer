@@ -1259,7 +1259,7 @@ fn default_udf_lease_seconds() -> i64 {
 }
 
 fn default_scan_page_size() -> u32 {
-    10_000
+    1000
 }
 
 #[derive(Debug, Deserialize)]
@@ -1321,6 +1321,14 @@ pub struct UdfDiscoverRequest {
     pub namespaces: Vec<String>,
     #[serde(default = "default_scan_page_size")]
     pub page_size: u32,
+    #[serde(default = "default_discovery_max_pages")]
+    pub max_pages: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+fn default_discovery_max_pages() -> u32 {
+    10
 }
 
 #[derive(Debug, Serialize)]
@@ -1328,6 +1336,9 @@ pub struct UdfDiscoverResponse {
     pub udf_id: String,
     pub enqueued: u64,
     pub namespaces: Vec<String>,
+    pub pages_scanned: u32,
+    pub next_cursor: Option<String>,
+    pub complete: bool,
 }
 
 #[derive(Debug, Deserialize)]

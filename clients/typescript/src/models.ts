@@ -240,6 +240,8 @@ export interface UdfDiscoverRequest {
   [key: string]: unknown;
   namespaces?: string[];
   page_size?: number;
+  max_pages?: number;
+  cursor?: string | null;
 }
 
 export interface UdfDiscoverResponse {
@@ -247,6 +249,9 @@ export interface UdfDiscoverResponse {
   udf_id: string;
   enqueued: number;
   namespaces: string[];
+  pages_scanned: number;
+  complete: boolean;
+  next_cursor?: string | null;
 }
 
 export interface UdfClaimRequest {

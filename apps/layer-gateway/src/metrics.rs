@@ -2723,6 +2723,30 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn discovery_checkpoints(
+        &self,
+        id: &str,
+        version: &str,
+        namespaces: &[String],
+        source_stores: &[String],
+        restart: bool,
+    ) -> Result<Vec<crate::udf::UdfDiscoveryCheckpoint>, UdfStoreError> {
+        self.inner
+            .discovery_checkpoints(id, version, namespaces, source_stores, restart)
+            .await
+    }
+    async fn advance_discovery(
+        &self,
+        id: &str,
+        checkpoint: &crate::udf::UdfDiscoveryCheckpoint,
+        cursor: Option<&str>,
+        lease_token: &str,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .advance_discovery(id, checkpoint, cursor, lease_token)
+            .await
+    }
+
     async fn record_discovery_sweep(
         &self,
         id: &str,
@@ -2737,6 +2761,12 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn claim_discovery_now(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::udf::UdfDiscoveryLease>, UdfStoreError> {
+        self.inner.claim_discovery_now(id).await
+    }
     async fn claim_discovery(
         &self,
         id: &str,
@@ -2806,6 +2836,25 @@ impl UdfStore for MetricsUdfStore {
         self.inner
             .complete_item_dispositions(udf_id, worker_id, items)
             .await
+    }
+    async fn observe_enqueue_page(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        namespace: &str,
+        inputs: &[(String, String)],
+        eligible: &[String],
+    ) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .observe_enqueue_page(lease, namespace, inputs, eligible)
+            .await;
+        self.metrics.observe_pg_query(
+            "observe_enqueue_page",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
     }
     async fn observe_absent_inputs(
         &self,

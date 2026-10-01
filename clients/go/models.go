@@ -202,12 +202,17 @@ type UdfRetrySpec struct {
 type UdfDiscoverRequest struct {
 	Namespaces []string `json:"namespaces,omitempty"`
 	PageSize int64 `json:"page_size,omitempty"`
+	MaxPages int64 `json:"max_pages,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type UdfDiscoverResponse struct {
 	UdfID string `json:"udf_id"`
 	Enqueued int64 `json:"enqueued"`
 	Namespaces []string `json:"namespaces"`
+	PagesScanned int64 `json:"pages_scanned"`
+	Complete bool `json:"complete"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 type UdfClaimRequest struct {

@@ -206,13 +206,18 @@ class UdfRetrySpec(BaseModel):
 class UdfDiscoverRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespaces: list[str] | None = []
-    page_size: int | None = 10000
+    page_size: int | None = 1000
+    max_pages: int | None = 10
+    cursor: str | None = None
 
 class UdfDiscoverResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     udf_id: str
     enqueued: int
     namespaces: list[str]
+    pages_scanned: int
+    complete: bool
+    next_cursor: str | None = None
 
 class UdfClaimRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
