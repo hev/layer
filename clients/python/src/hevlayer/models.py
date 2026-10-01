@@ -245,6 +245,7 @@ class UdfHeartbeatRequest(BaseModel):
 
 class UdfCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    report_dispositions: bool | None = False
     worker_id: str
     items: list[UdfCompleteItem]
 
@@ -275,6 +276,13 @@ class UdfItemsResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     udf_id: str
     updated: int
+    items: list[UdfCompletionOutcome] | None = None
+
+class UdfCompletionOutcome(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    index: int
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    disposition: Literal["completed", "reclaim", "discard", "stop"]
 
 CostWindow = Literal["1h", "6h", "24h", "7d", "30d"]
 
@@ -1041,6 +1049,8 @@ class SearchPerformance(BaseModel):
 
 class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    disposition: Literal["reclaim", "discard", "stop"] | None = None
     error: str
     message: str
     upstream_status: int | None = None

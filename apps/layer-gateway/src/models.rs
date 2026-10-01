@@ -1374,6 +1374,8 @@ pub struct UdfItemsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct UdfCompleteRequest {
+    #[serde(default)]
+    pub report_dispositions: bool,
     pub worker_id: String,
     pub items: Vec<UdfCompleteItem>,
 }

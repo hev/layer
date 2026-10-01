@@ -1340,6 +1340,15 @@ async fn run_fused_specs(
     }
 }
 
+/// Missing fuzzy configuration on a known attribute means lexical BM25 only.
+/// Stores without attribute metadata retain their existing capability routing.
+pub(crate) fn attribute_fuzzy_enabled(metadata: &Value, field: &str) -> Option<bool> {
+    metadata.get("schema")?.get(field).map(|attr| {
+        attr.get("fuzzy")
+            .is_some_and(|value| value == true || value.is_object())
+    })
+}
+
 /// The expansion shared by the `HybridText` handler and the router's
 /// `hybrid_text` / `fused` routes: tokenize, build leg specs (plus any
 /// router-supplied extra leg), issue one `ranked_query` per leg spec, and
@@ -1383,6 +1392,12 @@ pub(crate) async fn run_hybrid_text(
             "phase-one hybrid takes no temporal_filter",
         ));
     }
+    let metadata = state
+        .turbopuffer()
+        .head_namespace(namespace)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "HybridText namespace schema read failed"))?;
+    let bm25_only = attribute_fuzzy_enabled(&metadata.raw, &expr.field) == Some(false);
     let policy = tokenize_query_input_with_stopwords(&expr.input, &expr.stopwords);
     // Zero-token guard (RFC 0090): stop-word removal must not turn a valid
     // input into a 422 — an all-stop-word query keeps its BM25 anchor leg
@@ -1427,7 +1442,7 @@ pub(crate) async fn run_hybrid_text(
         .unwrap_or_else(|| default_per_leg_limit(fetch_depth));
 
     let had_extra_leg = extra_leg.is_some();
-    let mut specs = if phase_one {
+    let mut specs = if phase_one || bm25_only {
         vec![LegSpec {
             label: "bm25".to_string(),
             rank_by: json!([expr.field, "BM25", expr.input]),
@@ -1478,7 +1493,8 @@ pub(crate) async fn run_hybrid_text(
     // queries never reach this branch — the fallback is purely additive.
     // An all-stop-word query has no fuzzy tokens to surface on; the BM25-only
     // fusion result stands.
-    let surfaced = !phase_one && rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
+    let surfaced =
+        !phase_one && !bm25_only && rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
     if surfaced {
         let surfacing = build_surfacing_leg_specs(expr, &policy.tokens, request.filters.as_ref());
         effective_leg_count = surfacing.len();

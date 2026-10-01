@@ -240,6 +240,7 @@ type UdfHeartbeatRequest struct {
 }
 
 type UdfCompleteRequest struct {
+	ReportDispositions bool `json:"report_dispositions,omitempty"`
 	WorkerID string `json:"worker_id"`
 	Items []UdfCompleteItem `json:"items"`
 }
@@ -270,6 +271,13 @@ type UdfFailItem struct {
 type UdfItemsResponse struct {
 	UdfID string `json:"udf_id"`
 	Updated int64 `json:"updated"`
+	Items []UdfCompletionOutcome `json:"items,omitempty"`
+}
+
+type UdfCompletionOutcome struct {
+	Index int64 `json:"index"`
+	Reason string `json:"reason,omitempty"`
+	Disposition string `json:"disposition"`
 }
 
 type CostWindow string
@@ -1030,6 +1038,8 @@ type SearchPerformance struct {
 }
 
 type Error struct {
+	Reason string `json:"reason,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 	Error string `json:"error"`
 	Message string `json:"message"`
 	UpstreamStatus int64 `json:"upstream_status,omitempty"`

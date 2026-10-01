@@ -81,6 +81,10 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[cfg(feature = "pro")]
+    #[error("Function completion conflict: {0:?}")]
+    CompletionConflict(layer_transform::udf::CompletionConflictReason),
+
     #[error("Precondition failed: {0}")]
     PreconditionFailed(String),
 
@@ -431,6 +435,17 @@ impl IntoResponse for AppError {
                 None,
                 None,
             ),
+            #[cfg(feature = "pro")]
+            AppError::CompletionConflict(reason) => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": "conflict", "message": "Function completion rejected",
+                        "reason": reason, "disposition": reason.disposition()
+                    })),
+                )
+                    .into_response();
+            }
             AppError::Conflict(msg) => (
                 StatusCode::CONFLICT,
                 "conflict",

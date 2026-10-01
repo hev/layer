@@ -285,6 +285,7 @@ export interface UdfHeartbeatRequest {
 
 export interface UdfCompleteRequest {
   [key: string]: unknown;
+  report_dispositions?: boolean;
   worker_id: string;
   items: UdfCompleteItem[];
 }
@@ -319,6 +320,14 @@ export interface UdfItemsResponse {
   [key: string]: unknown;
   udf_id: string;
   updated: number;
+  items?: UdfCompletionOutcome[];
+}
+
+export interface UdfCompletionOutcome {
+  [key: string]: unknown;
+  index: number;
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "ownership_lost_before_ack" | "source_absent";
+  disposition: "completed" | "reclaim" | "discard" | "stop";
 }
 
 export type CostWindow = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -1174,6 +1183,8 @@ export interface SearchPerformance {
 
 export interface Error {
   [key: string]: unknown;
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "ownership_lost_before_ack" | "source_absent";
+  disposition?: "reclaim" | "discard" | "stop";
   error: string;
   message: string;
   upstream_status?: number;

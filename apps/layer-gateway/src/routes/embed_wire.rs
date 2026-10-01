@@ -104,8 +104,8 @@ pub struct EmbeddingProfile {
     /// namespace is re-indexed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_sha256: Option<String>,
-    /// The `embed` value the client wrote, kept only where the store holds
-    /// the profile (RFC 0118 step E) so `GET .../schema` can return it.
+    /// The client-written `embed` value for schema readback. Older S3
+    /// profiles omit this and reconstruct the supported declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     declaration: Option<Value>,
 }
@@ -142,6 +142,32 @@ struct ChunkConfig {
 }
 
 impl EmbeddingProfile {
+    fn schema_declaration(&self) -> Value {
+        self.declaration.clone().unwrap_or_else(|| {
+            let mut embed = json!({
+                "model": self.model,
+                "attribute": self.target,
+                "serving": {"prefer": self.serving},
+            });
+            if self.modality != EmbeddingModality::Text {
+                embed["modality"] = json!(self.modality);
+            }
+            if let Some(dims) = self.dims {
+                embed["dims"] = json!(dims);
+            }
+            if let Some(revision) = &self.revision {
+                embed["revision"] = json!(revision);
+            }
+            if self.instructions != EmbeddingInstructions::default() {
+                embed["instructions"] = json!(self.instructions);
+            }
+            if let Some(chunk) = &self.chunk {
+                embed["chunk"] = json!(chunk);
+            }
+            embed
+        })
+    }
+
     fn has_extensions(&self) -> bool {
         self.layer_extensions
             || self.revision.is_some()
@@ -245,7 +271,6 @@ async fn prepare_write_profiles(
                 .find(|profile| profile.source == attribute)
                 .cloned();
             if native_wire {
-                parsed.declaration = Some(embed.clone());
                 prepare_native_wire_profile(state, &route, &mut parsed, previous.as_ref()).await?;
             }
             if parsed.serving == ServingPreference::Worker {
@@ -539,27 +564,7 @@ pub(crate) async fn annotate_schema(
         {
             continue;
         }
-        let declaration = profile.declaration.clone().unwrap_or_else(|| {
-            let mut embed = json!({
-                "model": profile.model,
-                "attribute": profile.target,
-                "modality": profile.modality,
-                "serving": {"prefer": profile.serving},
-            });
-            if let Some(dims) = profile.dims {
-                embed["dims"] = json!(dims);
-            }
-            if let Some(revision) = &profile.revision {
-                embed["revision"] = json!(revision);
-            }
-            if profile.instructions != EmbeddingInstructions::default() {
-                embed["instructions"] = json!(profile.instructions);
-            }
-            if let Some(chunk) = &profile.chunk {
-                embed["chunk"] = json!(chunk);
-            }
-            embed
-        });
+        let declaration = profile.schema_declaration();
         let attr = attrs
             .entry(profile.source)
             .or_insert_with(|| json!({"type":"string"}));
@@ -2502,6 +2507,26 @@ fn profile_key(namespace: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_local_text_declaration_roundtrips_without_adding_extensions() {
+        let profile = validate_embed(
+            "body",
+            &json!({
+                "model":"openai/text-embedding-3-small", "dims":3,
+                "serving":{"prefer":"local"}
+            }),
+        )
+        .unwrap();
+        let declaration = profile.schema_declaration();
+        assert!(declaration.get("modality").is_none());
+        let restored = validate_embed("body", &declaration).unwrap();
+        assert!(!restored.has_extensions());
+        assert_eq!(restored.model, profile.model);
+        assert_eq!(restored.target, profile.target);
+        assert_eq!(restored.dims, profile.dims);
+        assert_eq!(restored.serving, profile.serving);
+    }
 
     #[test]
     fn cached_image_vectors_validate_dimensions_and_preserve_mixed_row_positions() {

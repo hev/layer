@@ -397,6 +397,7 @@ enum FilterType {
 struct NamespaceSchema {
     filters: BTreeMap<String, FilterType>,
     text: Option<String>,
+    fuzzy: bool,
     embed: Option<String>,
 }
 
@@ -466,17 +467,26 @@ impl NamespaceSchema {
                 None
             }
         };
+        let text = choose(text);
+        let fuzzy = text.as_ref().is_some_and(|field| {
+            crate::routes::hybrid_text::attribute_fuzzy_enabled(metadata, field) == Some(true)
+        });
         Ok(Self {
             filters,
-            text: choose(text),
+            fuzzy,
+            text,
             embed: choose(embed),
         })
     }
 
     fn rank_by(&self, query: &str) -> Result<Value, AppError> {
         match (&self.text, &self.embed) {
-            (Some(text), Some(embed)) => Ok(json!([text, "Auto", query, {"vector":["Embed",query,{"field":embed}]}])),
-            (Some(text), None) => Ok(json!([text, "HybridText", query])),
+            (Some(text), Some(embed)) => {
+                let mut options = json!({"vector":["Embed",query,{"field":embed}]});
+                if !self.fuzzy { options["fuzziness"] = json!(0); }
+                Ok(json!([text, "Auto", query, options]))
+            },
+            (Some(text), None) => Ok(json!([text, if self.fuzzy { "HybridText" } else { "BM25" }, query])),
             (None, Some(embed)) => Ok(json!([embed, "ANN", ["Embed",query]])),
             _ => Err(invalid("MCP search requires an unambiguous full-text or embed attribute in the Index schema")),
         }
@@ -649,10 +659,7 @@ mod tests {
             &json!({"schema":{"body":{"type":"string","full_text_search":true}}}),
         )
         .unwrap();
-        assert_eq!(
-            text.rank_by("q").unwrap(),
-            json!(["body", "HybridText", "q"])
-        );
+        assert_eq!(text.rank_by("q").unwrap(), json!(["body", "BM25", "q"]));
         let vector = NamespaceSchema::from_metadata(
             &ns(),
             &json!({"schema":{"body":{"type":"string","embed":{"model":"test"}}}}),
@@ -665,10 +672,27 @@ mod tests {
         let both = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"body":{"type":"string","full_text_search":true,"embed":{"model":"test"}}}})).unwrap();
         assert_eq!(
             both.rank_by("q").unwrap(),
-            json!(["body","Auto","q",{"vector":["Embed","q",{"field":"body"}]}])
+            json!(["body","Auto","q",{"vector":["Embed","q",{"field":"body"}],"fuzziness":0}])
         );
         let ambiguous = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"a":{"type":"string","full_text_search":true},"b":{"type":"string","full_text_search":true}}})).unwrap();
         assert!(ambiguous.rank_by("q").is_err());
+    }
+
+    #[test]
+    fn fuzzy_text_and_auto_keep_fuzzy_routing() {
+        for embed in [false, true] {
+            let mut metadata =
+                json!({"schema":{"body":{"type":"string","full_text_search":{},"fuzzy":true}}});
+            if embed {
+                metadata["schema"]["body"]["embed"] = json!({"model":"test"});
+            }
+            let schema = NamespaceSchema::from_metadata(&ns(), &metadata).unwrap();
+            let rank = schema.rank_by("q").unwrap();
+            assert_eq!(rank[1], if embed { "Auto" } else { "HybridText" });
+            assert!(rank
+                .get(3)
+                .is_none_or(|options| options.get("fuzziness").is_none()));
+        }
     }
 
     #[test]
