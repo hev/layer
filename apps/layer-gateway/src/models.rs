@@ -1340,7 +1340,16 @@ pub struct UdfClaimRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UdfPreparedReceipt {
+    pub input_revision: u64,
+    pub intent_digest: String,
+    pub output_digest: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct UdfClaimedItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_receipt: Option<UdfPreparedReceipt>,
     pub input_revision: u64,
     pub namespace: String,
     pub id: String,
@@ -1382,6 +1391,8 @@ pub struct UdfCompleteRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UdfCompleteItem {
+    #[serde(default)]
+    pub prepared_input_revision: Option<u64>,
     #[serde(default)]
     pub input_revision: Option<u64>,
     pub namespace: String,

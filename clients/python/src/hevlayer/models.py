@@ -224,8 +224,15 @@ class UdfClaimedItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    prepared_receipt: UdfPreparedReceipt | None = None
     input_revision: int | None = None
     input: dict[str, Any]
+
+class UdfPreparedReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    input_revision: int
+    intent_digest: str
+    output_digest: str
 
 class UdfClaimResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -253,6 +260,7 @@ class UdfCompleteItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    prepared_input_revision: int | None = None
     input_revision: int | None = None
     vector: list[float] | None = None
     vectors: list[list[float]] | None = None
@@ -281,7 +289,7 @@ class UdfItemsResponse(BaseModel):
 class UdfCompletionOutcome(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     index: int
-    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "prepared_owner_changed", "ownership_lost_before_ack", "source_absent"] | None = None
     disposition: Literal["completed", "reclaim", "discard", "stop"]
 
 CostWindow = Literal["1h", "6h", "24h", "7d", "30d"]
@@ -1049,7 +1057,7 @@ class SearchPerformance(BaseModel):
 
 class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "prepared_owner_changed", "ownership_lost_before_ack", "source_absent"] | None = None
     disposition: Literal["reclaim", "discard", "stop"] | None = None
     error: str
     message: str

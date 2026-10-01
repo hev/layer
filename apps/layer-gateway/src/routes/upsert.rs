@@ -160,6 +160,8 @@ pub(crate) async fn write_namespace(
     } else {
         None
     };
+    crate::run_guarded_write(_function_guard.as_deref(), async {
+
     if state.turbopuffer().requires_native_wire(&namespace) {
         // RFC 0118: the gateway serves schema `embed` for a store that cannot
         // embed. Vectors are computed before the store's transaction, so a
@@ -431,6 +433,7 @@ pub(crate) async fn write_namespace(
     );
 
     passthrough_response(upstream)
+    }).await
 }
 
 fn object_schema_attributes(body: &Value) -> Vec<String> {

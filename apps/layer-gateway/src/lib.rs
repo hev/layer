@@ -240,6 +240,36 @@ pub struct AppState {
     /// backend-specific behavior (the interim fuzziness clamp).
     pub search_kind_stores: std::collections::HashSet<String>,}
 
+/// Keeps a source write fenced while its Function namespace session is alive.
+#[async_trait]
+pub trait WriteGuard: Send + Sync {
+    async fn validate(&self) -> Result<(), crate::error::AppError>;
+    async fn lost(&self);
+}
+#[async_trait]
+impl WriteGuard for () {
+    async fn validate(&self) -> Result<(), crate::error::AppError> {
+        Ok(())
+    }
+    async fn lost(&self) {
+        std::future::pending::<()>().await
+    }
+}
+pub async fn run_guarded_write<T>(
+    guard: Option<&dyn WriteGuard>,
+    work: impl std::future::Future<Output = Result<T, crate::error::AppError>>,
+) -> Result<T, crate::error::AppError> {
+    let Some(guard) = guard else {
+        return work.await;
+    };
+    guard.validate().await?;
+    tokio::select! {
+        biased;
+        _ = guard.lost() => Err(crate::error::AppError::Upstream("Function namespace lock lost".into())),
+        result = work => { guard.validate().await?; result }
+    }
+}
+
 #[async_trait]
 pub trait WriteTrigger: Send + Sync {
     async fn prepare_write(
@@ -247,7 +277,14 @@ pub trait WriteTrigger: Send + Sync {
         state: Arc<AppState>,
         namespace: &str,
         ids: &[String],
-    ) -> Result<Box<dyn Send>, crate::error::AppError>;
+    ) -> Result<Box<dyn WriteGuard>, crate::error::AppError>;
+    async fn prepare_replacement(
+        &self,
+        state: Arc<AppState>,
+        namespace: &str,
+    ) -> Result<Box<dyn WriteGuard>, crate::error::AppError> {
+        self.prepare_write(state, namespace, &[]).await
+    }
     async fn enqueue_write_rows(
         &self,
         state: Arc<AppState>,

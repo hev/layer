@@ -90,30 +90,45 @@ pub async fn delete_namespace(
         return Err(AppError::Validation("namespace is required".to_string()));
     }
 
-    let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
-
-    let upstream = state
-        .turbopuffer()
-        .delete_namespace_in_store(&namespace, &store)
-        .await
-        .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
-
-    if upstream.status >= 400 && upstream.status != 404 {
-        return Err(AppError::Upstream(format!(
-            "VectorStore namespace delete returned {}",
-            upstream.status
-        )));
-    }
-
-    // Keep in-memory invalidation on the request path, before any local I/O
-    // cleanup that may later run in the background.
-    purge_in_memory_namespace_state(&state, &namespace);
-    state.namespace_purges.upstream_deleted(&state, &intent);
-    let response = StatusResponse {
-        message: Some(crate::namespace_purge::DELETE_MESSAGE.into()),
-        ..Default::default()
+    // Namespace replacement must serialize with strong Function source reads
+    // and completion writes just like row mutations.
+    let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
+        Some(
+            trigger
+                .prepare_replacement(Arc::clone(&state), &namespace)
+                .await?,
+        )
+    } else {
+        None
     };
-    Ok(Json(response))
+
+    crate::run_guarded_write(_function_guard.as_deref(), async {
+        let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
+
+        let upstream = state
+            .turbopuffer()
+            .delete_namespace_in_store(&namespace, &store)
+            .await
+            .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
+
+        if upstream.status >= 400 && upstream.status != 404 {
+            return Err(AppError::Upstream(format!(
+                "VectorStore namespace delete returned {}",
+                upstream.status
+            )));
+        }
+
+        // Keep in-memory invalidation on the request path, before any local I/O
+        // cleanup that may later run in the background.
+        purge_in_memory_namespace_state(&state, &namespace);
+        state.namespace_purges.upstream_deleted(&state, &intent);
+        let response = StatusResponse {
+            message: Some(crate::namespace_purge::DELETE_MESSAGE.into()),
+            ..Default::default()
+        };
+        Ok(Json(response))
+    })
+    .await
 }
 
 #[derive(Debug, Default)]

@@ -219,8 +219,15 @@ type UdfClaimRequest struct {
 type UdfClaimedItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	PreparedReceipt UdfPreparedReceipt `json:"prepared_receipt,omitempty"`
 	InputRevision int64 `json:"input_revision,omitempty"`
 	Input map[string]interface{} `json:"input"`
+}
+
+type UdfPreparedReceipt struct {
+	InputRevision int64 `json:"input_revision"`
+	IntentDigest string `json:"intent_digest"`
+	OutputDigest string `json:"output_digest"`
 }
 
 type UdfClaimResponse struct {
@@ -248,6 +255,7 @@ type UdfCompleteRequest struct {
 type UdfCompleteItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	PreparedInputRevision int64 `json:"prepared_input_revision,omitempty"`
 	InputRevision int64 `json:"input_revision,omitempty"`
 	Vector []float64 `json:"vector,omitempty"`
 	Vectors [][]float64 `json:"vectors,omitempty"`

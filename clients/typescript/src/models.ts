@@ -260,8 +260,16 @@ export interface UdfClaimedItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  prepared_receipt?: UdfPreparedReceipt;
   input_revision?: number;
   input: Record<string, unknown>;
+}
+
+export interface UdfPreparedReceipt {
+  [key: string]: unknown;
+  input_revision: number;
+  intent_digest: string;
+  output_digest: string;
 }
 
 export interface UdfClaimResponse {
@@ -294,6 +302,7 @@ export interface UdfCompleteItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  prepared_input_revision?: number;
   input_revision?: number;
   vector?: number[];
   vectors?: number[][];
@@ -326,7 +335,7 @@ export interface UdfItemsResponse {
 export interface UdfCompletionOutcome {
   [key: string]: unknown;
   index: number;
-  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "ownership_lost_before_ack" | "source_absent";
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "prepared_owner_changed" | "ownership_lost_before_ack" | "source_absent";
   disposition: "completed" | "reclaim" | "discard" | "stop";
 }
 
@@ -1183,7 +1192,7 @@ export interface SearchPerformance {
 
 export interface Error {
   [key: string]: unknown;
-  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "ownership_lost_before_ack" | "source_absent";
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "prepared_owner_changed" | "ownership_lost_before_ack" | "source_absent";
   disposition?: "reclaim" | "discard" | "stop";
   error: string;
   message: string;

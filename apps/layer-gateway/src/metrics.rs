@@ -2759,7 +2759,10 @@ impl UdfStore for MetricsUdfStore {
         self.inner.finish_discovery(lease, success).await
     }
 
-    async fn lock_namespaces(&self, namespaces: &[String]) -> Result<Box<dyn Send>, UdfStoreError> {
+    async fn lock_namespaces(
+        &self,
+        namespaces: &[String],
+    ) -> Result<Box<dyn layer_transform::udf::UdfNamespaceLock>, UdfStoreError> {
         self.inner.lock_namespaces(namespaces).await
     }
     async fn observe_input(
@@ -2771,6 +2774,34 @@ impl UdfStore for MetricsUdfStore {
     ) -> Result<bool, UdfStoreError> {
         self.inner
             .observe_input(udf_id, namespace, document_id, digest)
+            .await
+    }
+    async fn observe_inputs(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        inputs: &[(String, String)],
+    ) -> Result<Vec<bool>, UdfStoreError> {
+        self.inner.observe_inputs(udf_id, namespace, inputs).await
+    }
+    async fn prepare_completion_dispositions(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        intents: &[crate::udf::UdfCompletionIntent],
+    ) -> Result<Vec<Result<bool, crate::udf::CompletionConflictReason>>, UdfStoreError> {
+        self.inner
+            .prepare_completion_dispositions(udf_id, worker_id, intents)
+            .await
+    }
+    async fn complete_item_dispositions(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        items: &[UdfItemKey],
+    ) -> Result<Vec<Result<u64, crate::udf::CompletionConflictReason>>, UdfStoreError> {
+        self.inner
+            .complete_item_dispositions(udf_id, worker_id, items)
             .await
     }
     async fn capture_input(
@@ -2794,6 +2825,16 @@ impl UdfStore for MetricsUdfStore {
         self.inner
             .validate_completion(udf_id, worker_id, items, revisions)
             .await
+    }
+    async fn prepared_receipt(
+        &self,
+        udf_id: &str,
+        key: &UdfItemKey,
+    ) -> Result<Option<crate::udf::UdfPreparedReceipt>, UdfStoreError> {
+        self.inner.prepared_receipt(udf_id, key).await
+    }
+    async fn invalidate_namespace_receipts(&self, namespace: &str) -> Result<(), UdfStoreError> {
+        self.inner.invalidate_namespace_receipts(namespace).await
     }
     async fn prepare_completion(
         &self,

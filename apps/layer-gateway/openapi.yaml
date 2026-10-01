@@ -4346,6 +4346,7 @@ components:
           - claim_not_owned
           - prepared_receipt_mismatch
           - prepared_source_changed
+          - prepared_owner_changed
           - ownership_lost_before_ack
           - source_absent
           description: Bounded Function completion conflict reason (HTTP 409).
