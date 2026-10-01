@@ -239,6 +239,7 @@ async fn prepare_write_profiles(
             }
             has_embed_schema = true;
             let mut parsed = validate_embed(&attribute, embed)?;
+            parsed.declaration = Some(embed.clone());
             let previous = profiles
                 .iter()
                 .find(|profile| profile.source == attribute)
@@ -520,6 +521,55 @@ pub(crate) async fn declared_embed_sources(
         .collect())
 }
 
+/// Reattach gateway-served declarations stripped before the store write.
+/// Older S3 profiles predate `declaration`; reconstruct their supported form.
+pub(crate) async fn annotate_schema(
+    state: &AppState,
+    namespace: &str,
+    schema: &mut Value,
+) -> Result<(), AppError> {
+    let profiles = load_profiles(state, namespace).await?;
+    let Some(attrs) = schema.as_object_mut() else {
+        return Ok(());
+    };
+    for profile in profiles {
+        if !profile
+            .serving
+            .gateway_served(EmbedStore::for_namespace(state, namespace))
+        {
+            continue;
+        }
+        let declaration = profile.declaration.clone().unwrap_or_else(|| {
+            let mut embed = json!({
+                "model": profile.model,
+                "attribute": profile.target,
+                "modality": profile.modality,
+                "serving": {"prefer": profile.serving},
+            });
+            if let Some(dims) = profile.dims {
+                embed["dims"] = json!(dims);
+            }
+            if let Some(revision) = &profile.revision {
+                embed["revision"] = json!(revision);
+            }
+            if profile.instructions != EmbeddingInstructions::default() {
+                embed["instructions"] = json!(profile.instructions);
+            }
+            if let Some(chunk) = &profile.chunk {
+                embed["chunk"] = json!(chunk);
+            }
+            embed
+        });
+        let attr = attrs
+            .entry(profile.source)
+            .or_insert_with(|| json!({"type":"string"}));
+        if let Some(attr) = attr.as_object_mut() {
+            attr.insert("embed".into(), declaration);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn metadata_has_embed_schema(metadata: &Value) -> bool {
     metadata
         .get("schema")
@@ -673,7 +723,7 @@ async fn prepare_rank_by(
             profile.serving.label(),
         );
     }
-    if target.starts_with("embed_") && explicit_model.is_none() {
+    if target.starts_with("embed_") && explicit_model.is_none() && declared.is_none() {
         return Err(AppError::Validation(
             "a model name must be provided".to_string(),
         ));

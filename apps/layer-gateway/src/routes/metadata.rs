@@ -88,6 +88,9 @@ pub async fn get_namespace_metadata(
 
     body.entry("id")
         .or_insert_with(|| Value::String(namespace.clone()));
+    if let Some(schema) = body.get_mut("schema") {
+        crate::routes::embed_wire::annotate_schema(&state, &namespace, schema).await?;
+    }
 
     let marker_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
         .await

@@ -929,7 +929,8 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         )
         .route(
             "/v1/namespaces/{namespace}/schema",
-            get(routes::turbopuffer::passthrough_get).post(routes::turbopuffer::passthrough_post),
+            get(routes::turbopuffer::get_namespace_schema)
+                .post(routes::turbopuffer::passthrough_post),
         )
         .route(
             "/v1/namespaces/{namespace}/query",

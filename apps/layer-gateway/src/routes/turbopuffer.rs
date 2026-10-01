@@ -18,6 +18,31 @@ pub async fn passthrough_get(
     passthrough(state, "GET", uri.path(), uri.query(), None).await
 }
 
+pub async fn get_namespace_schema(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Response, AppError> {
+    let mut response = state
+        .turbopuffer()
+        .passthrough("GET", uri.path(), uri.query(), None)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "namespace schema"))?;
+    if (200..300).contains(&response.status) {
+        let mut schema: Value = serde_json::from_slice(&response.body)
+            .map_err(|e| AppError::Upstream(format!("invalid namespace schema: {e}")))?;
+        let attrs = if schema.get("schema").is_some_and(Value::is_object) {
+            schema.get_mut("schema").expect("checked schema object")
+        } else {
+            &mut schema
+        };
+        crate::routes::embed_wire::annotate_schema(&state, &namespace, attrs).await?;
+        response.body = serde_json::to_vec(&schema)
+            .map_err(|e| AppError::Upstream(format!("serialize namespace schema: {e}")))?;
+    }
+    passthrough_response(response)
+}
+
 pub async fn passthrough_post(
     State(state): State<Arc<AppState>>,
     OriginalUri(uri): OriginalUri,

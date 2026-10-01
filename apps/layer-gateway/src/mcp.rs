@@ -279,17 +279,8 @@ impl McpHandler {
         let mut metadata = metadata.raw;
         // The gateway holds profiles for stores that do not retain `embed` in
         // their wire schema. Reuse the same persisted Index configuration as /search.
-        for source in
-            crate::routes::embed_wire::declared_embed_sources(&self.state, &ns.name).await?
-        {
-            if let Some(attrs) = metadata.get_mut("schema").and_then(Value::as_object_mut) {
-                let attr = attrs
-                    .entry(source)
-                    .or_insert_with(|| json!({"type":"string"}));
-                if let Some(attr) = attr.as_object_mut() {
-                    attr.insert("embed".into(), json!({}));
-                }
-            }
+        if let Some(schema) = metadata.get_mut("schema") {
+            crate::routes::embed_wire::annotate_schema(&self.state, &ns.name, schema).await?;
         }
         NamespaceSchema::from_metadata(ns, &metadata)
     }
