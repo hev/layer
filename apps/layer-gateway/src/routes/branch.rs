@@ -258,7 +258,6 @@ pub(crate) async fn branch_or_copy(
     } else {
         None
     };
-
     crate::run_guarded_write(_function_guard.as_deref(), async {
         let query = strip_overload(uri.query());
         let upstream = match state

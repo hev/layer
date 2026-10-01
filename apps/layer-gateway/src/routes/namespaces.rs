@@ -101,7 +101,6 @@ pub async fn delete_namespace(
     } else {
         None
     };
-
     crate::run_guarded_write(_function_guard.as_deref(), async {
         let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
 

@@ -2765,6 +2765,9 @@ impl UdfStore for MetricsUdfStore {
     ) -> Result<Box<dyn layer_transform::udf::UdfNamespaceLock>, UdfStoreError> {
         self.inner.lock_namespaces(namespaces).await
     }
+    async fn invalidate_namespace_receipts(&self, namespace: &str) -> Result<(), UdfStoreError> {
+        self.inner.invalidate_namespace_receipts(namespace).await
+    }
     async fn observe_input(
         &self,
         udf_id: &str,
@@ -2804,6 +2807,16 @@ impl UdfStore for MetricsUdfStore {
             .complete_item_dispositions(udf_id, worker_id, items)
             .await
     }
+    async fn observe_absent_inputs(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .observe_absent_inputs(udf_id, namespace, ids)
+            .await
+    }
     async fn capture_input(
         &self,
         udf_id: &str,
@@ -2832,9 +2845,6 @@ impl UdfStore for MetricsUdfStore {
         key: &UdfItemKey,
     ) -> Result<Option<crate::udf::UdfPreparedReceipt>, UdfStoreError> {
         self.inner.prepared_receipt(udf_id, key).await
-    }
-    async fn invalidate_namespace_receipts(&self, namespace: &str) -> Result<(), UdfStoreError> {
-        self.inner.invalidate_namespace_receipts(namespace).await
     }
     async fn prepare_completion(
         &self,
