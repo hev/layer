@@ -1690,8 +1690,20 @@ fn pg_status<T>(result: &Result<T, PipelineStoreError>) -> &'static str {
 fn udf_pg_status<T>(result: &Result<T, UdfStoreError>) -> &'static str {
     match result {
         Ok(_) => STATUS_OK,
-        Err(UdfStoreError::Database(_)) => STATUS_PG_ERROR,
+        Err(UdfStoreError::Database(_) | UdfStoreError::QueueFailure { .. }) => STATUS_PG_ERROR,
         Err(_) => STATUS_LAYER_ERROR,
+    }
+}
+
+#[cfg(feature = "pro")]
+fn udf_error_kind<T>(result: &Result<T, UdfStoreError>) -> &'static str {
+    match result {
+        Err(UdfStoreError::Database(_)) => "database",
+        Err(UdfStoreError::QueueFailure { kind, .. }) => kind.as_str(),
+        Err(UdfStoreError::CompletionConflict(_)) => "completion_conflict",
+        Err(UdfStoreError::Conflict(_)) => "conflict",
+        Err(UdfStoreError::NotFound(_)) => "not_found",
+        Ok(_) => "none",
     }
 }
 
@@ -2771,14 +2783,42 @@ impl UdfStore for MetricsUdfStore {
         &self,
         id: &str,
     ) -> Result<Option<crate::udf::UdfDiscoveryLease>, UdfStoreError> {
-        self.inner.claim_discovery(id).await
+        let start = Instant::now();
+        let result = self.inner.claim_discovery(id).await;
+        self.metrics.observe_pg_query(
+            "claim_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "claim_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
 
     async fn renew_discovery(
         &self,
         lease: &crate::udf::UdfDiscoveryLease,
     ) -> Result<bool, UdfStoreError> {
-        self.inner.renew_discovery(lease).await
+        let start = Instant::now();
+        let result = self.inner.renew_discovery(lease).await;
+        self.metrics.observe_pg_query(
+            "renew_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "renew_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
 
     async fn finish_discovery(
@@ -2786,17 +2826,59 @@ impl UdfStore for MetricsUdfStore {
         lease: &crate::udf::UdfDiscoveryLease,
         success: bool,
     ) -> Result<(), UdfStoreError> {
-        self.inner.finish_discovery(lease, success).await
+        let start = Instant::now();
+        let result = self.inner.finish_discovery(lease, success).await;
+        self.metrics.observe_pg_query(
+            "finish_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "finish_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
 
     async fn lock_namespaces(
         &self,
         namespaces: &[String],
     ) -> Result<Box<dyn layer_transform::udf::UdfNamespaceLock>, UdfStoreError> {
-        self.inner.lock_namespaces(namespaces).await
+        let start = Instant::now();
+        let result = self.inner.lock_namespaces(namespaces).await;
+        self.metrics.observe_pg_query(
+            "lock_udf_namespaces",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "lock_udf_namespaces",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn invalidate_namespace_receipts(&self, namespace: &str) -> Result<(), UdfStoreError> {
-        self.inner.invalidate_namespace_receipts(namespace).await
+        let start = Instant::now();
+        let result = self.inner.invalidate_namespace_receipts(namespace).await;
+        self.metrics.observe_pg_query(
+            "invalidate_udf_namespace_receipts",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "invalidate_udf_namespace_receipts",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn observe_input(
         &self,
@@ -2805,9 +2887,21 @@ impl UdfStore for MetricsUdfStore {
         document_id: &str,
         digest: &str,
     ) -> Result<bool, UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .observe_input(udf_id, namespace, document_id, digest)
-            .await
+            .await;
+        self.metrics
+            .observe_pg_query("observe_udf_input", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_input",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn observe_inputs(
         &self,
@@ -2815,7 +2909,18 @@ impl UdfStore for MetricsUdfStore {
         namespace: &str,
         inputs: &[(String, String)],
     ) -> Result<Vec<bool>, UdfStoreError> {
-        self.inner.observe_inputs(udf_id, namespace, inputs).await
+        let start = Instant::now();
+        let result = self.inner.observe_inputs(udf_id, namespace, inputs).await;
+        self.metrics
+            .observe_pg_query("observe_udf_inputs", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn prepare_completion_dispositions(
         &self,
@@ -2823,9 +2928,24 @@ impl UdfStore for MetricsUdfStore {
         worker_id: &str,
         intents: &[crate::udf::UdfCompletionIntent],
     ) -> Result<Vec<Result<bool, crate::udf::CompletionConflictReason>>, UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .prepare_completion_dispositions(udf_id, worker_id, intents)
-            .await
+            .await;
+        self.metrics.observe_pg_query(
+            "prepare_udf_completion_batch",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "prepare_udf_completion_batch",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn complete_item_dispositions(
         &self,
@@ -2833,9 +2953,24 @@ impl UdfStore for MetricsUdfStore {
         worker_id: &str,
         items: &[UdfItemKey],
     ) -> Result<Vec<Result<u64, crate::udf::CompletionConflictReason>>, UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .complete_item_dispositions(udf_id, worker_id, items)
-            .await
+            .await;
+        self.metrics.observe_pg_query(
+            "ack_udf_completion_batch",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "ack_udf_completion_batch",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn observe_enqueue_page(
         &self,
@@ -2862,9 +2997,24 @@ impl UdfStore for MetricsUdfStore {
         namespace: &str,
         ids: &[String],
     ) -> Result<(), UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .observe_absent_inputs(udf_id, namespace, ids)
-            .await
+            .await;
+        self.metrics.observe_pg_query(
+            "observe_udf_absent_inputs",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_absent_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn capture_input(
         &self,
@@ -2873,9 +3023,46 @@ impl UdfStore for MetricsUdfStore {
         document_id: &str,
         digest: &str,
     ) -> Result<u64, UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .capture_input(udf_id, namespace, document_id, digest)
-            .await
+            .await;
+        self.metrics
+            .observe_pg_query("capture_udf_input", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "capture_udf_input",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn capture_claim_inputs(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        inputs: &[(UdfItemKey, String)],
+    ) -> Result<Vec<(u64, Option<crate::udf::UdfPreparedReceipt>)>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .capture_claim_inputs(udf_id, worker_id, inputs)
+            .await;
+        self.metrics.observe_pg_query(
+            "capture_udf_claim_inputs",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "capture_udf_claim_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn validate_completion(
         &self,
@@ -2884,16 +3071,45 @@ impl UdfStore for MetricsUdfStore {
         items: &[UdfItemKey],
         revisions: &[Option<u64>],
     ) -> Result<bool, UdfStoreError> {
-        self.inner
+        let start = Instant::now();
+        let result = self
+            .inner
             .validate_completion(udf_id, worker_id, items, revisions)
-            .await
+            .await;
+        self.metrics.observe_pg_query(
+            "validate_udf_completion",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "validate_udf_completion",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn prepared_receipt(
         &self,
         udf_id: &str,
         key: &UdfItemKey,
     ) -> Result<Option<crate::udf::UdfPreparedReceipt>, UdfStoreError> {
-        self.inner.prepared_receipt(udf_id, key).await
+        let start = Instant::now();
+        let result = self.inner.prepared_receipt(udf_id, key).await;
+        self.metrics.observe_pg_query(
+            "read_udf_prepared_receipt",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "read_udf_prepared_receipt",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
     }
     async fn prepare_completion(
         &self,
