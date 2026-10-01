@@ -34,6 +34,8 @@ impl McpRegistry {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServer {
+    #[serde(default, rename = "genericTools")]
+    pub generic_tools: bool,
     pub namespaces: Vec<McpNamespace>,
 }
 
@@ -64,6 +66,41 @@ impl McpNamespace {
     }
 }
 
+/// Keep small-server tool choice while bounding discovery metadata work.
+pub const PER_NAMESPACE_TOOL_THRESHOLD: usize = 8;
+pub const MAX_SERVER_NAMESPACES: usize = 512;
+
+impl McpServer {
+    fn generic_tools(&self) -> bool {
+        self.generic_tools || self.namespaces.len() > PER_NAMESPACE_TOOL_THRESHOLD
+    }
+}
+
+fn discovery_tool() -> Tool {
+    Tool::new(
+        "list_namespaces",
+        "List readable namespaces, tool names, descriptions, approximate row counts, search kinds, typed filters and source link attributes. Call this before choosing a namespace.",
+        json!({"type":"object","properties":{},"additionalProperties":false}).as_object().unwrap().clone(),
+    ).with_annotations(ToolAnnotations::new().read_only(true))
+}
+
+fn generic_tools() -> Vec<Tool> {
+    let search = json!({"type":"object","properties":{
+        "namespace":{"type":"string","minLength":1},
+        "query":{"type":"string","minLength":1},
+        "filters":{"type":"object","description":"Use the chosen namespace's typed filters from list_namespaces. Strings/booleans take exact values; numbers take min/max; dates take after/before."},
+        "limit":{"type":"integer","minimum":1,"maximum":50,"default":10}
+    },"required":["namespace","query"],"additionalProperties":false});
+    let get = json!({"type":"object","properties":{
+        "namespace":{"type":"string","minLength":1},
+        "id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]}
+    },"required":["namespace","id"],"additionalProperties":false});
+    [("search", "Search one readable namespace. Call list_namespaces for namespace names and filter types.", search),
+     ("get", "Fetch one record by id from a readable namespace. Call list_namespaces for namespace names.", get)]
+        .into_iter().map(|(name, description, schema)| Tool::new(name, description, schema.as_object().unwrap().clone())
+            .with_annotations(ToolAnnotations::new().read_only(true))).collect()
+}
+
 fn invalid(message: impl Into<String>) -> AppError {
     AppError::Validation(message.into())
 }
@@ -72,9 +109,12 @@ pub fn registry_from_json(raw: Option<&str>) -> Result<Arc<McpRegistry>, AppErro
     let registry: BTreeMap<String, McpServer> = serde_json::from_str(raw.unwrap_or("{}"))
         .map_err(|e| invalid(format!("invalid LAYER_MCP_JSON: {e}")))?;
     for (name, spec) in &registry {
-        if !valid_name(name, 64) || spec.namespaces.is_empty() || spec.namespaces.len() > 8 {
+        if !valid_name(name, 64)
+            || spec.namespaces.is_empty()
+            || spec.namespaces.len() > MAX_SERVER_NAMESPACES
+        {
             return Err(invalid(format!(
-                "MCP server `{name}` needs a valid name and 1–8 namespaces"
+                "MCP server `{name}` needs a valid name and 1–512 namespaces"
             )));
         }
         let mut namespaces = HashSet::new();
@@ -228,7 +268,14 @@ impl ServerHandler for McpHandler {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let mut tools = Vec::new();
+        let mut tools = vec![discovery_tool()];
+        if self.spec.generic_tools() {
+            tools.extend(generic_tools());
+            return Ok(ListToolsResult {
+                tools,
+                ..Default::default()
+            });
+        }
         for ns in &self.spec.namespaces {
             if self.authorize(ns).is_err() {
                 continue;
@@ -276,13 +323,16 @@ impl McpHandler {
             .head_namespace(&ns.name)
             .await
             .map_err(|e| AppError::from_turbopuffer(e, "MCP namespace schema read failed"))?;
+        let row_count = metadata.approx_row_count;
         let mut metadata = metadata.raw;
         // The gateway holds profiles for stores that do not retain `embed` in
         // their wire schema. Reuse the same persisted Index configuration as /search.
         if let Some(schema) = metadata.get_mut("schema") {
             crate::routes::embed_wire::annotate_schema(&self.state, &ns.name, schema).await?;
         }
-        NamespaceSchema::from_metadata(ns, &metadata)
+        let mut schema = NamespaceSchema::from_metadata(ns, &metadata)?;
+        schema.row_count = row_count;
+        Ok(schema)
     }
 
     async fn execute(
@@ -290,19 +340,96 @@ impl McpHandler {
         tool: &str,
         mut arguments: Map<String, Value>,
     ) -> Result<CallToolResult, AppError> {
-        let (search, suffix) = if let Some(suffix) = tool.strip_prefix("search_") {
-            (true, suffix)
-        } else if let Some(suffix) = tool.strip_prefix("get_") {
-            (false, suffix)
+        if tool == "list_namespaces" {
+            if !arguments.is_empty() {
+                return Err(invalid("list_namespaces takes no arguments"));
+            }
+            let mut namespaces = Vec::new();
+            let mut text = String::new();
+            for ns in &self.spec.namespaces {
+                if self.authorize(ns).is_err() {
+                    continue;
+                }
+                let schema = self.schema(ns).await?;
+                let kind = schema.search_kind()?;
+                let filters: Map<String, Value> = schema
+                    .filters
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            json!({"type":ty.name(),"inputSchema":ty.schema()}),
+                        )
+                    })
+                    .collect();
+                let tool_name = if self.spec.generic_tools() {
+                    "search".into()
+                } else {
+                    format!("search_{}", ns.tool_name())
+                };
+                let description = ns.description.as_deref().unwrap_or(&ns.name);
+                let filter_text = schema
+                    .filters
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {}", ty.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text.push_str(&format!(
+                    "\n{} ({tool_name}): {description}; ~{} rows; {kind}; filters: {}; link: {}",
+                    ns.name,
+                    schema.row_count,
+                    if filter_text.is_empty() {
+                        "none"
+                    } else {
+                        &filter_text
+                    },
+                    ns.link.as_deref().unwrap_or("none")
+                ));
+                namespaces.push(json!({"name":ns.name,"toolName":tool_name,"description":description,
+                    "rowCount":schema.row_count,"searchKind":kind,"filterableAttributes":filters,"linkAttribute":ns.link}));
+            }
+            let mut result = CallToolResult::structured(json!({"namespaces":namespaces}));
+            result.content = vec![ContentBlock::text(format!(
+                "{} readable namespace(s){text}",
+                namespaces.len()
+            ))];
+            return Ok(result);
+        }
+        let (search, ns) = if self.spec.generic_tools() {
+            let search = match tool {
+                "search" => true,
+                "get" => false,
+                _ => return Err(invalid("unknown MCP tool")),
+            };
+            let namespace = arguments
+                .remove("namespace")
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .ok_or_else(|| {
+                    invalid("namespace must be an exact namespace name from list_namespaces")
+                })?;
+            let ns = self
+                .spec
+                .namespaces
+                .iter()
+                .find(|ns| ns.name == namespace)
+                .ok_or_else(|| invalid("namespace is not a member of this MCP server"))?;
+            (search, ns)
         } else {
-            return Err(invalid("unknown MCP tool"));
+            let (search, suffix) = if let Some(suffix) = tool.strip_prefix("search_") {
+                (true, suffix)
+            } else if let Some(suffix) = tool.strip_prefix("get_") {
+                (false, suffix)
+            } else {
+                return Err(invalid("unknown MCP tool"));
+            };
+            let ns = self
+                .spec
+                .namespaces
+                .iter()
+                .find(|ns| ns.tool_name() == suffix)
+                .ok_or_else(|| invalid("unknown MCP tool"))?;
+            (search, ns)
         };
-        let ns = self
-            .spec
-            .namespaces
-            .iter()
-            .find(|ns| ns.tool_name() == suffix)
-            .ok_or_else(|| invalid("unknown MCP tool"))?;
         self.authorize(ns)?;
         let mut headers = self.headers.clone();
         // Existing history tags carry the source without a second history writer.
@@ -395,6 +522,7 @@ enum FilterType {
 }
 
 struct NamespaceSchema {
+    row_count: u64,
     filters: BTreeMap<String, FilterType>,
     text: Option<String>,
     fuzzy: bool,
@@ -472,11 +600,24 @@ impl NamespaceSchema {
             crate::routes::hybrid_text::attribute_fuzzy_enabled(metadata, field) == Some(true)
         });
         Ok(Self {
+            row_count: metadata
+                .get("approx_row_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             filters,
             fuzzy,
             text,
             embed: choose(embed),
         })
+    }
+
+    fn search_kind(&self) -> Result<&'static str, AppError> {
+        match (&self.text, &self.embed) {
+            (Some(_), Some(_)) => Ok("Auto"),
+            (Some(_), None) => Ok(if self.fuzzy { "HybridText" } else { "BM25" }),
+            (None, Some(_)) => Ok("ANN/Embed"),
+            _ => Err(invalid("MCP search requires an unambiguous full-text or embed attribute in the Index schema")),
+        }
     }
 
     fn rank_by(&self, query: &str) -> Result<Value, AppError> {
@@ -593,6 +734,16 @@ impl NamespaceSchema {
 }
 
 impl FilterType {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Boolean => "boolean",
+            Self::Number => "number",
+            Self::Integer => "integer",
+            Self::Date => "datetime",
+        }
+    }
+
     fn schema(&self) -> Value {
         match self {
             Self::String => json!({"type":"string"}),
@@ -659,23 +810,27 @@ mod tests {
             &json!({"schema":{"body":{"type":"string","full_text_search":true}}}),
         )
         .unwrap();
+        assert_eq!(text.search_kind().unwrap(), "BM25");
         assert_eq!(text.rank_by("q").unwrap(), json!(["body", "BM25", "q"]));
         let vector = NamespaceSchema::from_metadata(
             &ns(),
             &json!({"schema":{"body":{"type":"string","embed":{"model":"test"}}}}),
         )
         .unwrap();
+        assert_eq!(vector.search_kind().unwrap(), "ANN/Embed");
         assert_eq!(
             vector.rank_by("q").unwrap(),
             json!(["body", "ANN", ["Embed", "q"]])
         );
         let both = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"body":{"type":"string","full_text_search":true,"embed":{"model":"test"}}}})).unwrap();
+        assert_eq!(both.search_kind().unwrap(), "Auto");
         assert_eq!(
             both.rank_by("q").unwrap(),
             json!(["body","Auto","q",{"vector":["Embed","q",{"field":"body"}],"fuzziness":0}])
         );
         let ambiguous = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"a":{"type":"string","full_text_search":true},"b":{"type":"string","full_text_search":true}}})).unwrap();
         assert!(ambiguous.rank_by("q").is_err());
+        assert!(ambiguous.search_kind().is_err());
     }
 
     #[test]
@@ -688,6 +843,10 @@ mod tests {
             }
             let schema = NamespaceSchema::from_metadata(&ns(), &metadata).unwrap();
             let rank = schema.rank_by("q").unwrap();
+            assert_eq!(
+                schema.search_kind().unwrap(),
+                if embed { "Auto" } else { "HybridText" }
+            );
             assert_eq!(rank[1], if embed { "Auto" } else { "HybridText" });
             assert!(rank
                 .get(3)

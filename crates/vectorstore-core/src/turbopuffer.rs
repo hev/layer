@@ -3544,6 +3544,33 @@ mod metadata_parse_tests {
     }
 
     #[test]
+    fn live_metadata_count_can_lag_while_index_is_up_to_date() {
+        // Synthetic live upstream response immediately after committing two
+        // rows, then again 30 seconds later. Stable indexing is not a count
+        // freshness guarantee; preserve the reported approximate count.
+        let mut body = json!({
+            "approx_logical_bytes": 0,
+            "approx_row_count": 0,
+            "encryption": {"mode": "default"},
+            "index": {"status": "up-to-date"},
+            "schema": {
+                "id": {"type": "string"},
+                "text": {"type": "string", "filterable": false,
+                         "full_text_search": {"tokenizer": "word_v4", "b": 0.75, "k1": 1.2}}
+            }
+        });
+        let fresh = parse_metadata_body(body.clone());
+        assert_eq!(fresh.approx_row_count, 0);
+        assert!(fresh.is_stable());
+        body["approx_row_count"] = json!(2);
+        body["approx_logical_bytes"] = json!(13);
+        let settled = parse_metadata_body(body);
+        assert_eq!(settled.approx_row_count, 2);
+        assert_eq!(settled.approx_logical_bytes, Some(13));
+        assert!(settled.is_stable());
+    }
+
+    #[test]
     fn updating_status_yields_updating_and_reads_nested_bytes() {
         let body = json!({
             "index": { "status": "updating", "unindexed_bytes": 4096u64 },
