@@ -1544,12 +1544,14 @@ impl TurbopufferClient for HttpTurbopufferClient {
         if wire_ids.is_empty() {
             return Ok(HashMap::new());
         }
+        // Canonical Function inputs and completion fences must observe committed
+        // source writes/deletions, just like a native strong ID lookup.
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": ids.len(),
             "filters": ["id", "In", wire_ids],
             "include_attributes": true,
-            "consistency": {"level": "eventual"},
+            "consistency": {"level": "strong"},
         });
 
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
