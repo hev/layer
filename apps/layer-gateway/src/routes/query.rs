@@ -229,6 +229,22 @@ pub(crate) async fn query_prepared(
                     .to_string(),
             )
         })?;
+        if native_metadata_order(&body) {
+            let response = state
+                .turbopuffer()
+                .passthrough("POST", &path, query.as_deref(), Some(body))
+                .await
+                .map_err(|error| AppError::from_turbopuffer(error, "Turbopuffer query failed"))?;
+            // Preserve ranked-query errors: origin 4xx/body/content type stay
+            // intact, origin 5xx and transport errors remain gateway 502.
+            if !(200..300).contains(&response.status) {
+                return Err(AppError::from_turbopuffer(
+                    TurbopufferError::Response(response),
+                    "Turbopuffer query failed",
+                ));
+            }
+            return crate::routes::turbopuffer::passthrough_response(response);
+        }
         return crate::routes::turbopuffer::passthrough(
             state,
             "POST",
@@ -661,11 +677,31 @@ fn centroid(vectors: &[Vec<f64>]) -> Result<Vec<f64>, AppError> {
     Ok(sum)
 }
 
+fn native_metadata_order(body: &Value) -> bool {
+    let Some(obj) = body.as_object() else {
+        return false;
+    };
+    // Metadata ordering is native wire, even with top_k. Routing it through
+    // QueryRequest drops the caller's consistency and can inject a watermark,
+    // while Count already passes through. A census must use the same contract.
+    obj.get("rank_by")
+        .and_then(Value::as_array)
+        .is_some_and(|rank| {
+            rank.len() == 2
+                && rank[0].is_string()
+                && matches!(rank[1].as_str(), Some("asc" | "desc"))
+        })
+        && !["as_of", "between", "cursor", "vector", "nearest_to_id"]
+            .iter()
+            .any(|field| obj.contains_key(*field))
+}
+
 fn should_passthrough_query(body: &Value) -> bool {
     let Some(obj) = body.as_object() else {
         return false;
     };
-    (obj.contains_key("rank_by") && !obj.contains_key("top_k"))
+    native_metadata_order(body)
+        || (obj.contains_key("rank_by") && !obj.contains_key("top_k"))
         || obj.contains_key("queries")
         || obj.contains_key("aggregate_by")
         || obj.contains_key("group_by")
@@ -841,6 +877,29 @@ pub(crate) fn combined_filter(user: Option<&Value>, watermark: Option<u64>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_order_passthrough_keeps_layer_temporal_requests_typed() {
+        for direction in ["asc", "desc"] {
+            let native = json!({"rank_by": ["id", direction], "top_k": 1000,
+                                "consistency": {"level": "strong"}});
+            assert!(should_passthrough_query(&native));
+            for (field, value) in [
+                ("as_of", json!(123)),
+                ("between", json!([1, 123])),
+                ("cursor", json!("old-cursor")),
+                ("vector", json!([1.0])),
+                ("nearest_to_id", json!(["a"])),
+            ] {
+                let mut layered = native.clone();
+                layered[field] = value;
+                assert!(!should_passthrough_query(&layered));
+            }
+        }
+        assert!(!should_passthrough_query(
+            &json!({"rank_by": ["vector", "ANN", [1.0]], "top_k": 10})
+        ));
+    }
 
     #[test]
     fn no_filter_no_watermark_yields_none() {

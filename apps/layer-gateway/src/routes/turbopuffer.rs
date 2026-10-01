@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
+use crate::clients::turbopuffer::TurbopufferPassthroughResponse;
 use crate::error::AppError;
 use crate::AppState;
 
@@ -89,6 +90,12 @@ pub async fn passthrough(
         .await
         .map_err(|e| AppError::Upstream(format!("Turbopuffer passthrough failed: {}", e)))?;
 
+    passthrough_response(response)
+}
+
+pub(crate) fn passthrough_response(
+    response: TurbopufferPassthroughResponse,
+) -> Result<Response, AppError> {
     let status = StatusCode::from_u16(response.status)
         .map_err(|e| AppError::Upstream(format!("invalid Turbopuffer status: {}", e)))?;
     let mut builder = Response::builder().status(status);
