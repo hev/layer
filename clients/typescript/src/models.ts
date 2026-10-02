@@ -516,7 +516,9 @@ export interface TurbopufferMetadataPatch {
 
 export interface PutPipelineRowsRequest {
   [key: string]: unknown;
-  upsert_rows: Record<string, unknown>[];
+  patch_condition?: unknown;
+  patch_rows?: Record<string, unknown>[];
+  upsert_rows?: Record<string, unknown>[];
   schema?: Record<string, unknown>;
   distance_metric?: "cosine_distance" | "euclidean_squared";
 }

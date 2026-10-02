@@ -445,7 +445,9 @@ type TurbopufferMetadataPatch struct {
 }
 
 type PutPipelineRowsRequest struct {
-	UpsertRows []map[string]interface{} `json:"upsert_rows"`
+	PatchCondition interface{} `json:"patch_condition,omitempty"`
+	PatchRows []map[string]interface{} `json:"patch_rows,omitempty"`
+	UpsertRows []map[string]interface{} `json:"upsert_rows,omitempty"`
 	Schema map[string]interface{} `json:"schema,omitempty"`
 	DistanceMetric string `json:"distance_metric,omitempty"`
 }

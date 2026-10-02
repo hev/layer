@@ -452,7 +452,9 @@ class TurbopufferMetadataPatch(BaseModel):
 
 class PutPipelineRowsRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    upsert_rows: list[dict[str, Any]]
+    patch_condition: Any | None = None
+    patch_rows: list[dict[str, Any]] | None = None
+    upsert_rows: list[dict[str, Any]] | None = None
     schema: dict[str, Any] | None = None
     distance_metric: Literal["cosine_distance", "euclidean_squared"] | None = None
 

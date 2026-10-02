@@ -3284,6 +3284,8 @@ fn mock_id_to_string(value: &Value) -> String {
 /// JSON attribute key used by the gateway to stamp the server-assigned upsert
 /// timestamp (epoch ms, u64). Filterable in Turbopuffer.
 pub const UPSERTED_AT_ATTR: &str = "_hevlayer_upserted_at";
+/// Collision-resistant row revision shared by gateway and Function writers.
+pub const WRITE_REVISION_ATTR: &str = "_hevlayer_write_revision";
 
 /// Deterministic per-id pseudo-score used by the mock's `ranked_query` so
 /// score-band pagination tests can assert behavior without a real ranker.

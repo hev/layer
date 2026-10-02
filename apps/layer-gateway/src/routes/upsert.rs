@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::auth::CallerGrant;
 use crate::clients::turbopuffer::{
-    PatchDoc, TurbopufferPassthroughResponse, UpsertDoc, UPSERTED_AT_ATTR,
+    PatchDoc, TurbopufferPassthroughResponse, UpsertDoc, UPSERTED_AT_ATTR, WRITE_REVISION_ATTR,
 };
 use crate::consistency::now_ms;
 use crate::error::AppError;
@@ -162,6 +162,15 @@ pub(crate) async fn write_namespace(
     };
     crate::run_guarded_write(_function_guard.as_deref(), async {
 
+    #[cfg(feature = "pro")]
+    let page_patch = staged_rows && body.get("patch_rows").is_some();
+    #[cfg(not(feature = "pro"))]
+    let page_patch = false;
+    #[cfg(feature = "pro")]
+    if page_patch && !crate::routes::pipeline::expand_page_patch(&state, &namespace, &mut body).await? {
+        return Ok((StatusCode::OK, axum::Json(serde_json::json!({"rows_affected":0,"rows_patched":0}))).into_response());
+    }
+
     if state.turbopuffer().requires_native_wire(&namespace) {
         // RFC 0118: the gateway serves schema `embed` for a store that cannot
         // embed. Vectors are computed before the store's transaction, so a
@@ -268,11 +277,11 @@ pub(crate) async fn write_namespace(
         .await
         .map_err(|e| AppError::from_turbopuffer(e, "namespace marker read failed"))?
         .unwrap_or(state.shard_count);
-    let mut plan = native_write_plan(
-        &mut body,
-        effective_shard_count,
-        embed.generated_chunk_attributes || staged_rows,
-    )?;
+    let mut plan = if page_patch {
+        native_write_plan_with_trusted_attrs(&mut body, effective_shard_count, true, true)?
+    } else {
+        native_write_plan(&mut body, effective_shard_count, embed.generated_chunk_attributes || staged_rows)?
+    };
     if !plan.is_managed() {
         let response = crate::routes::turbopuffer::passthrough(
             Arc::clone(&state),
@@ -432,6 +441,13 @@ pub(crate) async fn write_namespace(
         metric_batch_size,
     );
 
+    if page_patch {
+        let mut response: Value = serde_json::from_slice(&upstream.body).map_err(|_| AppError::Upstream("invalid page replay write response".into()))?;
+        let count = response.get("rows_upserted").cloned().unwrap_or(Value::from(0));
+        response.as_object_mut().unwrap().remove("rows_upserted");
+        response["rows_patched"] = count;
+        upstream.body = serde_json::to_vec(&response).map_err(|_| AppError::Upstream("page replay response encoding failed".into()))?;
+    }
     passthrough_response(upstream)
     }).await
 }
@@ -579,6 +595,15 @@ fn native_write_plan(
     shard_count: u64,
     allow_chunk_attributes: bool,
 ) -> Result<NativeWritePlan, AppError> {
+    native_write_plan_with_trusted_attrs(body, shard_count, allow_chunk_attributes, false)
+}
+
+fn native_write_plan_with_trusted_attrs(
+    body: &mut Value,
+    shard_count: u64,
+    allow_chunk_attributes: bool,
+    trusted_attrs: bool,
+) -> Result<NativeWritePlan, AppError> {
     let Some(obj) = body.as_object_mut() else {
         return Ok(NativeWritePlan::default());
     };
@@ -603,6 +628,7 @@ fn native_write_plan(
             &stamp_value,
             shard_count,
             allow_chunk_attributes,
+            trusted_attrs,
             &mut plan,
         )?;
     }
@@ -650,6 +676,7 @@ fn enrich_upsert_rows(
     stamp_value: &Value,
     shard_count: u64,
     allow_chunk_attributes: bool,
+    trusted_attrs: bool,
     plan: &mut NativeWritePlan,
 ) -> Result<(), AppError> {
     let rows = rows.as_array_mut().ok_or_else(|| {
@@ -661,11 +688,12 @@ fn enrich_upsert_rows(
         })?;
         reject_removed_blob_write(row)?;
         reject_reserved_attribute_names(row.keys().filter(|name| {
-            !allow_chunk_attributes
-                || !matches!(
-                    name.as_str(),
-                    "_hevlayer_parent_id" | "_hevlayer_chunk_index"
-                )
+            !trusted_attrs
+                && (!allow_chunk_attributes
+                    || !matches!(
+                        name.as_str(),
+                        "_hevlayer_parent_id" | "_hevlayer_chunk_index"
+                    ))
         }))?;
         let id = row_id(row, "upsert_rows")?;
         stamp_row(row, &id, stamp_value, shard_count);
@@ -726,6 +754,14 @@ fn enrich_upsert_columns(
         Value::Array(vec![stamp_value.clone(); ids.len()]),
     );
     columns.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::Array(
+            ids.iter()
+                .map(|_| Value::String(uuid::Uuid::new_v4().to_string()))
+                .collect(),
+        ),
+    );
+    columns.insert(
         SHARD_ATTR.to_string(),
         Value::Array(
             ids.iter()
@@ -772,6 +808,14 @@ fn enrich_patch_columns(
         Value::Array(vec![stamp_value.clone(); ids.len()]),
     );
     columns.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::Array(
+            ids.iter()
+                .map(|_| Value::String(uuid::Uuid::new_v4().to_string()))
+                .collect(),
+        ),
+    );
+    columns.insert(
         SHARD_ATTR.to_string(),
         Value::Array(
             ids.iter()
@@ -808,11 +852,19 @@ fn enrich_patch_by_filter(
     }
     reject_reserved_attribute_names(patch.keys())?;
     patch.insert(UPSERTED_AT_ATTR.to_string(), stamp_value.clone());
+    patch.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
     Ok(Some(row_attributes(patch)))
 }
 
 fn stamp_row(row: &mut Map<String, Value>, id: &str, stamp_value: &Value, shard_count: u64) {
     row.insert(UPSERTED_AT_ATTR.to_string(), stamp_value.clone());
+    row.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
     row.insert(
         SHARD_ATTR.to_string(),
         Value::from(shard_for_id(id, shard_count)),
