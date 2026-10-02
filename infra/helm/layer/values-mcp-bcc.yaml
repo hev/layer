@@ -1,0 +1,49 @@
+{
+  "gateway": {
+    "mcp": {
+      "enabled": true,
+      "allowedHosts": "mcp.hevlayer.com,aws-us-east-1.hevlayer.com",
+      "servers": {
+        "bcc": {
+          "namespaces": [
+            {
+              "name": "pov-bcc-pages",
+              "toolName": "documents",
+              "description": "BCC documents",
+              "filters": [
+                "job",
+                "doc_type",
+                "company",
+                "folder_1",
+                "folder_2",
+                "job_stage",
+                "region"
+              ],
+              "link": "webUrl"
+            },
+            {
+              "name": "pov-bcc-photos",
+              "toolName": "photos",
+              "description": "BCC photos",
+              "filters": [
+                "job",
+                "company",
+                "folder_1",
+                "folder_2",
+                "job_stage",
+                "region"
+              ],
+              "link": "webUrl"
+            }
+          ],
+          "host": "mcp.hevlayer.com"
+        }
+      }
+    }
+  },
+  "mcpIngress": {
+    "enabled": true,
+    "host": "mcp.hevlayer.com",
+    "certificateArn": "arn:aws:acm:us-east-1:186219257916:certificate/3515d949-6eee-443c-b2f1-ae952476a124"
+  }
+}

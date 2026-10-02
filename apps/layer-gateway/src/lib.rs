@@ -749,6 +749,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
     #[allow(unused_mut)]
     let mut router = router.route("/v2/license", get(open_gateway_license));
 
+    let host_routes = mcp.clone().filter(|registry| registry.has_host_routes());
     if let Some(registry) = mcp {
         router = router
             .route("/mcp/{name}", post(mcp::handle))
@@ -1070,10 +1071,20 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             auth::require_api_key,
         ));
 
-    public
+    let app = public
         .merge(router)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    if let Some(registry) = host_routes {
+        Router::new()
+            .fallback_service(app)
+            .layer(axum::middleware::from_fn_with_state(
+                registry,
+                mcp::route_host,
+            ))
+    } else {
+        app
+    }
 }
 
 #[cfg(not(feature = "pro"))]

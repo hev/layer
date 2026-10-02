@@ -16,6 +16,10 @@ priorityClasses:
 gateway:
   image: ""  # required — customer pull path: hevlayer/layer-gateway-pro:<version>
   port: 8080
+  mcp:
+    enabled: false
+    allowedHosts: ""
+    servers: {}
   replicas: 1
   # Anonymous gateway telemetry (docs: /docs/observability#telemetry). Set
   # false for CI, test and internal clusters so they don't show up in install
@@ -523,3 +527,8 @@ workerLabels:
   pipelineIdKey: "layer.hev.dev/pipeline-id"
   componentKey: "layer.hev.dev/component"
   componentValue: "worker"
+
+mcpIngress:
+  enabled: false
+  host: mcp.hevlayer.com
+  certificateArn: ""

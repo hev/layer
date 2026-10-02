@@ -26,6 +26,10 @@ pub struct McpRegistry {
 }
 
 impl McpRegistry {
+    pub fn has_host_routes(&self) -> bool {
+        self.servers.values().any(|server| server.host.is_some())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.servers.is_empty()
     }
@@ -34,6 +38,8 @@ impl McpRegistry {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServer {
+    /// Optional dedicated host serving this server at `/<name>`.
+    pub host: Option<String>,
     #[serde(default, rename = "genericTools")]
     pub generic_tools: bool,
     pub namespaces: Vec<McpNamespace>,
@@ -116,6 +122,17 @@ pub fn registry_from_json(raw: Option<&str>) -> Result<Arc<McpRegistry>, AppErro
             return Err(invalid(format!(
                 "MCP server `{name}` needs a valid name and 1–512 namespaces"
             )));
+        }
+        if let Some(host) = &spec.host {
+            if host.is_empty()
+                || !host
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+            {
+                return Err(invalid(
+                    "MCP dedicated host must be an explicit DNS hostname",
+                ));
+            }
         }
         let mut namespaces = HashSet::new();
         let mut tools = HashSet::new();
@@ -202,6 +219,40 @@ fn config_list(value: &str) -> Result<Vec<String>, AppError> {
         ));
     }
     Ok(entries)
+}
+
+/// Rewrite before routing and auth so both surfaces use identical authorization.
+pub async fn route_host(
+    State(registry): State<Arc<McpRegistry>>,
+    mut request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.method() == axum::http::Method::POST {
+        let host = request
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok());
+        let name = request.uri().path().strip_prefix('/').unwrap_or("");
+        if let Some(expected) = registry
+            .servers
+            .get(name)
+            .and_then(|server| server.host.as_deref())
+        {
+            if Some(expected) != host {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+            let query = request
+                .uri()
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            // Names are validated at registry construction; query is already a valid URI.
+            *request.uri_mut() = format!("/mcp/{name}{query}")
+                .parse()
+                .expect("valid MCP alias URI");
+        }
+    }
+    next.run(request).await
 }
 
 pub async fn handle(
