@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use crate::auth::CallerGrant;
+use crate::routes::namespaces::{authorized_namespace_page, ListNamespacesQuery};
 use axum::body::Body;
-use axum::extract::{OriginalUri, Path, State};
+use axum::extract::{OriginalUri, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde_json::Value;
 
 use crate::clients::turbopuffer::TurbopufferPassthroughResponse;
@@ -14,7 +16,18 @@ use crate::AppState;
 pub async fn passthrough_get(
     State(state): State<Arc<AppState>>,
     OriginalUri(uri): OriginalUri,
+    grant: Option<Extension<CallerGrant>>,
 ) -> Result<Response, AppError> {
+    if uri.path() == "/v1/namespaces" {
+        let Query(params) = match Query::<ListNamespacesQuery>::try_from_uri(&uri) {
+            Ok(params) => params,
+            Err(rejection) => return Ok(rejection.into_response()),
+        };
+        return Ok(Json(
+            authorized_namespace_page(&state, &params, grant.as_ref().map(|g| &g.0)).await?,
+        )
+        .into_response());
+    }
     passthrough(state, "GET", uri.path(), uri.query(), None).await
 }
 

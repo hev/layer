@@ -41,6 +41,17 @@ pub enum CallerGrant {
     Declared(Vec<ApiScope>),
 }
 
+pub fn can_list_store(_state: &AppState, grant: Option<&CallerGrant>) -> bool {
+    match grant {
+        None => true,
+        Some(CallerGrant::Declared(scopes)) => scopes.contains(&ApiScope::Admin) || scopes.contains(&ApiScope::Read),
+    }
+}
+
+pub fn can_list_namespace(state: &AppState, grant: Option<&CallerGrant>, namespace: &str) -> bool {
+    authorize_namespace(state, grant, ApiScope::Read, namespace).is_ok()
+}
+
 /// Require `scope` on `namespace` for the caller. `None` (open or
 /// `deriveFromStore` mode) allows.
 pub fn authorize_namespace(

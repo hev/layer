@@ -20,8 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::auth::{authorize_namespace, can_list_namespace, can_list_store, ApiScope, CallerGrant};
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,7 +47,7 @@ fn checkpoint_s3_prefix(namespace: &str) -> String {
     format!("checkpoints/{namespace}/")
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ListNamespacesQuery {
     pub prefix: Option<String>,
     pub cursor: Option<String>,
@@ -56,13 +57,21 @@ pub struct ListNamespacesQuery {
 pub async fn list_namespaces(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListNamespacesQuery>,
+    grant: Option<Extension<CallerGrant>>,
 ) -> Result<Json<NamespaceList>, AppError> {
     let cache_key = cache_key_from(&params);
+    // The shared cache is only safe for unrestricted callers.
+    let unrestricted = match grant.as_ref().map(|grant| &grant.0) {
+        None | Some(CallerGrant::Declared(_)) => true,
+        #[cfg(feature = "pro")]
+        Some(CallerGrant::Minted(_)) => false,
+    };
+    let cache_enabled = unrestricted && !state.namespace_list_cache_ttl.is_zero();
 
     // Fast path: a fresh cached response covers the same query exactly. The
     // TTL is intentionally short (default 10s) so the dashboard still feels
     // live without N × per-namespace metadata calls per refresh.
-    if !state.namespace_list_cache_ttl.is_zero() {
+    if cache_enabled {
         if let Some(entry) = state.namespace_list_cache.get(&cache_key) {
             let (cached_at, list) = entry.value();
             if cached_at.elapsed() < state.namespace_list_cache_ttl {
@@ -71,9 +80,9 @@ pub async fn list_namespaces(
         }
     }
 
-    let response = fetch_namespace_list(&state, &params).await?;
+    let response = fetch_namespace_list(&state, &params, grant.as_ref().map(|g| &g.0)).await?;
 
-    if !state.namespace_list_cache_ttl.is_zero() {
+    if cache_enabled {
         state
             .namespace_list_cache
             .insert(cache_key, (Instant::now(), response.clone()));
@@ -301,23 +310,9 @@ fn cache_key_from(params: &ListNamespacesQuery) -> String {
 async fn fetch_namespace_list(
     state: &Arc<AppState>,
     params: &ListNamespacesQuery,
+    grant: Option<&CallerGrant>,
 ) -> Result<NamespaceList, AppError> {
-    let upstream_query = build_upstream_query(params);
-    let upstream = state
-        .turbopuffer()
-        .passthrough("GET", "/v1/namespaces", upstream_query.as_deref(), None)
-        .await
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list: {}", e)))?;
-
-    if upstream.status >= 400 {
-        return Err(AppError::Upstream(format!(
-            "Turbopuffer namespace list returned {}",
-            upstream.status
-        )));
-    }
-
-    let body: Value = serde_json::from_slice(&upstream.body)
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list parse: {}", e)))?;
+    let body = authorized_namespace_page(state, params, grant).await?;
 
     let names: Vec<String> = body
         .get("namespaces")
@@ -344,6 +339,92 @@ async fn fetch_namespace_list(
         namespaces: entries,
         next_cursor,
     })
+}
+
+/// Keep upstream cursors intact and scan through pages with no readable names.
+/// Filtering happens before metadata fanout or any caller-visible response.
+pub(crate) async fn authorized_namespace_page(
+    state: &AppState,
+    params: &ListNamespacesQuery,
+    grant: Option<&CallerGrant>,
+) -> Result<Value, AppError> {
+    if !can_list_store(state, grant) {
+        return Ok(serde_json::json!({"namespaces": [], "next_cursor": null}));
+    }
+    let mut params = params.clone();
+    let mut result: Option<Value> = None;
+    let mut seen = std::collections::HashSet::new();
+    if let Some(cursor) = &params.cursor {
+        seen.insert(cursor.clone());
+    }
+    loop {
+        let query = build_upstream_query(&params);
+        let upstream = state
+            .turbopuffer()
+            .passthrough("GET", "/v1/namespaces", query.as_deref(), None)
+            .await
+            .map_err(|e| AppError::from_turbopuffer(e, "namespace list"))?;
+        if upstream.status >= 400 {
+            return Err(AppError::from_turbopuffer(
+                TurbopufferError::Response(upstream),
+                "namespace list",
+            ));
+        }
+        let mut body: Value = serde_json::from_slice(&upstream.body)
+            .map_err(|e| AppError::Upstream(format!("namespace list parse: {e}")))?;
+        let items = body
+            .get_mut("namespaces")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| AppError::Upstream("namespace list missing namespaces array".into()))?;
+        items.retain(|item| {
+            item.as_str()
+                .or_else(|| item.get("id").and_then(Value::as_str))
+                .is_some_and(|name| {
+                    params
+                        .prefix
+                        .as_deref()
+                        .is_none_or(|prefix| name.starts_with(prefix))
+                        && can_list_namespace(state, grant, name)
+                        // v2 metadata and federated queries follow Index store
+                        // routing; discovery must not expose an unreadable target.
+                        && authorize_namespace(state, grant, ApiScope::Read, name).is_ok()
+                })
+        });
+        let empty = items.is_empty();
+        let cursor = body
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_owned);
+        if cursor.as_ref().is_some_and(|cursor| seen.contains(cursor)) {
+            return Err(AppError::Upstream(
+                "namespace list cursor did not advance".into(),
+            ));
+        }
+        if !empty {
+            if let Some(mut result) = result {
+                // Resume immediately before the next readable page. Looking
+                // ahead prevents a trailing denied-only page becoming an
+                // empty terminal response for a caller with more pages.
+                result["next_cursor"] = serde_json::to_value(&params.cursor)
+                    .map_err(|e| AppError::Upstream(e.to_string()))?;
+                return Ok(result);
+            }
+            result = Some(body.clone());
+        }
+        if cursor.is_none() {
+            let mut result = result.unwrap_or(body);
+            result["next_cursor"] = Value::Null;
+            return Ok(result);
+        }
+        let cursor = cursor.unwrap();
+        if !seen.insert(cursor.clone()) {
+            return Err(AppError::Upstream(
+                "namespace list cursor did not advance".into(),
+            ));
+        }
+        params.cursor = Some(cursor);
+    }
 }
 
 fn build_upstream_query(params: &ListNamespacesQuery) -> Option<String> {

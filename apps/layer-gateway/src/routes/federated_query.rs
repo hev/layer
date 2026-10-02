@@ -8,7 +8,7 @@ use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::auth::AuthenticatedApiKey;
+use crate::auth::{AuthenticatedApiKey, CallerGrant};
 use crate::error::AppError;
 use crate::models::QueryRequest;
 use crate::routes::hybrid_text::{
@@ -88,11 +88,12 @@ struct MergeDecision {
 pub async fn query(
     State(state): State<Arc<AppState>>,
     auth: Option<Extension<AuthenticatedApiKey>>,
+    grant: Option<Extension<CallerGrant>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
     let (response, stable_as_of, partial) =
-        execute_federated_query(state, auth, headers.clone(), body).await?;
+        execute_federated_query(state, auth, grant, headers.clone(), body).await?;
     let mut response_headers = HeaderMap::new();
     insert_optional_u64_header(
         &mut response_headers,
@@ -112,6 +113,7 @@ pub async fn query(
 pub(crate) async fn execute_federated_query(
     state: Arc<AppState>,
     auth: Option<Extension<AuthenticatedApiKey>>,
+    grant: Option<Extension<CallerGrant>>,
     _headers: HeaderMap,
     body: Value,
 ) -> Result<(Value, Option<u64>, bool), AppError> {
@@ -128,8 +130,13 @@ pub(crate) async fn execute_federated_query(
         ));
     }
 
-    let namespaces =
-        resolve_namespaces(&state, envelope.namespaces, auth.as_ref().map(|a| &a.0)).await?;
+    let namespaces = resolve_namespaces(
+        &state,
+        envelope.namespaces,
+        auth.as_ref().map(|a| &a.0),
+        grant.as_ref().map(|g| &g.0),
+    )
+    .await?;
     let top_k = top_k_from_body(&object)?;
     let per_namespace_limit = envelope
         .fusion
@@ -459,16 +466,17 @@ async fn resolve_namespaces(
     state: &AppState,
     namespaces: Option<Vec<String>>,
     auth: Option<&AuthenticatedApiKey>,
+    grant: Option<&CallerGrant>,
 ) -> Result<Vec<String>, AppError> {
     let all_namespaces = namespaces
         .as_ref()
         .map(|namespaces| namespaces.len() == 1 && namespaces[0] == "*")
         .unwrap_or(true);
     if all_namespaces {
-        let listed = list_all_upstream_namespaces(state).await?;
+        let listed = list_all_upstream_namespaces(state, grant).await?;
         let expanded: Vec<String> = listed
             .into_iter()
-            .filter(|namespace| namespace_allowed(auth, namespace))
+            .filter(|namespace| namespace_allowed(state, auth, grant, namespace))
             .collect();
         return validate_namespace_limit(expanded, state.federated_query_max_namespaces);
     }
@@ -487,7 +495,7 @@ async fn resolve_namespaces(
         ));
     }
     for namespace in &namespaces {
-        if !namespace_allowed(auth, namespace) {
+        if !namespace_allowed(state, auth, grant, namespace) {
             return Err(AppError::NamespaceNotInGrant {
                 namespace: namespace.clone(),
             });
@@ -523,65 +531,55 @@ fn validate_namespace_limit(
     Ok(deduped)
 }
 
-fn namespace_allowed(auth: Option<&AuthenticatedApiKey>, namespace: &str) -> bool {
-    auth.map(|auth| auth.allows_namespace(namespace))
-        .unwrap_or(true)
+fn namespace_allowed(
+    state: &AppState,
+    auth: Option<&AuthenticatedApiKey>,
+    grant: Option<&CallerGrant>,
+    namespace: &str,
+) -> bool {
+    if let Some(grant) = grant {
+        return crate::auth::authorize_namespace(
+            state,
+            Some(grant),
+            crate::auth::ApiScope::Read,
+            namespace,
+        )
+        .is_ok();
+    }
+    // Agent invocations retain their explicit agent entitlement contract.
+    auth.is_none_or(|auth| auth.allows_namespace(namespace))
 }
 
-async fn list_all_upstream_namespaces(state: &AppState) -> Result<Vec<String>, AppError> {
-    let mut cursor = None;
+async fn list_all_upstream_namespaces(
+    state: &AppState,
+    grant: Option<&CallerGrant>,
+) -> Result<Vec<String>, AppError> {
+    let mut params = super::namespaces::ListNamespacesQuery {
+        prefix: None,
+        cursor: None,
+        page_size: Some(1000),
+    };
     let mut names = Vec::new();
     loop {
-        let mut query = "page_size=1000".to_string();
-        if let Some(cursor) = cursor.as_deref() {
-            query.push_str("&cursor=");
-            query.push_str(&urlencode(cursor));
-        }
-        let upstream = state
-            .turbopuffer()
-            .passthrough("GET", "/v1/namespaces", Some(&query), None)
-            .await
-            .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list: {e}")))?;
-        if upstream.status >= 400 {
-            return Err(AppError::Upstream(format!(
-                "Turbopuffer namespace list returned {}",
-                upstream.status
-            )));
-        }
-        let body: Value = serde_json::from_slice(&upstream.body)
-            .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list parse: {e}")))?;
+        let body = super::namespaces::authorized_namespace_page(state, &params, grant).await?;
         if let Some(items) = body.get("namespaces").and_then(Value::as_array) {
             names.extend(items.iter().filter_map(|item| {
                 item.as_str()
-                    .map(str::to_string)
-                    .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+                    .map(str::to_owned)
+                    .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_owned))
             }));
         }
-        cursor = body
+        params.cursor = body
             .get("next_cursor")
             .and_then(Value::as_str)
-            .filter(|cursor| !cursor.is_empty())
-            .map(str::to_string);
-        if cursor.is_none() {
+            .map(str::to_owned);
+        if params.cursor.is_none() {
             break;
         }
     }
     names.sort();
     names.dedup();
     Ok(names)
-}
-
-fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(*byte as char)
-            }
-            _ => out.push_str(&format!("%{:02X}", byte)),
-        }
-    }
-    out
 }
 
 fn top_k_from_body(body: &Map<String, Value>) -> Result<u32, AppError> {

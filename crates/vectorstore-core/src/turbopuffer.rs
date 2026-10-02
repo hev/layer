@@ -2840,7 +2840,7 @@ async fn mock_passthrough(
     client: &MockTurbopufferClient,
     method: &str,
     path: &str,
-    _query: Option<&str>,
+    query: Option<&str>,
     body: Option<Value>,
 ) -> Result<Value, TurbopufferError> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
@@ -2848,9 +2848,26 @@ async fn mock_passthrough(
         ("GET", ["v1", "namespaces"]) => {
             let mut namespaces: Vec<String> = client.docs.read().await.keys().cloned().collect();
             namespaces.sort();
+            let url = reqwest::Url::parse(&format!("http://mock/?{}", query.unwrap_or_default()))
+                .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+            let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            if let Some(prefix) = params.get("prefix") {
+                namespaces.retain(|name| name.starts_with(prefix));
+            }
+            let offset = params
+                .get("cursor")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let page_size = params
+                .get("page_size")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1000)
+                .max(1);
+            let next = (offset.saturating_add(page_size) < namespaces.len())
+                .then(|| offset.saturating_add(page_size).to_string());
             Ok(serde_json::json!({
-                "namespaces": namespaces.into_iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
-                "next_cursor": null,
+                "namespaces": namespaces.into_iter().skip(offset).take(page_size).map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
+                "next_cursor": next,
             }))
         }
         ("POST", ["v2", "namespaces", namespace]) => {
