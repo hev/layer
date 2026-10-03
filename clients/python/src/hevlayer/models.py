@@ -900,7 +900,7 @@ class RoutingEcho(BaseModel):
 
 class QueryResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    rows: list[dict[str, Any]]
+    rows: list[dict[str, Any]] | None = None
     aggregations: dict[str, Any] | None = None
     aggregation_groups: list[dict[str, Any]] | None = None
     billing: dict[str, Any] | None = None

@@ -889,7 +889,7 @@ type RoutingEcho struct {
 }
 
 type QueryResponse struct {
-	Rows []map[string]interface{} `json:"rows"`
+	Rows []map[string]interface{} `json:"rows,omitempty"`
 	Aggregations map[string]interface{} `json:"aggregations,omitempty"`
 	AggregationGroups []map[string]interface{} `json:"aggregation_groups,omitempty"`
 	Billing map[string]interface{} `json:"billing,omitempty"`

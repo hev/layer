@@ -261,3 +261,32 @@ func udfStatusPayload(sweeps int) map[string]interface{} {
 		"rate_window_seconds": 300,
 	}
 }
+
+func TestQueryNamespaceAggregateResponsesOmitRows(t *testing.T) {
+	bodies := []string{
+		`{"aggregations":{"n":9769},"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":3},"next_cursor":null}`,
+		`{"aggregation_groups":[{"category":"boots","n":412},{"category":"sandals","n":97}],"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":4},"next_cursor":null}`,
+	}
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(bodies[call]))
+		call++
+	}))
+	defer server.Close()
+	client := NewClient(WithBaseURL(server.URL), WithAPIKey("test-token"))
+	aggregate, err := client.QueryNamespace(context.Background(), "ns", &QueryRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.Rows != nil || aggregate.Aggregations["n"] != float64(9769) {
+		t.Fatalf("unexpected aggregate response: %#v", aggregate)
+	}
+	grouped, err := client.QueryNamespace(context.Background(), "ns", &QueryRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grouped.Rows != nil || len(grouped.AggregationGroups) != 2 || grouped.AggregationGroups[0]["category"] != "boots" {
+		t.Fatalf("unexpected grouped response: %#v", grouped)
+	}
+}
