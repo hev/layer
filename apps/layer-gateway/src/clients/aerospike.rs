@@ -872,6 +872,8 @@ mod tests {
         assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
     }
 
+    // `scanned_id` ships only in the pro composition.
+    #[cfg(feature = "pro")]
     #[test]
     fn scanned_id_prefers_user_key_then_document_id() {
         let mut doc = HashMap::new();

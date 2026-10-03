@@ -1872,6 +1872,36 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         result
     }
 
+    async fn fetch_with_attributes(
+        &self,
+        namespace: &str,
+        id: &str,
+        include: &[String],
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.metrics.inc_tpuf_inflight();
+        let result = self
+            .inner
+            .fetch_with_attributes(namespace, id, include)
+            .await;
+        self.metrics.dec_tpuf_inflight();
+        result
+    }
+
+    async fn fetch_many_with_attributes(
+        &self,
+        namespace: &str,
+        ids: &[String],
+        include: &[String],
+    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.metrics.inc_tpuf_inflight();
+        let result = self
+            .inner
+            .fetch_many_with_attributes(namespace, ids, include)
+            .await;
+        self.metrics.dec_tpuf_inflight();
+        result
+    }
+
     async fn fetch_vector(
         &self,
         namespace: &str,
