@@ -82,7 +82,7 @@ pub async fn require_api_key(
 ) -> Response {
     let required_scope = required_scope(request.method(), request.uri().path());
     if state.inbound_auth.is_open() {
-        return next.run(request).await;
+        return run_with_billing_caller(request, next).await;
     }
 
     let Some(provided) = request
@@ -102,12 +102,12 @@ pub async fn require_api_key(
             namespaces: Vec::new(),
         };
         request.extensions_mut().insert(authenticated);
-        return vectorstore_core::turbopuffer::scope_upstream_api_key(provided, next.run(request))
+        return vectorstore_core::turbopuffer::scope_upstream_api_key(provided, run_with_billing_caller(request, next))
             .await;
     }
 
     let InboundAuth::Keys(keys) = &state.inbound_auth else {
-        return next.run(request).await;
+        return run_with_billing_caller(request, next).await;
     };
 
     for key in keys {
@@ -124,11 +124,18 @@ pub async fn require_api_key(
                 .extensions_mut()
                 .insert(CallerGrant::Declared(key.scopes.clone()));
             request.extensions_mut().insert(authenticated);
-            return next.run(request).await;
+            return run_with_billing_caller(request, next).await;
         }
     }
 
     forbidden()
+}
+
+async fn run_with_billing_caller(request: Request<axum::body::Body>, next: Next) -> Response {
+    let name = request.extensions().get::<AuthenticatedApiKey>().map(|key| key.name.clone());
+    if let Some(name) = name {
+        crate::metrics::scope_billing_caller(crate::metrics::BillingCaller::api_key(&name), next.run(request)).await
+    } else { next.run(request).await }
 }
 
 fn insufficient_scope(required: ApiScope) -> Response {

@@ -48,6 +48,109 @@ pub const DIRECT_PIPELINE_ID: &str = "direct";
 const PIPELINE_LABEL_CAP: usize = 50;
 const NAMESPACE_LABEL_CAP: usize = 5000;
 
+#[derive(Clone, Copy, Debug)]
+pub enum BillingOperation {
+    Query,
+    RankedQuery,
+    Scan,
+    Fetch,
+    Passthrough,
+    Upsert,
+    Patch,
+    Delete,
+    Snapshot,
+}
+impl BillingOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::RankedQuery => "ranked_query",
+            Self::Scan => "scan",
+            Self::Fetch => "fetch",
+            Self::Passthrough => "passthrough",
+            Self::Upsert => "upsert",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+#[derive(Clone)]
+pub struct BillingCaller {
+    kind: &'static str,
+    name: String,
+    snapshot: bool,
+}
+impl BillingCaller {
+    pub fn unknown() -> Self {
+        Self {
+            kind: "unknown",
+            name: "unknown".into(),
+            snapshot: false,
+        }
+    }
+    pub fn function(name: &str) -> Self {
+        Self {
+            kind: "function",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn pipeline(name: &str) -> Self {
+        Self {
+            kind: "pipeline",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn api_key(name: &str) -> Self {
+        Self {
+            kind: "api_key",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn snapshot() -> Self {
+        Self {
+            kind: "system",
+            name: "snapshot".into(),
+            snapshot: true,
+        }
+    }
+}
+tokio::task_local! { static BILLING_CALLER: BillingCaller; }
+pub async fn scope_billing_caller<F: std::future::Future>(
+    caller: BillingCaller,
+    future: F,
+) -> F::Output {
+    BILLING_CALLER.scope(caller, future).await
+}
+
+/// Tokio does not inherit task-local values. Capture only the bounded caller
+/// identity for API jobs; never add credentials or arbitrary IDs to that context.
+pub fn spawn_with_billing_caller<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let caller = BILLING_CALLER
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| BillingCaller::unknown());
+    tokio::spawn(scope_billing_caller(caller, future))
+}
+
+pub fn spawn_snapshot_with_billing_caller<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut caller = BILLING_CALLER
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| BillingCaller::unknown());
+    caller.snapshot = true;
+    tokio::spawn(scope_billing_caller(caller, future))
+}
+
 fn seconds_buckets() -> Vec<f64> {
     vec![
         0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0,
@@ -84,6 +187,8 @@ fn cold_start_buckets() -> Vec<f64> {
 #[derive(Default)]
 struct LabelLimiter {
     pipelines: DashMap<String, ()>,
+    billing_callers: Mutex<std::collections::HashSet<String>>,
+    admission: Mutex<()>,
     namespaces: DashMap<String, ()>,
     sets: DashMap<String, ()>,
 }
@@ -105,6 +210,7 @@ impl LabelLimiter {
         if value.is_empty() {
             return String::new();
         }
+        let _admission = self.admission.lock().unwrap();
         if seen.contains_key(value) {
             return value.to_string();
         }
@@ -443,19 +549,37 @@ impl LayerMetrics {
             &registry,
             "hevlayer_tpuf_billable_bytes_written_total",
             "Turbopuffer billable logical bytes written, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_billable_bytes_queried_total = counter(
             &registry,
             "hevlayer_tpuf_billable_bytes_queried_total",
             "Turbopuffer billable logical bytes queried, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_billable_bytes_returned_total = counter(
             &registry,
             "hevlayer_tpuf_billable_bytes_returned_total",
             "Turbopuffer billable logical bytes returned, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_logical_bytes = gauge_vec(
             &registry,
@@ -1131,22 +1255,51 @@ impl LayerMetrics {
             .map(|serving| serving.clone())
     }
 
-    pub fn observe_tpuf_billing(&self, namespace: &str, billing: &Value) {
+    pub fn observe_tpuf_billing(
+        &self,
+        namespace: &str,
+        operation: BillingOperation,
+        billing: &Value,
+    ) {
+        let caller = BILLING_CALLER.try_with(Clone::clone).ok();
+        let operation = if caller.as_ref().is_some_and(|c| c.snapshot) {
+            BillingOperation::Snapshot
+        } else {
+            operation
+        };
+        let kind = caller.as_ref().map_or("unknown", |c| c.kind);
+        let name = caller.as_ref().map_or("unknown", |c| c.name.as_str());
+        // Lock admission and insertion together: concurrent requests cannot exceed the cap.
+        let mut seen = self.labels.billing_callers.lock().unwrap();
+        let key = format!("{kind}:{name}");
+        let name = if kind == "unknown" || kind == "system" {
+            name
+        } else if name.len() > 128 || name.is_empty() {
+            "other"
+        } else if seen.contains(&key) {
+            name
+        } else if seen.len() < 100 {
+            seen.insert(key);
+            name
+        } else {
+            "other"
+        };
+        let operation = operation.label();
         let namespace = self.labels.namespace(namespace);
         let store_kind = self.store_kind();
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_written") {
             self.tpuf_billable_bytes_written_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_queried") {
             self.tpuf_billable_bytes_queried_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_returned") {
             self.tpuf_billable_bytes_returned_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
     }
@@ -1811,7 +1964,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         sha256: &str,
         bytes: &[u8],
     ) -> Result<(), TurbopufferError> {
-        self.inner.put_blob(namespace, sha256, bytes).await
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Upsert, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.put_blob(namespace, sha256, bytes),
+        )
+        .await
     }
 
     async fn get_blob(
@@ -1819,7 +1980,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         namespace: &str,
         sha256: &str,
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
-        self.inner.get_blob(namespace, sha256).await
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.get_blob(namespace, sha256),
+        )
+        .await
     }
 
     async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>, TurbopufferError> {
@@ -1843,11 +2012,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(response) = &result {
             if (200..300).contains(&response.status) {
-                if let Some(namespace) = namespace {
-                    if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
-                        if let Some(billing) = body.get("billing") {
-                            self.metrics.observe_tpuf_billing(namespace, billing);
-                        }
+                if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
+                    if let Some(billing) = body.get("billing") {
+                        self.metrics.observe_tpuf_billing(
+                            namespace.unwrap_or("unknown"),
+                            BillingOperation::Passthrough,
+                            billing,
+                        );
+                    }
+                    if let Some(namespace) = namespace {
                         if let (Some((model, serving)), Some(performance)) =
                             (embedding.as_ref(), body.get("performance"))
                         {
@@ -1877,12 +2050,33 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.delete_namespace(namespace).await;
         self.metrics.dec_tpuf_inflight();
+        if let Ok(response) = &result {
+            if (200..300).contains(&response.status) {
+                if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
+                    if let Some(billing) = body.get("billing") {
+                        self.metrics.observe_tpuf_billing(
+                            namespace,
+                            BillingOperation::Delete,
+                            billing,
+                        );
+                    }
+                }
+            }
+        }
         result
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.hint_cache_warm(namespace).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.hint_cache_warm(namespace),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -1897,7 +2091,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Upsert, billing);
             }
         }
         result
@@ -1913,7 +2108,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Patch, billing);
             }
         }
         result
@@ -1929,7 +2125,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Patch, billing);
             }
         }
         result
@@ -1945,7 +2142,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Delete, billing);
             }
         }
         result
@@ -1961,7 +2159,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Delete, billing);
             }
         }
         result
@@ -1983,7 +2182,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Query, billing);
             }
         }
         result
@@ -2005,7 +2205,11 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics.observe_tpuf_billing(
+                    namespace,
+                    BillingOperation::RankedQuery,
+                    billing,
+                );
             }
         }
         result
@@ -2025,7 +2229,11 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(body) = &result {
             if let Some(billing) = body.get("billing") {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics.observe_tpuf_billing(
+                    namespace,
+                    BillingOperation::RankedQuery,
+                    billing,
+                );
             }
         }
         result
@@ -2037,7 +2245,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch(namespace, id).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch(namespace, id),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -2048,7 +2264,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch_many(namespace, ids).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_many(namespace, ids),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -2059,7 +2283,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         id: &str,
     ) -> Result<Option<Vec<f64>>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch_vector(namespace, id).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_vector(namespace, id),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -2073,17 +2305,31 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self
-            .inner
-            .scan_page(namespace, cursor, page_size, filters, include_attributes)
-            .await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Scan, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .scan_page(namespace, cursor, page_size, filters, include_attributes),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.head_namespace(namespace).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.head_namespace(namespace),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         if let Ok(meta) = &result {
             if let Some(bytes) = meta.approx_logical_bytes {
@@ -3236,7 +3482,8 @@ impl UdfStore for MetricsUdfStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        aerospike_status, LayerMetrics, STATUS_AEROSPIKE_ERROR, STATUS_AEROSPIKE_STOP_WRITES,
+        aerospike_status, BillingOperation, LayerMetrics, STATUS_AEROSPIKE_ERROR,
+        STATUS_AEROSPIKE_STOP_WRITES,
     };
     use crate::clients::aerospike::AerospikeError;
     use serde_json::json;
@@ -3283,6 +3530,7 @@ mod tests {
         let metrics = LayerMetrics::new();
         metrics.observe_tpuf_billing(
             "ns",
+            BillingOperation::Query,
             &json!({
                 "billable_logical_bytes_written": 1000,
                 "billable_logical_bytes_queried": 2000,
@@ -3293,16 +3541,122 @@ mod tests {
 
         let encoded = metrics.encode().unwrap();
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_written_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 1000"
+            "hevlayer_tpuf_billable_bytes_written_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 1000"
         ));
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_queried_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 2000"
+            "hevlayer_tpuf_billable_bytes_queried_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 2000"
         ));
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_returned_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 3000"
+            "hevlayer_tpuf_billable_bytes_returned_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 3000"
         ));
         assert!(encoded.contains(
             "hevlayer_tpuf_logical_bytes{namespace=\"ns\",store_kind=\"turbopuffer\"} 4000"
         ));
+    }
+    #[tokio::test]
+    async fn billing_callers_are_bounded_under_concurrency_and_scopes_do_not_leak() {
+        use super::{scope_billing_caller, BillingCaller};
+        use std::sync::Arc;
+        let metrics = Arc::new(LayerMetrics::new());
+        let mut tasks = Vec::new();
+        for i in 0..200 {
+            let metrics = metrics.clone();
+            tasks.push(tokio::spawn(async move {
+                scope_billing_caller(BillingCaller::function(&format!("function-{i}")), async {
+                    tokio::task::yield_now().await;
+                    metrics.observe_tpuf_billing(
+                        "ns",
+                        BillingOperation::Scan,
+                        &json!({"billable_logical_bytes_queried": 1}),
+                    );
+                })
+                .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(metrics.labels.billing_callers.lock().unwrap().len(), 100);
+        let family = metrics
+            .registry
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == "hevlayer_tpuf_billable_bytes_queried_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 101);
+        assert_eq!(
+            family
+                .get_metric()
+                .iter()
+                .map(|m| m.get_counter().value())
+                .sum::<f64>(),
+            200.0
+        );
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("caller=\"other\",caller_kind=\"function\""));
+        metrics.observe_tpuf_billing(
+            "ns",
+            BillingOperation::Query,
+            &json!({"billable_logical_bytes_queried": 9}),
+        );
+        assert!(metrics.encode().unwrap().contains(
+            "caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\""
+        ));
+    }
+
+    #[tokio::test]
+    async fn billing_operation_contract_and_snapshot_override() {
+        use super::{scope_billing_caller, BillingCaller};
+        let metrics = LayerMetrics::new();
+        let operations = [
+            BillingOperation::Query,
+            BillingOperation::RankedQuery,
+            BillingOperation::Scan,
+            BillingOperation::Fetch,
+            BillingOperation::Passthrough,
+            BillingOperation::Upsert,
+            BillingOperation::Patch,
+            BillingOperation::Delete,
+            BillingOperation::Snapshot,
+        ];
+        let labels: Vec<_> = operations.iter().map(|o| o.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "query",
+                "ranked_query",
+                "scan",
+                "fetch",
+                "passthrough",
+                "upsert",
+                "patch",
+                "delete",
+                "snapshot"
+            ]
+        );
+        scope_billing_caller(BillingCaller::snapshot(), async {
+            metrics.observe_tpuf_billing(
+                "ns",
+                BillingOperation::Scan,
+                &json!({"billable_logical_bytes_queried": 11}),
+            );
+        })
+        .await;
+        scope_billing_caller(BillingCaller::api_key(&"x".repeat(129)), async {
+            metrics.observe_tpuf_billing(
+                "ns",
+                BillingOperation::Fetch,
+                &json!({"billable_logical_bytes_queried": 3}),
+            );
+        })
+        .await;
+        let encoded = metrics.encode().unwrap();
+        assert!(encoded.contains(
+            "caller=\"snapshot\",caller_kind=\"system\",namespace=\"ns\",operation=\"snapshot\""
+        ));
+        assert!(encoded.contains("caller=\"other\",caller_kind=\"api_key\""));
+        assert!(!encoded.contains(&"x".repeat(129)));
     }
 }

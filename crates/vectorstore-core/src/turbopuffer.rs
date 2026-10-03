@@ -104,6 +104,24 @@ where
     REQUEST_UPSTREAM_API_KEY.scope(api_key, future).await
 }
 
+/// Observer for billing otherwise discarded by row-only read interfaces.
+pub type ReadBillingObserver = std::sync::Arc<dyn Fn(&str, &Value) + Send + Sync>;
+tokio::task_local! {
+    static READ_BILLING_OBSERVER: ReadBillingObserver;
+}
+pub async fn scope_read_billing<F: std::future::Future>(
+    observer: ReadBillingObserver,
+    future: F,
+) -> F::Output {
+    READ_BILLING_OBSERVER.scope(observer, future).await
+}
+/// Report upstream billing before projecting a response into another result.
+pub fn observe_projected_billing(namespace: &str, response: &Value) {
+    if let Some(billing) = response.get("billing") {
+        let _ = READ_BILLING_OBSERVER.try_with(|observer| observer(namespace, billing));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TurbopufferError {
     /// Synthetic/mock HTTP 429. Real HTTP responses use `Response`; the
@@ -1061,6 +1079,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
         }
+        if let Ok(body) = resp.json::<Value>().await {
+            observe_projected_billing(&blob_set_namespace(namespace), &body);
+        }
         Ok(())
     }
 
@@ -1097,6 +1118,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        observe_projected_billing(&blob_set_namespace(namespace), &resp_body);
         resp_body
             .get("rows")
             .and_then(Value::as_array)
@@ -1185,6 +1207,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
+        }
+        if let Ok(body) = resp.json::<Value>().await {
+            observe_projected_billing(namespace, &body);
         }
         Ok(())
     }
@@ -1499,6 +1524,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
+        observe_projected_billing(namespace, &resp_body);
+
         let rows = resp_body
             .get("rows")
             .and_then(|v| v.as_array())
@@ -1570,6 +1597,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
+        observe_projected_billing(namespace, &resp_body);
+
         let rows = resp_body
             .get("rows")
             .and_then(|v| v.as_array())
@@ -1631,6 +1660,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
 
         let rows = resp_body
             .get("rows")
@@ -1716,6 +1747,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
+        observe_projected_billing(namespace, &resp_body);
+
         let rows = resp_body
             .get("rows")
             .and_then(|v| v.as_array())
@@ -1775,6 +1808,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
+        observe_projected_billing(namespace, &body);
         Ok(parse_metadata_body(body))
     }
 }

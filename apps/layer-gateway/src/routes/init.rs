@@ -186,7 +186,7 @@ fn spawn_backfill_if_needed(state: Arc<AppState>, namespace: String, shard_count
         Entry::Occupied(_) => return,
         Entry::Vacant(entry) => entry.insert(Arc::new(Mutex::new(()))).clone(),
     };
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         let _lock = guard.lock().await;
         if let Err(e) = run_backfill(Arc::clone(&state), &namespace, shard_count).await {
             warn!(namespace = %namespace, error = %e, "namespace init backfill failed");

@@ -140,7 +140,7 @@ fn enqueue_scan(
     let kind = request.kind;
     let field = request.field;
     let filters = request.filters;
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         execute_scan(
             state_clone,
             scan_id,
@@ -228,7 +228,7 @@ pub async fn create_snapshot_job(
     state.jobs.insert(scan_id.clone(), state_entry);
 
     let filters = request.filters;
-    tokio::spawn(async move {
+    crate::metrics::spawn_snapshot_with_billing_caller(async move {
         execute_snapshot_job(state, scan_id, namespace, field, source, filters, page_size).await;
     });
 
@@ -1191,7 +1191,7 @@ async fn create_ranked_scan_values(
     state.jobs.insert(scan_id.clone(), job_state);
 
     let exhaustive = request.exhaustive;
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         execute_ranked_values_scan(
             state,
             scan_id,
@@ -1417,7 +1417,7 @@ async fn create_hybrid_text_scan_values(
         .ok_or_else(|| AppError::Validation("invalid scan job".to_string()))?;
     state.jobs.insert(scan_id.clone(), job_state);
 
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         let start = Instant::now();
         let active = active_shard_count(&state, &namespace).await;
         let shard_count = active.unwrap_or(1);
@@ -3603,7 +3603,7 @@ fn spawn_background_warm(
         }
     }
 
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         state.metrics.set_cache_state(&namespace, "warming");
         info!(namespace = %namespace, "Starting background cache warm");
         if let Err(e) = state.turbopuffer().hint_cache_warm(&namespace).await {

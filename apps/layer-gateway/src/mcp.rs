@@ -284,7 +284,13 @@ pub async fn handle(
         .get(&name)
         .cloned()
         .ok_or_else(|| AppError::NotFound(format!("MCP server `{name}` not found")))?;
+    let billing_caller = request
+        .extensions()
+        .get::<crate::auth::AuthenticatedApiKey>()
+        .map(|key| crate::metrics::BillingCaller::api_key(&key.name))
+        .unwrap_or_else(crate::metrics::BillingCaller::unknown);
     let handler = McpHandler {
+        billing_caller,
         state,
         spec,
         grant,
@@ -301,6 +307,7 @@ pub async fn handle(
 
 #[derive(Clone)]
 struct McpHandler {
+    billing_caller: crate::metrics::BillingCaller,
     state: Arc<AppState>,
     spec: McpServer,
     grant: Option<CallerGrant>,
@@ -367,6 +374,14 @@ impl McpHandler {
     }
 
     async fn schema(&self, ns: &McpNamespace) -> Result<NamespaceSchema, AppError> {
+        crate::metrics::scope_billing_caller(
+            self.billing_caller.clone(),
+            self.schema_attributed(ns),
+        )
+        .await
+    }
+
+    async fn schema_attributed(&self, ns: &McpNamespace) -> Result<NamespaceSchema, AppError> {
         self.authorize(ns)?;
         let metadata = self
             .state
@@ -387,6 +402,18 @@ impl McpHandler {
     }
 
     async fn execute(
+        &self,
+        tool: &str,
+        arguments: Map<String, Value>,
+    ) -> Result<CallToolResult, AppError> {
+        crate::metrics::scope_billing_caller(
+            self.billing_caller.clone(),
+            self.execute_attributed(tool, arguments),
+        )
+        .await
+    }
+
+    async fn execute_attributed(
         &self,
         tool: &str,
         mut arguments: Map<String, Value>,

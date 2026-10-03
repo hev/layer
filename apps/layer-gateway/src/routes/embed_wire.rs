@@ -2135,12 +2135,33 @@ async fn resolve_vectors(
         let local_clip_image = profile.serving == ServingPreference::Local
             && is_clip_model(&profile.model)
             && modality == EmbeddingModality::Image;
-        let batch = if local_clip_image {
-            let images = resolve_image_inputs(namespace, &misses).await?;
-            provider.embed_images(&request, &images).await
+        // Native provider writes can be billed even when a later read or vector
+        // validation fails. Preserve the existing logical target namespace.
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_by_callback = Arc::clone(&observed);
+        let metrics = Arc::clone(&state.metrics);
+        let target_namespace = namespace.to_string();
+        let observer = Arc::new(move |_: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(
+                &target_namespace,
+                crate::metrics::BillingOperation::Passthrough,
+                billing,
+            );
+            observed_by_callback.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let images = if local_clip_image {
+            Some(resolve_image_inputs(namespace, &misses).await?)
         } else {
-            provider.embed(&request, &misses).await
-        }
+            None
+        };
+        let batch = vectorstore_core::turbopuffer::scope_read_billing(observer, async {
+            if let Some(images) = &images {
+                provider.embed_images(&request, images).await
+            } else {
+                provider.embed(&request, &misses).await
+            }
+        })
+        .await
         .map_err(|error| {
             if profile.serving == ServingPreference::Worker {
                 map_worker_error(error, &profile.source)
@@ -2162,8 +2183,14 @@ async fn resolve_vectors(
             profile.serving.label(),
             &batch.performance,
         );
-        if let Some(billing) = batch.billing.as_ref() {
-            state.metrics.observe_tpuf_billing(namespace, billing);
+        if !observed.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(billing) = batch.billing.as_ref() {
+                state.metrics.observe_tpuf_billing(
+                    namespace,
+                    crate::metrics::BillingOperation::Passthrough,
+                    billing,
+                );
+            }
         }
         for ((position, vector), key) in
             miss_positions.into_iter().zip(batch.vectors).zip(miss_keys)
