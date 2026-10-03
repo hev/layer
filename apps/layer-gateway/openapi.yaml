@@ -50,7 +50,12 @@ paths:
           items:
             type: string
         description: Attributes to include in the response. If omitted, all attributes
-          are returned.
+          are returned. When listed, every named attribute, including generated
+          columns such as a hosted embedding's `embed_text`, is read from the
+          document cache only if the cached row holds all of them; a cached row
+          that lacks any requested attribute is treated as a miss, the document
+          is read from the store, and the cache is refreshed
+          (the `x-layer-cache` header reads `miss`).
       responses:
         '200':
           description: Document found
@@ -90,7 +95,7 @@ paths:
         pgvector: supported
       summary: Fetch multiple documents by ID
       description: |
-        Batch retrieve documents by ID. On Aerospike cache miss, Hevlayer fetches missing documents from the namespace's configured VectorStore, writes them into Aerospike, and returns found documents plus a list of true upstream misses.
+        Batch retrieve documents by ID. When `include_attributes` is set, a cached document that lacks any requested attribute counts as a miss and is re-read from the store. On Aerospike cache miss, Hevlayer fetches missing documents from the namespace's configured VectorStore, writes them into Aerospike, and returns found documents plus a list of true upstream misses.
         Known limitation: if Aerospike itself is unavailable, Hevlayer returns 503 instead of bypassing cache and reading directly from the configured VectorStore.
       tags:
       - documents
