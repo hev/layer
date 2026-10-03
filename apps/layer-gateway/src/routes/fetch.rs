@@ -44,10 +44,25 @@ fn response_headers(cache_value: &'static str, vector_warning: bool) -> HeaderMa
     h
 }
 
+/// True when a cached row can answer a fetch that names `include`. A cached
+/// row may predate generated columns (for example a hosted `embed_text`
+/// embedding), so a row that lacks any requested attribute must not be served:
+/// the caller would see a silently empty value. `vector` is exempt because it
+/// is never returned from this route and is reported through the warning header.
+/// With no explicit list there is nothing to check.
+fn cache_covers(attrs: &HashMap<String, serde_json::Value>, include: Option<&[String]>) -> bool {
+    include.is_none_or(|wanted| {
+        wanted
+            .iter()
+            .all(|a| a == "vector" || a == "id" || attrs.contains_key(a))
+    })
+}
+
 /// GET /v2/namespaces/{namespace}/documents/{doc_id}
 ///
 /// Single document fetch with pull-through caching:
-/// 1. Try Aerospike — return on hit
+/// 1. Try Aerospike — return on hit, but only when the cached row holds every
+///    explicitly requested attribute; otherwise treat it as a miss and refresh
 /// 2. Cache miss (clean or error) → fall through to turbopuffer
 /// 3. 404 if upstream has nothing
 ///
@@ -79,7 +94,7 @@ pub async fn fetch_document(
         .await;
     let cache_lookup_seconds = cache_start.elapsed().as_secs_f64();
     let cache_status = match cache_result {
-        Ok(Some(attrs)) => {
+        Ok(Some(attrs)) if cache_covers(&attrs, include_attrs.as_deref()) => {
             state.metrics.observe_cache_lookup(
                 &cache_set,
                 &namespace,
@@ -111,7 +126,7 @@ pub async fn fetch_document(
                 }),
             ));
         }
-        Ok(None) => {
+        Ok(_) => {
             state.metrics.observe_cache_lookup(
                 &cache_set,
                 &namespace,
@@ -274,7 +289,8 @@ pub async fn fetch_many_documents(
         .await;
     let cache_lookup_seconds = cache_start.elapsed().as_secs_f64();
     let (found, cache_errored) = match cache_result {
-        Ok(found) => {
+        Ok(mut found) => {
+            found.retain(|_, attrs| cache_covers(attrs, request.include_attributes.as_deref()));
             let hits = found.len() as u64;
             let misses = request.ids.len().saturating_sub(found.len()) as u64;
             if hits > 0 {
@@ -503,5 +519,52 @@ fn clickstream_event(
         tags: tags.to_vec(),
         source: source.to_string(),
         served_from: served_from.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(keys: &[&str]) -> HashMap<String, serde_json::Value> {
+        keys.iter().map(|k| (k.to_string(), json!(1))).collect()
+    }
+
+    /// LYR-238: a write-through cache row written before hosted embedding ran
+    /// has no `embed_text`. It must not satisfy a fetch that names it, and a
+    /// refresh from origin must.
+    #[tokio::test]
+    async fn pre_embedding_cache_row_does_not_satisfy_embed_text_fetch() {
+        use crate::clients::aerospike::{AerospikeClient, MockAerospikeClient};
+
+        let cache = MockAerospikeClient::default();
+        let mut pre: HashMap<String, serde_json::Value> = HashMap::new();
+        pre.insert("title".into(), json!("t"));
+        cache.put("ns", "d1", &pre).await.unwrap();
+        let want = vec!["embed_text".to_string()];
+
+        let warm = cache.get("ns", "d1", Some(&want)).await.unwrap().unwrap();
+        assert!(!cache_covers(&warm, Some(&want)), "stale row served");
+
+        let mut origin = pre.clone();
+        origin.insert("embed_text".into(), json!([0.1, 0.2]));
+        cache.put("ns", "d1", &origin).await.unwrap();
+        let refreshed = cache.get("ns", "d1", Some(&want)).await.unwrap().unwrap();
+        assert!(cache_covers(&refreshed, Some(&want)));
+        assert_eq!(refreshed["embed_text"], json!([0.1, 0.2]));
+
+        let cold = cache.get("ns", "missing", Some(&want)).await.unwrap();
+        assert!(cold.is_none());
+    }
+
+    #[test]
+    fn cache_covers_requires_every_requested_attribute() {
+        let want = vec!["title".to_string(), "embed_text".to_string()];
+        assert!(!cache_covers(&row(&["title"]), Some(&want)));
+        assert!(cache_covers(&row(&["title", "embed_text"]), Some(&want)));
+        assert!(cache_covers(&row(&["title"]), None));
+        let vec_only = vec!["vector".to_string()];
+        assert!(cache_covers(&row(&[]), Some(&vec_only)));
     }
 }
