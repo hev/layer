@@ -163,6 +163,8 @@ class UdfStatus(BaseModel):
 
 class UdfDiscoveryStatus(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    consecutive_failures: int | None = None
+    pause_reason: str | None = None
     sweeps_completed: int
     last_completed_at: str | None
 

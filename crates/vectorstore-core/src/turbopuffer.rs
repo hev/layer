@@ -1873,6 +1873,7 @@ pub(crate) fn parse_metadata_body(body: Value) -> NamespaceMeta {
 // --- Mock implementation for testing ---
 
 pub struct MockTurbopufferClient {
+    metadata_requests: AtomicUsize,
     docs: tokio::sync::RwLock<HashMap<String, HashMap<String, DocumentResponse>>>,
     /// Per-namespace per-id vector, populated by `upsert`. `fetch_vector`
     /// reads here. Stored separately from `docs` because `DocumentResponse`
@@ -1969,6 +1970,7 @@ impl Default for MockTurbopufferClient {
 impl MockTurbopufferClient {
     pub fn new() -> Self {
         Self {
+            metadata_requests: AtomicUsize::new(0),
             docs: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
             status: tokio::sync::RwLock::new(HashMap::new()),
@@ -2035,6 +2037,9 @@ impl MockTurbopufferClient {
             .insert(namespace.to_string(), body);
     }
 
+    pub fn metadata_request_count(&self) -> usize {
+        self.metadata_requests.load(AtomicOrdering::SeqCst)
+    }
     pub async fn scan_filters(&self) -> Vec<Option<Value>> {
         self.scan_filters.read().await.clone()
     }
@@ -2803,6 +2808,7 @@ impl TurbopufferClient for MockTurbopufferClient {
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
+        self.metadata_requests.fetch_add(1, AtomicOrdering::SeqCst);
         if self.head_not_found.read().await.contains(namespace) {
             return Err(TurbopufferError::NotFound(format!(
                 "404 Not Found: namespace '{}' was not found",

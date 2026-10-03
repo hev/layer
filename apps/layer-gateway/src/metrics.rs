@@ -3067,13 +3067,41 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn prepare_discovery_checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &crate::udf::UdfDiscoveryCheckpoint,
+        watermark: Option<&str>,
+        token: &str,
+    ) -> Result<crate::udf::UdfDiscoveryCheckpoint, UdfStoreError> {
+        self.inner
+            .prepare_discovery_checkpoint(id, checkpoint, watermark, token)
+            .await
+    }
+    async fn record_discovery_write_intent(
+        &self,
+        id: &str,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .record_discovery_write_intent(id, namespace, ids)
+            .await
+    }
+    async fn dirty_discovery_ids(
+        &self,
+        id: &str,
+        namespace: &str,
+    ) -> Result<Vec<(String, i64)>, UdfStoreError> {
+        self.inner.dirty_discovery_ids(id, namespace).await
+    }
     async fn finish_discovery(
         &self,
         lease: &crate::udf::UdfDiscoveryLease,
-        success: bool,
+        outcome: layer_transform::udf::UdfDiscoveryOutcome,
     ) -> Result<(), UdfStoreError> {
         let start = Instant::now();
-        let result = self.inner.finish_discovery(lease, success).await;
+        let result = self.inner.finish_discovery(lease, outcome).await;
         self.metrics.observe_pg_query(
             "finish_udf_discovery",
             udf_pg_status(&result),

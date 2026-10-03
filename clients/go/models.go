@@ -158,6 +158,8 @@ type UdfStatus struct {
 }
 
 type UdfDiscoveryStatus struct {
+	ConsecutiveFailures int64 `json:"consecutive_failures,omitempty"`
+	PauseReason string `json:"pause_reason,omitempty"`
 	SweepsCompleted int64 `json:"sweeps_completed"`
 	LastCompletedAt *string `json:"last_completed_at"`
 }

@@ -191,6 +191,8 @@ export interface UdfStatus {
 
 export interface UdfDiscoveryStatus {
   [key: string]: unknown;
+  consecutive_failures?: number;
+  pause_reason?: string | null;
   sweeps_completed: number;
   last_completed_at: string | null;
 }

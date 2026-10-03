@@ -1311,6 +1311,8 @@ pub struct UdfStatusResponse {
 
 #[derive(Debug, Serialize)]
 pub struct UdfDiscoveryStatusResponse {
+    pub consecutive_failures: u32,
+    pub pause_reason: Option<String>,
     pub sweeps_completed: u64,
     pub last_completed_at: Option<String>,
 }
