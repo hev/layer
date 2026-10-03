@@ -1493,8 +1493,18 @@ pub(crate) async fn run_hybrid_text(
     // queries never reach this branch — the fallback is purely additive.
     // An all-stop-word query has no fuzzy tokens to surface on; the BM25-only
     // fusion result stands.
-    let surfaced =
-        !phase_one && !bm25_only && rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
+    // The search store's exact-only policy cannot rescue a typo through
+    // fuzzy candidate surfacing. In particular, its adapter cannot execute
+    // the neutral `id asc` rank used by that fallback. Keep a successful
+    // empty lexical result instead of turning it into an unsupported query.
+    let search_exact_only =
+        state.namespace_uses_search_store(namespace) && expr.fuzziness == Fuzziness::Fixed(0);
+    let surfaced = !phase_one
+        && !bm25_only
+        && !search_exact_only
+        && rows.is_empty()
+        && !had_extra_leg
+        && !policy.tokens.is_empty();
     if surfaced {
         let surfacing = build_surfacing_leg_specs(expr, &policy.tokens, request.filters.as_ref());
         effective_leg_count = surfacing.len();

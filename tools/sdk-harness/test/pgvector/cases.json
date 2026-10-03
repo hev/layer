@@ -1540,6 +1540,148 @@
     "status": 400
   },
   {
+    "name": "fresh namespace accepts two full-text fields",
+    "op": "write",
+    "body": {
+      "schema": {
+        "text": {
+          "type": "string",
+          "full_text_search": true
+        },
+        "workdir": {
+          "type": "string",
+          "full_text_search": true
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "text-only",
+          "text": "database",
+          "workdir": "forest"
+        },
+        {
+          "id": "workdir-only",
+          "text": "forest",
+          "workdir": "database"
+        },
+        {
+          "id": "neither",
+          "text": "ocean",
+          "workdir": "ocean"
+        }
+      ]
+    },
+    "ns": "multi-fts",
+    "count": 3
+  },
+  {
+    "name": "fresh BM25 matches and scores only text",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "database"
+      ],
+      "top_k": 10
+    },
+    "ns": "multi-fts",
+    "ids": [
+      "text-only"
+    ],
+    "positive_scores": true
+  },
+  {
+    "name": "fresh BM25 matches and scores only workdir",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "workdir",
+        "BM25",
+        "database"
+      ],
+      "top_k": 10
+    },
+    "ns": "multi-fts",
+    "ids": [
+      "workdir-only"
+    ],
+    "positive_scores": true
+  },
+  {
+    "name": "third full-text field rebuilds the fresh namespace index",
+    "op": "write",
+    "body": {
+      "schema": {
+        "title": {
+          "type": "string",
+          "full_text_search": true
+        }
+      },
+      "upsert_rows": [
+        {
+          "id": "title-only",
+          "text": "ocean",
+          "workdir": "forest",
+          "title": "database"
+        }
+      ]
+    },
+    "ns": "multi-fts",
+    "count": 1
+  },
+  {
+    "name": "rebuilt BM25 matches and scores only text",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "text",
+        "BM25",
+        "database"
+      ],
+      "top_k": 10
+    },
+    "ns": "multi-fts",
+    "ids": [
+      "text-only"
+    ],
+    "positive_scores": true
+  },
+  {
+    "name": "rebuilt BM25 matches and scores only workdir",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "workdir",
+        "BM25",
+        "database"
+      ],
+      "top_k": 10
+    },
+    "ns": "multi-fts",
+    "ids": [
+      "workdir-only"
+    ],
+    "positive_scores": true
+  },
+  {
+    "name": "rebuilt BM25 matches and scores only title",
+    "op": "query",
+    "body": {
+      "rank_by": [
+        "title",
+        "BM25",
+        "database"
+      ],
+      "top_k": 10
+    },
+    "ns": "multi-fts",
+    "ids": [
+      "title-only"
+    ],
+    "positive_scores": true
+  },
+  {
     "name": "second text field added to existing namespace",
     "op": "write",
     "body": {
@@ -1583,7 +1725,8 @@
     "ids": [
       "e"
     ],
-    "first": "e"
+    "first": "e",
+    "positive_scores": true
   },
   {
     "name": "BM25 on the original field is unchanged",
@@ -1601,7 +1744,8 @@
       "a",
       "b"
     ],
-    "first": "a"
+    "first": "a",
+    "positive_scores": true
   },
   {
     "name": "BM25 on a non-text field rejected",

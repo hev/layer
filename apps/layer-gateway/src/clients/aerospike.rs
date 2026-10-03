@@ -651,6 +651,25 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn namespace_purge_skips_impossible_sets_without_truncating_valid_names() {
+        let baseline = "hevlayer-baseline-1790949129792-multivector";
+        assert_eq!(
+            purge_set_name("tpuf_", baseline),
+            Some(format!("tpuf_{baseline}"))
+        );
+        let history = crate::history::search_history_cache_namespace(baseline);
+        assert!(purge_set_name("tpuf_", &history).is_none());
+        assert_eq!(
+            purge_set_name("tpuf_", &"x".repeat(58)),
+            Some(format!("tpuf_{}", "x".repeat(58)))
+        );
+        assert!(purge_set_name("tpuf_", &"x".repeat(59)).is_none());
+        // Byte boundaries, not Unicode character counts.
+        assert!(purge_set_name("", &"é".repeat(32)).is_none());
+        assert_eq!(purge_set_name("", &"é".repeat(31)), Some("é".repeat(31)));
+    }
+
     struct SleepingAerospikeClient {
         calls: AtomicU64,
         sleep_for: Duration,

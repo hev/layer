@@ -3,6 +3,7 @@
 import asyncio
 import datetime
 import json
+import math
 import os
 from pathlib import Path
 import uuid
@@ -89,6 +90,11 @@ async def main():
                             assert {json.dumps(r["id"]) for r in rows} == {
                                 json.dumps(i) for i in case["ids"]
                             }, (case["name"], rows)
+                        if case.get("positive_scores"):
+                            assert rows and all(
+                                math.isfinite(r["$dist"]) and r["$dist"] > 0
+                                for r in rows
+                            ), (case["name"], rows)
                         if "order" in case:
                             assert [r["id"] for r in rows] == case["order"], (
                                 case["name"],
