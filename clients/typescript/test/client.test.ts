@@ -180,6 +180,22 @@ test("core operations use the generated surface", async () => {
   }
 });
 
+test("aggregate-only and grouped query responses omit rows (LYR-164)", async () => {
+  const bodies = [
+    '{"aggregations":{"n":9769},"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":3},"next_cursor":null}',
+    '{"aggregation_groups":[{"category":"boots","n":412},{"category":"sandals","n":97}],"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":4},"next_cursor":null}',
+  ];
+  let call = 0;
+  const fetch: FetchLike = async () => new Response(bodies[call++], { status: 200, headers: { "content-type": "application/json", "x-layer-stable-as-of": "42" } });
+  const client = new Hevlayer({ baseUrl: "https://unit.test", apiKey: "test-token", fetch });
+  const aggregate = await client.queryNamespace("ns", { aggregate_by: { n: ["Count"] } } as any) as any;
+  assertEqual(aggregate.rows, undefined);
+  assertDeepEqual(aggregate.aggregations, { n: 9769 });
+  const grouped = await client.queryNamespace("ns", { aggregate_by: { n: ["Count"] }, group_by: ["category"] } as any) as any;
+  assertEqual(grouped.rows, undefined);
+  assertDeepEqual(grouped.aggregation_groups[0], { category: "boots", n: 412 });
+});
+
 function jsonResponse(body: unknown, options: { status?: number; headers?: Record<string, string> } = {}): Response {
   return new Response(JSON.stringify(body), {
     status: options.status ?? 200,

@@ -3775,8 +3775,6 @@ components:
     QueryResponse:
       type: object
       additionalProperties: true
-      required:
-      - rows
       properties:
         rows:
           type: array
@@ -3784,7 +3782,8 @@ components:
             type: object
             additionalProperties: true
           description: Upstream Turbopuffer query rows (`id`, `$dist`/`$score`, and
-            flat attributes).
+            flat attributes). Absent on aggregate-only and grouped-aggregate responses
+            (see `aggregations` and `aggregation_groups`).
         aggregations:
           type: object
           additionalProperties: true

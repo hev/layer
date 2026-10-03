@@ -1017,7 +1017,7 @@ export interface RoutingEcho {
 
 export interface QueryResponse {
   [key: string]: unknown;
-  rows: Record<string, unknown>[];
+  rows?: Record<string, unknown>[];
   aggregations?: Record<string, unknown>;
   aggregation_groups?: Record<string, unknown>[];
   billing?: Record<string, unknown>;
