@@ -407,6 +407,31 @@ pub trait TurbopufferClient: Send + Sync {
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError>;
 
+    /// [`fetch`](Self::fetch) that also guarantees the explicitly requested
+    /// `include` attributes. Turbopuffer's `include_attributes: true` omits
+    /// vector-typed columns, including a hosted embedding's generated column
+    /// (`embed_text`), so a store that behaves that way must top them up by
+    /// name. Stores whose `fetch` already returns every column keep this
+    /// default.
+    async fn fetch_with_attributes(
+        &self,
+        namespace: &str,
+        id: &str,
+        _include: &[String],
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.fetch(namespace, id).await
+    }
+
+    /// Batch form of [`fetch_with_attributes`](Self::fetch_with_attributes).
+    async fn fetch_many_with_attributes(
+        &self,
+        namespace: &str,
+        ids: &[String],
+        _include: &[String],
+    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.fetch_many(namespace, ids).await
+    }
+
     /// Pull a document's embedding vector from Turbopuffer. Used as the
     /// pull-through fallback when search-by-id misses the Aerospike cache.
     /// Returns `None` if the doc has no row upstream or no vector column.
@@ -836,6 +861,28 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .fetch_many(namespace, ids)
+            .await
+    }
+
+    async fn fetch_with_attributes(
+        &self,
+        namespace: &str,
+        id: &str,
+        include: &[String],
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .fetch_with_attributes(namespace, id, include)
+            .await
+    }
+
+    async fn fetch_many_with_attributes(
+        &self,
+        namespace: &str,
+        ids: &[String],
+        include: &[String],
+    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .fetch_many_with_attributes(namespace, ids, include)
             .await
     }
 
@@ -1518,6 +1565,84 @@ impl TurbopufferClient for HttpTurbopufferClient {
             }
         }
         Ok(result)
+    }
+
+    async fn fetch_with_attributes(
+        &self,
+        namespace: &str,
+        id: &str,
+        include: &[String],
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        let mut docs = self
+            .fetch_many_with_attributes(namespace, std::slice::from_ref(&id.to_string()), include)
+            .await?;
+        Ok(docs.remove(id))
+    }
+
+    async fn fetch_many_with_attributes(
+        &self,
+        namespace: &str,
+        ids: &[String],
+        include: &[String],
+    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        let mut docs = self.fetch_many(namespace, ids).await?;
+        let wanted: Vec<&String> = include
+            .iter()
+            .filter(|name| !is_system_column(name))
+            .collect();
+        // `include_attributes: true` drops vector-typed columns such as a
+        // hosted embedding's `embed_text`; ask for the absent ones by name.
+        let missing: Vec<String> = wanted
+            .into_iter()
+            .filter(|name| docs.values().any(|doc| !doc.attributes.contains_key(*name)))
+            .cloned()
+            .collect();
+        let lacking: Vec<&String> = docs.keys().collect();
+        if missing.is_empty() || lacking.is_empty() {
+            return Ok(docs);
+        }
+        let body = serde_json::json!({
+            "rank_by": ["id", "asc"],
+            "top_k": lacking.len(),
+            "filters": ["id", "In", lacking],
+            "include_attributes": missing,
+            "consistency": {"level": "eventual"},
+        });
+        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
+        // Best effort: a name that is not in the schema makes upstream answer
+        // 400, and the base row is still the right response then.
+        let Ok(resp) = self
+            .authorize(self.client.post(&url).json(&body))?
+            .send()
+            .await
+        else {
+            return Ok(docs);
+        };
+        if !resp.status().is_success() {
+            return Ok(docs);
+        }
+        let Ok(resp_body) = resp.json::<Value>().await else {
+            return Ok(docs);
+        };
+        for row in resp_body
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some((row_id, _)) = row.get("id").and_then(id_from_wire) else {
+                continue;
+            };
+            let (Some(doc), Some(obj)) = (docs.get_mut(&row_id), row.as_object()) else {
+                continue;
+            };
+            for (k, v) in obj {
+                if !is_system_column(k) {
+                    doc.attributes.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        Ok(docs)
     }
 
     async fn fetch_vector(
@@ -3518,5 +3643,127 @@ mod metadata_parse_tests {
 
         let request = server.await.unwrap();
         assert!(request.contains("authorization: Bearer tpuf_request_token"));
+    }
+}
+
+/// LYR-238: the origin side of the hosted-embedding fetch regression. A fake
+/// upstream that, like turbopuffer, leaves vector-typed columns (a hosted
+/// embedding's `embed_text`) out of `include_attributes: true` and returns
+/// them only when named.
+#[cfg(test)]
+mod fetch_generated_column_tests {
+    use super::*;
+    use axum::{extract::Path, routing::post, Json, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    const VECTOR_COLUMNS: &[&str] = &["embed_text"];
+
+    async fn query(
+        Path(_ns): Path<String>,
+        Json(body): Json<Value>,
+    ) -> (axum::http::StatusCode, Json<Value>) {
+        let rows = [
+            json!({"id": "d1", "title": "one", "embed_text": [0.1, 0.2]}),
+            json!({"id": "d2", "title": "two", "embed_text": [0.3, 0.4]}),
+        ];
+        let wanted_ids: Vec<Value> = match body["filters"][1].as_str() {
+            Some("Eq") => vec![body["filters"][2].clone()],
+            _ => body["filters"][2].as_array().cloned().unwrap_or_default(),
+        };
+        let include = &body["include_attributes"];
+        let mut out = Vec::new();
+        for row in rows.iter().filter(|r| wanted_ids.contains(&r["id"])) {
+            let mut shaped = serde_json::Map::new();
+            for (k, v) in row.as_object().unwrap() {
+                let keep = match include {
+                    Value::Bool(true) => k == "id" || !VECTOR_COLUMNS.contains(&k.as_str()),
+                    Value::Array(names) => k == "id" || names.iter().any(|n| n == k),
+                    _ => k == "id",
+                };
+                if keep {
+                    shaped.insert(k.clone(), v.clone());
+                }
+            }
+            out.push(Value::Object(shaped));
+        }
+        if let Some(names) = include.as_array() {
+            if let Some(bad) = names
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|n| !["id", "title", "embed_text"].contains(n))
+            {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({"error": format!("attribute \"{bad}\" not found in schema"), "status": "error"}),
+                    ),
+                );
+            }
+        }
+        (axum::http::StatusCode::OK, Json(json!({"rows": out})))
+    }
+
+    async fn client() -> HttpTurbopufferClient {
+        let app = Router::new().route("/v2/namespaces/{ns}/query", post(query));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        HttpTurbopufferClient::new("test-key", &format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn plain_fetch_omits_the_generated_column() {
+        let c = client().await;
+        let doc = c.fetch("ns", "d1").await.unwrap().unwrap();
+        assert!(
+            !doc.attributes.contains_key("embed_text"),
+            "fake must model the omission"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_with_attributes_returns_the_generated_column() {
+        let c = client().await;
+        let want = vec!["embed_text".to_string()];
+        let doc = c
+            .fetch_with_attributes("ns", "d1", &want)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.attributes["embed_text"], json!([0.1, 0.2]));
+        assert_eq!(doc.attributes["title"], json!("one"));
+        assert!(c
+            .fetch_with_attributes("ns", "missing", &want)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_many_with_attributes_returns_the_generated_column() {
+        let c = client().await;
+        let ids = vec!["d1".to_string(), "d2".to_string()];
+        let want = vec!["embed_text".to_string(), "vector".to_string()];
+        let docs = c
+            .fetch_many_with_attributes("ns", &ids, &want)
+            .await
+            .unwrap();
+        assert_eq!(docs["d1"].attributes["embed_text"], json!([0.1, 0.2]));
+        assert_eq!(docs["d2"].attributes["embed_text"], json!([0.3, 0.4]));
+        assert!(!docs["d1"].attributes.contains_key("vector"));
+    }
+
+    #[tokio::test]
+    async fn unknown_attribute_keeps_the_base_row() {
+        let c = client().await;
+        let want = vec!["nope".to_string()];
+        let doc = c
+            .fetch_with_attributes("ns", "d1", &want)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.attributes["title"], json!("one"));
+        assert!(!doc.attributes.contains_key("nope"));
     }
 }

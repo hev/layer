@@ -161,7 +161,7 @@ pub async fn fetch_document(
     // 2. Fetch from Turbopuffer
     let upstream_doc = state
         .turbopuffer()
-        .fetch(&namespace, &doc_id)
+        .fetch_with_attributes(&namespace, &doc_id, include_attrs.as_deref().unwrap_or(&[]))
         .await
         .map_err(|e| AppError::Upstream(format!("Turbopuffer fetch failed: {}", e)))?;
 
@@ -352,7 +352,11 @@ pub async fn fetch_many_documents(
     if !missing_ids.is_empty() {
         let upstream = state
             .turbopuffer()
-            .fetch_many(&namespace, &missing_ids)
+            .fetch_many_with_attributes(
+                &namespace,
+                &missing_ids,
+                request.include_attributes.as_deref().unwrap_or(&[]),
+            )
             .await
             .map_err(|e| AppError::Upstream(format!("Turbopuffer fetch failed: {}", e)))?;
 
@@ -556,6 +560,241 @@ mod tests {
 
         let cold = cache.get("ns", "missing", Some(&want)).await.unwrap();
         assert!(cold.is_none());
+    }
+
+    // ---- LYR-238 handler-level regression -------------------------------
+    //
+    // Drives the real `fetch_document` / `fetch_many_documents` handlers over
+    // an in-memory origin (`MockTurbopufferClient`) and cache
+    // (`MockAerospikeClient`). The hosted embedder is mocked: the origin row
+    // carries the `embed_text` vector the store would have generated, and the
+    // cache is seeded with the row a write-through cache held *before* that
+    // embedding landed. The open gateway binary runs with the document cache
+    // disabled, so this is the only place the cache path is exercised here.
+
+    use crate::clients::aerospike::{AerospikeClient, MockAerospikeClient};
+    use crate::clients::turbopuffer::{MockTurbopufferClient, TurbopufferClient, UpsertDoc};
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+
+    const NS: &str = "hosted";
+
+    /// Deterministic stand-in for the hosted embedder.
+    fn mock_embed(text: &str) -> Vec<f64> {
+        vec![
+            text.len() as f64,
+            text.bytes().map(f64::from).sum::<f64>() / 1000.0,
+        ]
+    }
+
+    fn test_state(
+        origin: Arc<MockTurbopufferClient>,
+        cache: Arc<MockAerospikeClient>,
+    ) -> Arc<AppState> {
+        use crate::consistency::ConsistencyWatcher;
+        use crate::cost::AwsCostConfig;
+        use crate::metrics::LayerMetrics;
+        use crate::telemetry::TelemetryCounters;
+        use std::sync::atomic::AtomicBool;
+
+        let config = crate::config::Config::from_env();
+        let origin: Arc<dyn TurbopufferClient> = origin;
+        Arc::new(AppState {
+            namespace_purges: Arc::new(Default::default()),
+            draining: Arc::new(AtomicBool::new(false)),
+            drain_marker_path: config.drain_marker_path.clone(),
+            metrics: Arc::new(LayerMetrics::new()),
+            telemetry: Arc::new(TelemetryCounters::default()),
+            turbopuffer: Some(origin),
+            embedding_provider: None,
+            http_embedding_provider: None,
+            lattice_embedding_provider: None,
+            local_clip_embedding_provider: None,
+            embedding_cache: Default::default(),
+            embedding_cache_ttl: std::time::Duration::from_millis(config.embedding_cache_ttl_ms),
+            wire_embedding_profiles: Default::default(),
+            aerospike: cache,
+            aerospike_runtime: Arc::new(crate::clients::aerospike::AerospikeRuntime::new(None)),
+            s3: Arc::new(crate::clients::s3::NoopS3Client),
+            index_deleter: None,
+            jobs: Default::default(),
+            restore_runs: Default::default(),
+            aerospike_set_prefix: config.aerospike_set_prefix.clone(),
+            pipeline_store: None,
+            udf_store: None,
+            write_trigger: None,
+            metrics_backend_url: None,
+            aws_cost_config: AwsCostConfig {
+                enabled: false,
+                region: config.aws_cost_region.clone(),
+                tag_key: config.aws_cost_tag_key.clone(),
+                tag_value: config.aws_cost_tag_value.clone(),
+                site: config.aws_cost_site.clone(),
+                cache_ttl_seconds: config.aws_cost_cache_ttl_seconds,
+            },
+            pipeline_status_cache: Default::default(),
+            pipeline_status_cache_ttl: std::time::Duration::from_millis(1),
+            pipeline_status_inflight: Default::default(),
+            udf_status_cache: Default::default(),
+            udf_status_inflight: Default::default(),
+            consistency: Arc::new(ConsistencyWatcher::new()),
+            cache_warmed_through: Default::default(),
+            cache_namespaces: Default::default(),
+            warm_inflight: Default::default(),
+            reactive_warm_generations: Default::default(),
+            facet_fields: Default::default(),
+            scan_threads: Default::default(),
+            snapshot_min_interval_ms: config.snapshot_min_interval_ms,
+            snapshot_interval_ms: Default::default(),
+            snapshot_retention: Default::default(),
+            blob_reference_attributes: Default::default(),
+            blob_cache_enabled: false,
+            managed_platform_enabled: false,
+            namespace_store_refs: Default::default(),
+            embedding_profiles: Default::default(),
+            last_snapshot_at: Default::default(),
+            snapshot_inflight: Default::default(),
+            inbound_auth: crate::auth::InboundAuth::Open,
+            minted_key_verifier: None,
+            key_store: None,
+            keys_namespace: config.keys_namespace.clone(),
+            vector_store_namespace: config.vector_store_namespace.clone(),
+            turbopuffer_dashboard_base_url: String::new(),
+            default_store: "default".to_string(),
+            resolved_vectorstores: Default::default(),
+            shard_count: config.shard_count,
+            federated_query_max_namespaces: config.federated_query_max_namespaces,
+            federated_query_namespace_threads: config.federated_query_namespace_threads,
+            pinned_federated_query_namespace_threads: config
+                .pinned_federated_query_namespace_threads,
+            sharded_namespaces: Default::default(),
+            init_tasks: Default::default(),
+            init_backfill_batch_size: config.init_backfill_batch_size,
+            init_backfill_rps: config.init_backfill_rps,
+            namespace_list_cache: Default::default(),
+            namespace_list_cache_ttl: std::time::Duration::from_millis(1),
+            agents: crate::agent::registry_from_json(None).unwrap(),
+            agentic_enabled: false,
+            agent_provider: Arc::new(crate::agent::DisabledAgentProvider),
+            search_kind_stores: Default::default(),
+        })
+    }
+
+    /// Origin holds `d1`/`d2` with a generated `embed_text`; the cache holds
+    /// the same docs as written before embedding ran (no `embed_text`) when
+    /// `warm` is set, and nothing when cold.
+    async fn fixture(warm: bool) -> (Arc<AppState>, Arc<MockTurbopufferClient>) {
+        let origin = Arc::new(MockTurbopufferClient::new());
+        let cache = Arc::new(MockAerospikeClient::new());
+        let mut docs = Vec::new();
+        for (id, body) in [("d1", "alpha"), ("d2", "bravo bravo")] {
+            let mut attributes: HashMap<String, serde_json::Value> = HashMap::new();
+            attributes.insert("body".into(), json!(body));
+            if warm {
+                cache.put(NS, id, &attributes).await.unwrap();
+            }
+            attributes.insert("embed_text".into(), json!(mock_embed(body)));
+            docs.push(UpsertDoc {
+                id: id.into(),
+                vector: None,
+                vectors: None,
+                attributes,
+            });
+        }
+        origin.upsert(NS, &docs).await.unwrap();
+        (test_state(Arc::clone(&origin), cache), origin)
+    }
+
+    async fn origin_embed_text(origin: &MockTurbopufferClient, id: &str) -> serde_json::Value {
+        let outcome = origin
+            .ranked_query(
+                NS,
+                &json!(["id", "asc"]),
+                10,
+                Some(&json!(["id", "Eq", id])),
+                Some(&vectorstore_core::models::IncludeAttributes::Fields(vec![
+                    "embed_text".into(),
+                ])),
+            )
+            .await
+            .unwrap();
+        outcome.rows[0].attributes["embed_text"].clone()
+    }
+
+    async fn body_json(resp: axum::response::Response) -> (HeaderMap, serde_json::Value) {
+        let (parts, body) = resp.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        (parts.headers, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn point_fetch(state: &Arc<AppState>, id: &str) -> (HeaderMap, serde_json::Value) {
+        let resp = fetch_document(
+            State(Arc::clone(state)),
+            Path((NS.to_string(), id.to_string())),
+            Query(FetchQueryParams {
+                include_attributes: Some("embed_text".into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        body_json(resp).await
+    }
+
+    #[tokio::test]
+    async fn point_fetch_embed_text_matches_origin_warm_and_cold() {
+        for warm in [true, false] {
+            let (state, origin) = fixture(warm).await;
+            for id in ["d1", "d2"] {
+                let (headers, body) = point_fetch(&state, id).await;
+                assert_eq!(
+                    body["attributes"]["embed_text"],
+                    origin_embed_text(&origin, id).await,
+                    "warm={warm} id={id}"
+                );
+                assert_ne!(headers[LAYER_CACHE_HEADER], "hit", "stale row served");
+                // The refreshed row now satisfies the same fetch from cache.
+                let (headers, body) = point_fetch(&state, id).await;
+                assert_eq!(headers[LAYER_CACHE_HEADER], "hit");
+                assert_eq!(
+                    body["attributes"]["embed_text"],
+                    origin_embed_text(&origin, id).await
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_fetch_embed_text_matches_origin_warm_and_cold() {
+        for warm in [true, false] {
+            let (state, origin) = fixture(warm).await;
+            let resp = fetch_many_documents(
+                State(Arc::clone(&state)),
+                Path(NS.to_string()),
+                HeaderMap::new(),
+                Json(FetchManyRequest {
+                    ids: vec!["d1".into(), "d2".into()],
+                    include_attributes: Some(vec!["embed_text".into()]),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response();
+            let (headers, body) = body_json(resp).await;
+            assert_ne!(headers[LAYER_CACHE_HEADER], "hit", "stale rows served");
+            for id in ["d1", "d2"] {
+                let doc = body["documents"]
+                    .as_array()
+                    .and_then(|docs| docs.iter().find(|d| d["id"] == id))
+                    .unwrap_or_else(|| panic!("{id} missing: {body}"));
+                assert_eq!(
+                    doc["attributes"]["embed_text"],
+                    origin_embed_text(&origin, id).await,
+                    "warm={warm} id={id}"
+                );
+            }
+        }
     }
 
     #[test]
