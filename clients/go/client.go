@@ -123,6 +123,29 @@ func (e *HevlayerError) Error() string {
 	return fmt.Sprintf("hevlayer: status %d", e.StatusCode)
 }
 
+type CompareUdfCandidateParams struct {
+	Namespace string `json:"namespace,omitempty"`
+	MaxRows int64 `json:"max_rows,omitempty"`
+	Sample int64 `json:"sample,omitempty"`
+}
+
+func (params *CompareUdfCandidateParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "namespace", params.Namespace); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "max_rows", params.MaxRows); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "sample", params.Sample); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
 type FetchDocumentParams struct {
 	IncludeAttributes []string `json:"include_attributes,omitempty"`
 }
@@ -167,6 +190,25 @@ func (params *GetCostTimeseriesParams) query() (url.Values, error) {
 		return nil, err
 	}
 	if err := addQueryValue(query, "step", params.Step); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type GetNamespaceMetadataParams struct {
+	FieldStats bool `json:"field_stats,omitempty"`
+	FieldStatsTop int64 `json:"field_stats_top,omitempty"`
+}
+
+func (params *GetNamespaceMetadataParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "field_stats", params.FieldStats); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "field_stats_top", params.FieldStatsTop); err != nil {
 		return nil, err
 	}
 	return query, nil
@@ -677,6 +719,32 @@ func (client *Client) ClaimUdfItemsWithPerf(ctx context.Context, udfID string, b
 }
 
 
+func (client *Client) CompareUdfCandidate(ctx context.Context, udfID string, params *CompareUdfCandidateParams, options ...RequestOption) (*UdfCandidateComparison, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := UdfCandidateComparison{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/candidate/compare", url.PathEscape(udfID)), query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CompareUdfCandidateWithPerf(ctx context.Context, udfID string, params *CompareUdfCandidateParams, options ...RequestOption) (*LayerResponse[UdfCandidateComparison], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := UdfCandidateComparison{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/candidate/compare", url.PathEscape(udfID)), query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[UdfCandidateComparison]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) CompleteUdfItems(ctx context.Context, udfID string, body *UdfCompleteRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
@@ -811,6 +879,24 @@ func (client *Client) CreateUdfWithPerf(ctx context.Context, body *CreateUdfRequ
 }
 
 
+func (client *Client) CreateUdfCandidate(ctx context.Context, udfID string, body *UdfCandidateRequest, options ...RequestOption) (*GetUdfResponse, error) {
+	out := GetUdfResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CreateUdfCandidateWithPerf(ctx context.Context, udfID string, body *UdfCandidateRequest, options ...RequestOption) (*LayerResponse[GetUdfResponse], error) {
+	out := GetUdfResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[GetUdfResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) DeleteKey(ctx context.Context, keyID string, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
 	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/keys/%s", url.PathEscape(keyID)), url.Values{}, nil, &out, options...); err != nil {
@@ -894,6 +980,24 @@ func (client *Client) DeleteUdf(ctx context.Context, udfID string, options ...Re
 func (client *Client) DeleteUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
 	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[StatusResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) DiscardUdfCandidate(ctx context.Context, udfID string, options ...RequestOption) (*StatusResponse, error) {
+	out := StatusResponse{}
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) DiscardUdfCandidateWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
+	out := StatusResponse{}
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,17 +1299,25 @@ func (client *Client) GetNamespaceCapabilitiesWithPerf(ctx context.Context, name
 }
 
 
-func (client *Client) GetNamespaceMetadata(ctx context.Context, namespace string, options ...RequestOption) (*NamespaceMetadata, error) {
+func (client *Client) GetNamespaceMetadata(ctx context.Context, namespace string, params *GetNamespaceMetadataParams, options ...RequestOption) (*NamespaceMetadata, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
 	out := NamespaceMetadata{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (client *Client) GetNamespaceMetadataWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[NamespaceMetadata], error) {
+func (client *Client) GetNamespaceMetadataWithPerf(ctx context.Context, namespace string, params *GetNamespaceMetadataParams, options ...RequestOption) (*LayerResponse[NamespaceMetadata], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
 	out := NamespaceMetadata{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1394,6 +1506,24 @@ func (client *Client) GetUdf(ctx context.Context, udfID string, options ...Reque
 func (client *Client) GetUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[GetUdfResponse], error) {
 	out := GetUdfResponse{}
 	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[GetUdfResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetUdfCandidate(ctx context.Context, udfID string, options ...RequestOption) (*GetUdfResponse, error) {
+	out := GetUdfResponse{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetUdfCandidateWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[GetUdfResponse], error) {
+	out := GetUdfResponse{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/candidate", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1949,6 +2079,24 @@ func (client *Client) ListWarmJobsWithPerf(ctx context.Context, namespace string
 }
 
 
+func (client *Client) LookupUdfSiblings(ctx context.Context, udfID string, body *UdfLookupRequest, options ...RequestOption) (*UdfLookupResponse, error) {
+	out := UdfLookupResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/lookup", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) LookupUdfSiblingsWithPerf(ctx context.Context, udfID string, body *UdfLookupRequest, options ...RequestOption) (*LayerResponse[UdfLookupResponse], error) {
+	out := UdfLookupResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/lookup", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[UdfLookupResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) MintKey(ctx context.Context, body *MintKeyRequest, options ...RequestOption) (*MintKeyResponse, error) {
 	out := MintKeyResponse{}
 	if _, err := client.request(ctx, "POST", "/v2/keys", url.Values{}, body, &out, options...); err != nil {
@@ -1982,6 +2130,24 @@ func (client *Client) PauseUdfWithPerf(ctx context.Context, udfID string, option
 		return nil, err
 	}
 	return &LayerResponse[Udf]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) PromoteUdfCandidate(ctx context.Context, udfID string, body *UdfCandidatePromoteRequest, options ...RequestOption) (*UdfCandidatePromoteResponse, error) {
+	out := UdfCandidatePromoteResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/candidate/promote", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PromoteUdfCandidateWithPerf(ctx context.Context, udfID string, body *UdfCandidatePromoteRequest, options ...RequestOption) (*LayerResponse[UdfCandidatePromoteResponse], error) {
+	out := UdfCandidatePromoteResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/candidate/promote", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[UdfCandidatePromoteResponse]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -2026,6 +2192,24 @@ func (client *Client) PutPipelineDocumentChunksWithPerf(ctx context.Context, pip
 		return nil, err
 	}
 	return &LayerResponse[StageDocumentResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) PutPipelineDocumentRows(ctx context.Context, pipelineID string, docID string, body *PutPipelineRowsRequest, options ...RequestOption) (*TurbopufferWriteResponse, error) {
+	out := TurbopufferWriteResponse{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/rows", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PutPipelineDocumentRowsWithPerf(ctx context.Context, pipelineID string, docID string, body *PutPipelineRowsRequest, options ...RequestOption) (*LayerResponse[TurbopufferWriteResponse], error) {
+	out := TurbopufferWriteResponse{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/rows", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[TurbopufferWriteResponse]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -2292,6 +2476,24 @@ func (client *Client) RevokeKeyWithPerf(ctx context.Context, keyID string, optio
 		return nil, err
 	}
 	return &LayerResponse[ApiKey]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) SearchNamespace(ctx context.Context, namespace string, body *SearchRequest, options ...RequestOption) (*SearchResponse, error) {
+	out := SearchResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/search", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) SearchNamespaceWithPerf(ctx context.Context, namespace string, body *SearchRequest, options ...RequestOption) (*LayerResponse[SearchResponse], error) {
+	out := SearchResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/search", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[SearchResponse]{Data: out, Perf: *perf}, nil
 }
 
 

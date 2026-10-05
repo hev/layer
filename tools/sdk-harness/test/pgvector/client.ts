@@ -72,6 +72,11 @@ try {
           new Set(c.ids.map((id: unknown) => JSON.stringify(id))),
           c.name,
         );
+      if (c.positive_scores)
+        assert(
+          rows.length > 0 && rows.every((r: any) => Number.isFinite(r.$dist) && r.$dist > 0),
+          c.name,
+        );
       if (c.order) {
         assert.deepEqual(
           rows.map((r: any) => r.id),

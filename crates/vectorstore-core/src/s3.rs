@@ -59,6 +59,32 @@ pub trait S3Client: Send + Sync {
     }
 }
 
+/// Conditional object access for correctness witnesses, separate from bulk S3
+/// projections. Missing/unsupported stores must fail, never pretend persistence.
+#[derive(Clone, Debug)]
+pub struct WitnessObject {
+    pub bytes: Vec<u8>,
+    pub etag: String,
+}
+#[async_trait]
+pub trait WitnessObjectStore: Send + Sync {
+    async fn witness_get(&self, key: &str) -> Result<Option<WitnessObject>, S3Error>;
+    /// None means create-only; Some(etag) means replace exactly that version.
+    async fn witness_cas(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<bool, S3Error>;
+}
+pub fn witness_scope_key(domain: &str, namespace: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(domain, namespace)).unwrap())
+    )
+}
+
 // --- Real implementation using aws-sdk-s3 ---
 
 pub struct AwsS3Client {
@@ -249,6 +275,80 @@ impl S3Client for AwsS3Client {
     }
 }
 
+#[async_trait]
+impl WitnessObjectStore for AwsS3Client {
+    async fn witness_get(&self, key: &str) -> Result<Option<WitnessObject>, S3Error> {
+        match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                if output
+                    .content_length()
+                    .is_none_or(|length| !(0..=1024 * 1024).contains(&length))
+                {
+                    return Err(S3Error("witness object missing/big content length".into()));
+                }
+                let etag = output
+                    .e_tag()
+                    .ok_or_else(|| S3Error("witness object lacks ETag".into()))?
+                    .to_owned();
+                let bytes = output
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| S3Error(e.to_string()))?
+                    .into_bytes()
+                    .to_vec();
+                Ok(Some(WitnessObject { bytes, etag }))
+            }
+            Err(error) => {
+                let error = error.into_service_error();
+                if error.is_no_such_key() {
+                    Ok(None)
+                } else {
+                    Err(S3Error(error.to_string()))
+                }
+            }
+        }
+    }
+    async fn witness_cas(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<bool, S3Error> {
+        let mut request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(bytes.into());
+        request = match expected {
+            Some(etag) => request.if_match(etag),
+            None => request.if_none_match("*"),
+        };
+        match request.send().await {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                let error = error.into_service_error();
+                if matches!(
+                    error.meta().code(),
+                    Some("PreconditionFailed" | "ConditionalRequestConflict")
+                ) {
+                    Ok(false)
+                } else {
+                    Err(S3Error(error.to_string()))
+                }
+            }
+        }
+    }
+}
+
 // --- Noop implementation for deployments without an object store ---
 
 /// Composed when no object store is configured (no `S3_BUCKET`). Reads degrade
@@ -343,10 +443,99 @@ impl S3Client for MockS3Client {
     }
 }
 
+#[async_trait]
+impl WitnessObjectStore for MockS3Client {
+    async fn witness_get(&self, key: &str) -> Result<Option<WitnessObject>, S3Error> {
+        use sha2::{Digest, Sha256};
+        Ok(self.store.read().await.get(key).map(|bytes| WitnessObject {
+            bytes: bytes.clone(),
+            etag: format!("{:x}", Sha256::digest(bytes)),
+        }))
+    }
+    async fn witness_cas(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<bool, S3Error> {
+        use sha2::{Digest, Sha256};
+        let mut store = self.store.write().await;
+        let actual = store
+            .get(key)
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        if actual.as_deref() != expected {
+            return Ok(false);
+        }
+        store.insert(key.into(), bytes);
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod batch_delete_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn aws_witness_cas_sends_exact_provider_conditions() {
+        let conditions = Arc::new(Mutex::new(Vec::new()));
+        let captured = conditions.clone();
+        let app = axum::Router::new().route("/bucket/key", axum::routing::get(|| async {
+            ([("etag", "\"v1\"")], "original")
+        }).put(move |headers: axum::http::HeaderMap| {
+            let captured = captured.clone();
+            async move {
+                let matched = headers.get("if-match").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                let absent = headers.get("if-none-match").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                captured.lock().unwrap().push((matched.clone(), absent));
+                if matched.as_deref() == Some("\"v1\"") {
+                    (axum::http::StatusCode::OK, [("content-type", "application/xml")], "")
+                } else {
+                    (axum::http::StatusCode::PRECONDITION_FAILED, [("content-type", "application/xml")], "<Error><Code>PreconditionFailed</Code><Message>changed</Message></Error>")
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(format!("http://{address}"))
+            .force_path_style(true)
+            .build();
+        let client = AwsS3Client {
+            client: aws_sdk_s3::Client::from_conf(config),
+            bucket: "bucket".into(),
+        };
+        let object = client.witness_get("key").await.unwrap().unwrap();
+        assert_eq!(object.etag, "\"v1\"");
+        assert_eq!(object.bytes, b"original");
+        assert!(client
+            .witness_cas("key", Some(&object.etag), b"next".to_vec())
+            .await
+            .unwrap());
+        assert!(!client
+            .witness_cas("key", Some("\"v0\""), b"stale".to_vec())
+            .await
+            .unwrap());
+        assert!(!client
+            .witness_cas("key", None, b"create".to_vec())
+            .await
+            .unwrap());
+        assert_eq!(
+            *conditions.lock().unwrap(),
+            vec![
+                (Some("\"v1\"".into()), None),
+                (Some("\"v0\"".into()), None),
+                (None, Some("*".into()))
+            ]
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn aws_batch_delete_sends_one_request_and_reports_partial_errors() {

@@ -165,6 +165,14 @@ impl SnapshotTrigger for AppStateSnapshotTrigger {
 /// `snapshot_inflight` (single-flight) and `last_snapshot_at` (interval floor).
 /// Errors are logged, never returned — the call site is fire-and-forget.
 pub async fn snapshot_namespace(state: Arc<AppState>, namespace: String) {
+    crate::metrics::scope_billing_caller(
+        crate::metrics::BillingCaller::snapshot(),
+        snapshot_namespace_attributed(state, namespace),
+    )
+    .await
+}
+
+async fn snapshot_namespace_attributed(state: Arc<AppState>, namespace: String) {
     // Durable snapshots need an object store; without one there is nothing to
     // write, so bail before scanning rather than warn on every stable mark.
     if !state.s3.is_configured() {
@@ -276,6 +284,19 @@ async fn run_snapshot(
     let aggregation = aggregate_facets(state, namespace, facet_fields, SNAPSHOT_SCAN_PAGE_SIZE)
         .await
         .map_err(|e| format!("upstream scan: {}", e))?;
+
+    #[cfg(feature = "pro")]
+    if let Err(e) = crate::field_stats::store_reconciled(
+        state,
+        namespace,
+        watermark_ms,
+        aggregation.row_count,
+        aggregation.stats.clone(),
+    )
+    .await
+    {
+        warn!(namespace = %namespace, error = %e, "field stats reconcile store failed");
+    }
 
     let (fields, fields_skipped) = build_field_summaries(facet_fields, &aggregation.counts);
     observe_skipped_fields(state.metrics.as_ref(), namespace, &fields_skipped);
@@ -488,6 +509,10 @@ pub async fn cache_latest_snapshot_from_s3(
 struct FacetAggregation {
     row_count: u64,
     counts: HashMap<String, HashMap<String, u64>>,
+    /// Missing counts, ranges and value counts for field stats, collected
+    /// from the same pages (no extra scan, no extra fields).
+    #[cfg(feature = "pro")]
+    stats: crate::field_stats::ScanStats,
 }
 
 async fn aggregate_facets(
@@ -514,8 +539,19 @@ async fn aggregate_facets(
         .map(|f| (f.clone(), HashMap::new()))
         .collect();
     let mut row_count = 0;
+    #[cfg(feature = "pro")]
+    let mut stats = crate::field_stats::ScanStats::default();
     for partition in partitions {
         row_count += partition.row_count;
+        #[cfg(feature = "pro")]
+        for (field, agg) in partition.stats.fields {
+            match stats.fields.entry(field) {
+                std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().merge(agg),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(agg);
+                }
+            }
+        }
         for (field, counts) in partition.counts {
             let field_counts = merged.entry(field).or_default();
             for (value, count) in counts {
@@ -527,6 +563,8 @@ async fn aggregate_facets(
     Ok(FacetAggregation {
         row_count,
         counts: merged,
+        #[cfg(feature = "pro")]
+        stats,
     })
 }
 
@@ -544,6 +582,8 @@ async fn aggregate_facets_partition(
     let include: Vec<String> = facet_fields.to_vec();
     let mut cursor: Option<String> = None;
     let mut row_count = 0;
+    #[cfg(feature = "pro")]
+    let mut stats = crate::field_stats::ScanStats::default();
 
     loop {
         let page = tpuf
@@ -558,6 +598,14 @@ async fn aggregate_facets_partition(
 
         row_count += page.documents.len() as u64;
         for doc in &page.documents {
+            #[cfg(feature = "pro")]
+            for field in facet_fields {
+                stats
+                    .fields
+                    .entry(field.clone())
+                    .or_default()
+                    .observe(doc.attributes.get(field));
+            }
             for field in facet_fields {
                 if let Some(val) = doc.attributes.get(field) {
                     let Some(per_field) = counts.get_mut(field) else {
@@ -590,7 +638,12 @@ async fn aggregate_facets_partition(
         }
     }
 
-    Ok(FacetAggregation { row_count, counts })
+    Ok(FacetAggregation {
+        row_count,
+        counts,
+        #[cfg(feature = "pro")]
+        stats,
+    })
 }
 
 pub async fn run_snapshot_retention_loop(state: Arc<AppState>, interval: Duration) {

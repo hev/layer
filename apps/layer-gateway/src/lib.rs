@@ -6,17 +6,21 @@ pub mod consistency;
 pub mod cost;
 pub mod embedding;
 pub mod error;
+#[cfg(feature = "pro")]
+pub mod field_stats;
 pub mod history;
 pub mod index_config;
 pub mod index_gc;
 pub mod keys;
 pub mod lineage;
+pub mod mcp;
 pub mod metrics;
 pub mod models;
 pub mod namespace_purge;
 pub mod pipeline;
 #[cfg(feature = "pro")]
 pub mod pipeline_segments;
+pub mod rerank;
 pub mod routes;
 pub mod server;
 pub mod shards;
@@ -76,6 +80,7 @@ pub struct AppState {
     pub metrics: Arc<LayerMetrics>,
     pub telemetry: Arc<TelemetryCounters>,
     pub turbopuffer: Option<Arc<dyn TurbopufferClient>>,
+    pub worker_embedders: Arc<embedding::worker::WorkerEmbedders>,
     pub embedding_provider: Option<Arc<dyn embedding::EmbeddingProvider>>,
     /// The locally configured embedder reached over `LAYER_EMBED_URL`
     /// (RFC 0120). Serves every `prefer: local` model that no in-process
@@ -87,6 +92,9 @@ pub struct AppState {
     pub embedding_cache_ttl: std::time::Duration,
     pub wire_embedding_profiles:
         Arc<DashMap<String, Vec<crate::routes::embed_wire::EmbeddingProfile>>>,
+    /// `/search` runtime: the rerank provider, its in-flight cap and the
+    /// short-lived namespace search-schema cache.
+    pub search: Arc<routes::search::SearchRuntime>,
     pub aerospike: Arc<dyn AerospikeClient>,
     pub aerospike_runtime: Arc<AerospikeRuntime>,
     pub s3: Arc<dyn S3Client>,
@@ -234,15 +242,65 @@ pub struct AppState {
     /// backend-specific behavior (the interim fuzziness clamp).
     pub search_kind_stores: std::collections::HashSet<String>,}
 
+/// Keeps a source write fenced while its Function namespace session is alive.
+#[async_trait]
+pub trait WriteGuard: Send + Sync {
+    async fn validate(&self) -> Result<(), crate::error::AppError>;
+    async fn lost(&self);
+}
+#[async_trait]
+impl WriteGuard for () {
+    async fn validate(&self) -> Result<(), crate::error::AppError> {
+        Ok(())
+    }
+    async fn lost(&self) {
+        std::future::pending::<()>().await
+    }
+}
+pub async fn run_guarded_write<T>(
+    guard: Option<&dyn WriteGuard>,
+    work: impl std::future::Future<Output = Result<T, crate::error::AppError>>,
+) -> Result<T, crate::error::AppError> {
+    let Some(guard) = guard else {
+        return work.await;
+    };
+    {
+        let _timer =
+            vectorstore_core::delete_timing::start(vectorstore_core::delete_timing::Phase::Guard);
+        guard.validate().await?;
+    }
+    tokio::select! {
+        biased;
+        _ = guard.lost() => Err(crate::error::AppError::Upstream("Function namespace lock lost".into())),
+        result = work => {
+            let _timer = vectorstore_core::delete_timing::start(vectorstore_core::delete_timing::Phase::Guard);
+            guard.validate().await?; result
+        }
+    }
+}
+
 #[async_trait]
 pub trait WriteTrigger: Send + Sync {
+    async fn prepare_write(
+        &self,
+        state: Arc<AppState>,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<Box<dyn WriteGuard>, crate::error::AppError>;
+    async fn prepare_replacement(
+        &self,
+        state: Arc<AppState>,
+        namespace: &str,
+    ) -> Result<Box<dyn WriteGuard>, crate::error::AppError> {
+        self.prepare_write(state, namespace, &[]).await
+    }
     async fn enqueue_write_rows(
         &self,
         state: Arc<AppState>,
         namespace: &str,
         rows: Vec<HashMap<String, Value>>,
         partial_rows: bool,
-    );
+    ) -> Result<(), crate::error::AppError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +688,10 @@ async fn count_telemetry_usage(
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with_mcp(state, None)
+}
+
+pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegistry>>) -> Router {
     let mut public = Router::new()
         .route("/health", get(routes::health::health))
         .route("/ready", get(routes::health::ready))
@@ -696,6 +758,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     #[allow(unused_mut)]
     let mut router = router.route("/v2/license", get(open_gateway_license));
 
+    let host_routes = mcp.clone().filter(|registry| registry.has_host_routes());
+    if let Some(registry) = mcp {
+        router = router
+            .route("/mcp/{name}", post(mcp::handle))
+            .layer(axum::Extension(registry));
+    }
+
     #[cfg(feature = "pro")]
     if state.pipeline_store.is_some() {
         router = router
@@ -732,6 +801,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 get(routes::pipeline::get_chunks),
             )
             .route(
+                "/v2/pipelines/{id}/documents/{doc_id}/rows",
+                put(routes::pipeline::write_rows),
+            )
+            .route(
                 "/v2/pipelines/{id}/documents/{doc_id}/vectors",
                 put(routes::pipeline::write_vectors),
             );
@@ -757,7 +830,25 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 "/v2/udfs/{id}/reset-failed",
                 post(routes::udf::reset_failed_udf),
             )
+            .route(
+                "/v2/udfs/{id}/candidate",
+                post(routes::udf_candidate::create_candidate)
+                    .get(routes::udf_candidate::get_candidate_run)
+                    .delete(routes::udf_candidate::discard_candidate),
+            )
+            .route(
+                "/v2/udfs/{id}/candidate/compare",
+                get(routes::udf_candidate::compare_candidate),
+            )
+            .route(
+                "/v2/udfs/{id}/candidate/promote",
+                post(routes::udf_candidate::promote_candidate),
+            )
             .route("/v2/udfs/{id}/discover", post(routes::udf::discover_udf))
+            .route(
+                "/v2/udfs/{id}/items/lookup",
+                post(routes::udf::lookup_udf_siblings),
+            )
             .route("/v2/udfs/{id}/claim", post(routes::udf::claim_udf_items))
             .route(
                 "/v2/udfs/{id}/items/heartbeat",
@@ -903,7 +994,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/namespaces/{namespace}/schema",
-            get(routes::turbopuffer::passthrough_get).post(routes::turbopuffer::passthrough_post),
+            get(routes::turbopuffer::get_namespace_schema)
+                .post(routes::turbopuffer::passthrough_post),
         )
         .route(
             "/v1/namespaces/{namespace}/query",
@@ -928,6 +1020,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v2/namespaces/{namespace}/query",
             post(routes::query::query),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/search",
+            post(routes::search::search),
         )
         .route("/v2/query", post(routes::federated_query::query))
         .route(
@@ -1002,10 +1098,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             auth::require_api_key,
         ));
 
-    public
+    let app = public
         .merge(router)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    if let Some(registry) = host_routes {
+        Router::new()
+            .fallback_service(app)
+            .layer(axum::middleware::from_fn_with_state(
+                registry,
+                mcp::route_host,
+            ))
+    } else {
+        app
+    }
 }
 
 #[cfg(not(feature = "pro"))]

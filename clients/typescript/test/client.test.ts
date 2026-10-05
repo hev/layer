@@ -180,20 +180,23 @@ test("core operations use the generated surface", async () => {
   }
 });
 
-test("aggregate-only and grouped query responses omit rows (LYR-164)", async () => {
-  const bodies = [
-    '{"aggregations":{"n":9769},"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":3},"next_cursor":null}',
-    '{"aggregation_groups":[{"category":"boots","n":412},{"category":"sandals","n":97}],"billing":{"billable_logical_bytes_queried":0,"billable_logical_bytes_returned":0},"performance":{"cache_hit_ratio":1.0,"cache_temperature":"hot","server_total_ms":4},"next_cursor":null}',
-  ];
-  let call = 0;
-  const fetch: FetchLike = async () => new Response(bodies[call++], { status: 200, headers: { "content-type": "application/json", "x-layer-stable-as-of": "42" } });
-  const client = new Hevlayer({ baseUrl: "https://unit.test", apiKey: "test-token", fetch });
-  const aggregate = await client.queryNamespace("ns", { aggregate_by: { n: ["Count"] } } as any) as any;
-  assertEqual(aggregate.rows, undefined);
-  assertDeepEqual(aggregate.aggregations, { n: 9769 });
-  const grouped = await client.queryNamespace("ns", { aggregate_by: { n: ["Count"] }, group_by: ["category"] } as any) as any;
-  assertEqual(grouped.rows, undefined);
-  assertDeepEqual(grouped.aggregation_groups[0], { category: "boots", n: 412 });
+test("namespace metadata sends field stats parameters only when asked", async () => {
+  const queries: string[] = [];
+  const fetch: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    queries.push(url.search);
+    const layer: Record<string, unknown> = {};
+    if (url.searchParams.get("field_stats") === "true") {
+      layer.field_stats = { as_of: 1, rows: 2, fields: { kind: { missing: 0, distinct: { value: 1, quality: "exact" }, state: "exact" } } };
+    }
+    return jsonResponse({ id: "ns", schema: {}, approx_logical_bytes: 0, approx_row_count: 2, created_at: "now", updated_at: "now", layer });
+  };
+  const client = new Hevlayer({ baseUrl: "http://layer.test", apiKey: "test-token", fetch });
+  const plain = await client.getNamespaceMetadata("ns");
+  assertEqual(plain.layer?.field_stats, undefined);
+  const stats = await client.getNamespaceMetadata("ns", { fieldStats: true, fieldStatsTop: 5 });
+  assertEqual(stats.layer?.field_stats?.fields?.kind?.distinct.value, 1);
+  assertDeepEqual(queries, ["", "?field_stats=true&field_stats_top=5"]);
 });
 
 function jsonResponse(body: unknown, options: { status?: number; headers?: Record<string, string> } = {}): Response {

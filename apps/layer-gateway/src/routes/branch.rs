@@ -253,47 +253,55 @@ pub(crate) async fn branch_or_copy(
         }
     }
 
-    let query = strip_overload(uri.query());
-    let upstream = match state
-        .turbopuffer()
-        .passthrough("POST", uri.path(), query.as_deref(), Some(body.clone()))
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            observe("upstream_error");
-            return Err(AppError::Upstream(format!(
-                "Turbopuffer passthrough failed: {error}"
-            )));
-        }
+    let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
+        Some(trigger.prepare_replacement(state.clone(), target).await?)
+    } else {
+        None
     };
-    if !is_success(upstream.status) {
-        // A failed branch changes nothing in Layer; the store's answer
-        // (a non-empty destination, a missing source) goes back unchanged.
-        observe("upstream_error");
-        return into_response(upstream);
-    }
+    crate::run_guarded_write(_function_guard.as_deref(), async {
+        let query = strip_overload(uri.query());
+        let upstream = match state
+            .turbopuffer()
+            .passthrough("POST", uri.path(), query.as_deref(), Some(body.clone()))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                observe("upstream_error");
+                return Err(AppError::Upstream(format!(
+                    "Turbopuffer passthrough failed: {error}"
+                )));
+            }
+        };
+        if !is_success(upstream.status) {
+            // Return the store's answer unchanged. Prepared source proof remains
+            // conservatively revoked after an attempted namespace replacement.
+            observe("upstream_error");
+            return into_response(upstream);
+        }
 
-    match carry_layer_state(&state, target, &request, &body, capabilities.blobs.native).await {
-        Ok(lineage) => {
-            observe("ok");
-            info!(
-                op = op.label(),
-                source = %request.source,
-                target,
-                store_ref = %store_ref,
-                lineage_depth = lineage.ancestors.len(),
-                key = grant.map(grant_name).unwrap_or("open"),
-                "namespace {} created",
-                op.label()
-            );
-            into_response(upstream)
+        match carry_layer_state(&state, target, &request, &body, capabilities.blobs.native).await {
+            Ok(lineage) => {
+                observe("ok");
+                info!(
+                    op = op.label(),
+                    source = %request.source,
+                    target,
+                    store_ref = %store_ref,
+                    lineage_depth = lineage.ancestors.len(),
+                    key = grant.map(grant_name).unwrap_or("open"),
+                    "namespace {} created",
+                    op.label()
+                );
+                into_response(upstream)
+            }
+            Err(error) => {
+                observe("layer_error");
+                Err(error)
+            }
         }
-        Err(error) => {
-            observe("layer_error");
-            Err(error)
-        }
-    }
+    })
+    .await
 }
 
 fn grant_name(grant: &CallerGrant) -> &str {

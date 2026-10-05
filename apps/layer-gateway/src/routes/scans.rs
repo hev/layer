@@ -76,22 +76,11 @@ const MAX_SCAN_COUNT_TIMEOUT_SECONDS: u32 = 300;
 const MAX_SCAN_VALUES: usize = 1_000_000;
 
 fn now_iso() -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = d.as_secs();
-    let nanos = d.subsec_nanos();
-    // Good enough ISO timestamp for ephemeral scan state
-    format!(
-        "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        1970 + secs / 31_536_000,
-        (secs % 31_536_000) / 2_592_000 + 1,
-        (secs % 2_592_000) / 86_400 + 1,
-        (secs % 86_400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60,
-        nanos / 1_000_000,
-    )
+    format_iso(std::time::SystemTime::now())
+}
+
+fn format_iso(time: std::time::SystemTime) -> String {
+    humantime::format_rfc3339_millis(time).to_string()
 }
 
 fn enqueue_scan(
@@ -151,7 +140,7 @@ fn enqueue_scan(
     let kind = request.kind;
     let field = request.field;
     let filters = request.filters;
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         execute_scan(
             state_clone,
             scan_id,
@@ -239,7 +228,7 @@ pub async fn create_snapshot_job(
     state.jobs.insert(scan_id.clone(), state_entry);
 
     let filters = request.filters;
-    tokio::spawn(async move {
+    crate::metrics::spawn_snapshot_with_billing_caller(async move {
         execute_snapshot_job(state, scan_id, namespace, field, source, filters, page_size).await;
     });
 
@@ -779,7 +768,7 @@ async fn create_scan_count(
                 threads,
             )
             .await
-            .map_err(|e| AppError::Upstream(format!("origin scan count failed: {}", e)));
+            .map_err(|e| AppError::from_turbopuffer(e, "origin scan count failed"));
             if let Ok(ref outcome) = outcome {
                 if !outcome.timed_out {
                     if let Some(w) = scan_start_watermark {
@@ -1202,7 +1191,7 @@ async fn create_ranked_scan_values(
     state.jobs.insert(scan_id.clone(), job_state);
 
     let exhaustive = request.exhaustive;
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         execute_ranked_values_scan(
             state,
             scan_id,
@@ -1428,7 +1417,7 @@ async fn create_hybrid_text_scan_values(
         .ok_or_else(|| AppError::Validation("invalid scan job".to_string()))?;
     state.jobs.insert(scan_id.clone(), job_state);
 
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         let start = Instant::now();
         let active = active_shard_count(&state, &namespace).await;
         let shard_count = active.unwrap_or(1);
@@ -1963,7 +1952,7 @@ fn map_tpuf_err(e: TurbopufferError) -> AppError {
             Some("createScan".to_string()),
         );
     }
-    AppError::Upstream(format!("Turbopuffer scan count failed: {}", e))
+    AppError::from_turbopuffer(e, "Turbopuffer scan count failed")
 }
 
 /// GET /v2/namespaces/{namespace}/scans
@@ -2802,7 +2791,7 @@ async fn execute_origin_filter_count(
     deadline: Instant,
     active_shards: Option<u64>,
     threads: u32,
-) -> Result<LiveCountOutcome, String> {
+) -> Result<LiveCountOutcome, TurbopufferError> {
     if let Some(shard_count) = active_shards {
         let outcomes = stream::iter(0..shard_count)
             .map(|shard| {
@@ -2859,7 +2848,7 @@ async fn execute_origin_filter_count_partition(
     filters: Option<Value>,
     page_size: u32,
     deadline: Instant,
-) -> Result<LiveCountOutcome, String> {
+) -> Result<LiveCountOutcome, TurbopufferError> {
     let include: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut count: u64 = 0;
@@ -2889,7 +2878,7 @@ async fn execute_origin_filter_count_partition(
         .await
         {
             Ok(Ok(page)) => page,
-            Ok(Err(e)) => return Err(format!("Turbopuffer scan failed: {}", e)),
+            Ok(Err(e)) => return Err(e),
             Err(_) => {
                 return Ok(LiveCountOutcome {
                     count,
@@ -3614,7 +3603,7 @@ fn spawn_background_warm(
         }
     }
 
-    tokio::spawn(async move {
+    crate::metrics::spawn_with_billing_caller(async move {
         state.metrics.set_cache_state(&namespace, "warming");
         info!(namespace = %namespace, "Starting background cache warm");
         if let Err(e) = state.turbopuffer().hint_cache_warm(&namespace).await {
@@ -4438,6 +4427,19 @@ fn cmp_values(a: &Value, b: &Value) -> Result<Ordering, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scan_timestamps_use_utc_calendar_and_milliseconds() {
+        for (millis, expected) in [
+            (1_790_681_467_160, "2026-09-29T11:31:07.160Z"),
+            (1_798_761_599_999, "2026-12-31T23:59:59.999Z"),
+            (1_798_761_600_000, "2027-01-01T00:00:00.000Z"),
+            (1_709_210_096_007, "2024-02-29T12:34:56.007Z"),
+        ] {
+            let time = std::time::UNIX_EPOCH + Duration::from_millis(millis);
+            assert_eq!(format_iso(time), expected);
+        }
+    }
 
     fn doc(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
         pairs

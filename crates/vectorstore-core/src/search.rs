@@ -20,7 +20,7 @@ fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabili
                 DeleteIds | Fetch | Dense | Fts | Hybrid | Projection
                 | ScalarFilters | ArrayFilters | MultiVector | OrderedScan | Facet
                 | DeleteByFilter | ImportArrow | Warm | NearestToId | Temporal | LegBreakdown
-                | Auto | Threads => Coverage::supported(),
+                | Collapse | Auto | Threads => Coverage::supported(),
                 UpsertRows | UpsertColumns => Coverage::approximate(
                     "Requires vector, vectors, or text; reserved attributes are omitted.",
                 ),
@@ -46,6 +46,9 @@ fn search_coverage(feature: crate::capabilities::WireFeature) -> crate::capabili
                     "Gateway-resolved embedding only; native schema passthrough is unavailable.",
                 ),
                 Branch => Coverage::unsupported_because(crate::capabilities::NO_NATIVE_BRANCH),
+                Search => Coverage::approximate(
+                    "One full-text attribute (the engine's text column). Fuzzy matching is whole-query, so at most one fuzzy leg runs and none at edit distance 0; auto fuzziness is clamped to exact-only.",
+                ),
                 _ => Coverage::unsupported(),
             }
 }

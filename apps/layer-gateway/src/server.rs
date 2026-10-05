@@ -20,7 +20,7 @@ use crate::index_config::{IndexConfigSource, StaticIndexConfigSource};
 use crate::metrics::LayerMetrics;
 use crate::telemetry::{Telemetry, TelemetryCounters};
 use crate::vector_store::{resolve_vector_stores_from_yaml, ResolvedVectorStoreKind};
-use crate::{build_router, AppState, RestoreRunState};
+use crate::{AppState, RestoreRunState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServerOptions {
@@ -72,6 +72,8 @@ pub async fn run_with_options(options: ServerOptions) {
         .init();
 
     let config = Config::from_env();
+    let mcp_registry = crate::mcp::registry_from_env()
+        .unwrap_or_else(|err| panic!("failed to load MCP registry: {err}"));
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let metrics = Arc::new(LayerMetrics::new());
     let telemetry_counters = Arc::new(TelemetryCounters::default());
@@ -315,6 +317,7 @@ pub async fn run_with_options(options: ServerOptions) {
         Arc::new(crate::agent::DisabledAgentProvider);
 
     let state = Arc::new(AppState {
+        worker_embedders: Arc::new(Default::default()),
         draining: Arc::new(AtomicBool::new(false)),
         drain_marker_path: config.drain_marker_path.clone(),
         metrics: Arc::clone(&metrics),
@@ -327,6 +330,9 @@ pub async fn run_with_options(options: ServerOptions) {
         embedding_cache: Arc::new(DashMap::new()),
         embedding_cache_ttl: std::time::Duration::from_millis(config.embedding_cache_ttl_ms),
         wire_embedding_profiles: Arc::new(DashMap::new()),
+        search: Arc::new(crate::routes::search::SearchRuntime::new(
+            crate::rerank::RerankRuntime::from_config(&config),
+        )),
         aerospike,
         aerospike_runtime,
         s3,
@@ -421,7 +427,7 @@ pub async fn run_with_options(options: ServerOptions) {
     }
 
     let _purge_worker = crate::namespace_purge::spawn_worker(&state);
-    let app = build_router(state);
+    let app = crate::build_router_with_mcp(state, mcp_registry);
 
     info!(addr = %addr, "Hevlayer gateway starting");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

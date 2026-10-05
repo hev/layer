@@ -48,6 +48,109 @@ pub const DIRECT_PIPELINE_ID: &str = "direct";
 const PIPELINE_LABEL_CAP: usize = 50;
 const NAMESPACE_LABEL_CAP: usize = 5000;
 
+#[derive(Clone, Copy, Debug)]
+pub enum BillingOperation {
+    Query,
+    RankedQuery,
+    Scan,
+    Fetch,
+    Passthrough,
+    Upsert,
+    Patch,
+    Delete,
+    Snapshot,
+}
+impl BillingOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::RankedQuery => "ranked_query",
+            Self::Scan => "scan",
+            Self::Fetch => "fetch",
+            Self::Passthrough => "passthrough",
+            Self::Upsert => "upsert",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+#[derive(Clone)]
+pub struct BillingCaller {
+    kind: &'static str,
+    name: String,
+    snapshot: bool,
+}
+impl BillingCaller {
+    pub fn unknown() -> Self {
+        Self {
+            kind: "unknown",
+            name: "unknown".into(),
+            snapshot: false,
+        }
+    }
+    pub fn function(name: &str) -> Self {
+        Self {
+            kind: "function",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn pipeline(name: &str) -> Self {
+        Self {
+            kind: "pipeline",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn api_key(name: &str) -> Self {
+        Self {
+            kind: "api_key",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
+    pub fn snapshot() -> Self {
+        Self {
+            kind: "system",
+            name: "snapshot".into(),
+            snapshot: true,
+        }
+    }
+}
+tokio::task_local! { static BILLING_CALLER: BillingCaller; }
+pub async fn scope_billing_caller<F: std::future::Future>(
+    caller: BillingCaller,
+    future: F,
+) -> F::Output {
+    BILLING_CALLER.scope(caller, future).await
+}
+
+/// Tokio does not inherit task-local values. Capture only the bounded caller
+/// identity for API jobs; never add credentials or arbitrary IDs to that context.
+pub fn spawn_with_billing_caller<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let caller = BILLING_CALLER
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| BillingCaller::unknown());
+    tokio::spawn(scope_billing_caller(caller, future))
+}
+
+pub fn spawn_snapshot_with_billing_caller<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut caller = BILLING_CALLER
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| BillingCaller::unknown());
+    caller.snapshot = true;
+    tokio::spawn(scope_billing_caller(caller, future))
+}
+
 fn seconds_buckets() -> Vec<f64> {
     vec![
         0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0,
@@ -84,6 +187,8 @@ fn cold_start_buckets() -> Vec<f64> {
 #[derive(Default)]
 struct LabelLimiter {
     pipelines: DashMap<String, ()>,
+    billing_callers: Mutex<std::collections::HashSet<String>>,
+    admission: Mutex<()>,
     namespaces: DashMap<String, ()>,
     sets: DashMap<String, ()>,
 }
@@ -105,6 +210,7 @@ impl LabelLimiter {
         if value.is_empty() {
             return String::new();
         }
+        let _admission = self.admission.lock().unwrap();
         if seen.contains_key(value) {
             return value.to_string();
         }
@@ -139,11 +245,19 @@ pub struct LayerMetrics {
     multi_query_upstream_calls: HistogramVec,
     hybrid_text_total: IntCounterVec,
     hybrid_text_tokens: HistogramVec,
+    search_total: IntCounterVec,
+    search_stage_seconds: HistogramVec,
+    rerank_documents_total: IntCounterVec,
+    rerank_pruned_total: IntCounterVec,
+    rerank_tokens_total: IntCounterVec,
+    rerank_degraded_total: IntCounterVec,
     query_router_total: IntCounterVec,
     agent_query_total: IntCounterVec,
     agent_query_duration: HistogramVec,
     agent_turns: HistogramVec,
     agent_tokens_total: IntCounterVec,
+    embedder_demand: IntGaugeVec,
+    embedder_requests: DashMap<String, Vec<Instant>>,
     embed_tokens_total: IntCounterVec,
     embed_compute_seconds_total: CounterVec,
     embed_model_hints: DashMap<String, String>,
@@ -187,6 +301,12 @@ pub struct LayerMetrics {
     pipeline_failed_total: IntCounterVec,
     #[allow(dead_code)]
     udf_queue_depth: IntGaugeVec,
+    #[allow(dead_code)]
+    udf_processing_leases: IntGaugeVec,
+    #[allow(dead_code)]
+    udf_scheduled_lease_recoveries: IntGaugeVec,
+    #[allow(dead_code)]
+    udf_lease_observed_at_seconds: IntGaugeVec,
     #[allow(dead_code)]
     udf_stage_count: IntGaugeVec,
     #[allow(dead_code)]
@@ -336,6 +456,45 @@ impl LayerMetrics {
             &["namespace", "store_kind"],
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 8.0, 10.0, 15.0],
         );
+        let search_total = counter(
+            &registry,
+            "hevlayer_search_total",
+            "Search endpoint requests by namespace and status.",
+            &["namespace", "store_kind", "status"],
+        );
+        let search_stage_seconds = histogram(
+            &registry,
+            "hevlayer_search_stage_seconds",
+            "Search endpoint stage duration in seconds (embed, legs, fuse, l1, rerank).",
+            &["namespace", "store_kind", "stage"],
+            vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+            ],
+        );
+        let rerank_documents_total = counter(
+            &registry,
+            "hevlayer_rerank_documents_total",
+            "Documents scored by the rerank provider.",
+            &["namespace", "store_kind"],
+        );
+        let rerank_pruned_total = counter(
+            &registry,
+            "hevlayer_rerank_pruned_total",
+            "Reranked rows dropped below the request threshold.",
+            &["namespace", "store_kind"],
+        );
+        let rerank_tokens_total = counter(
+            &registry,
+            "hevlayer_rerank_tokens_total",
+            "Rerank provider input tokens by provider and configured model.",
+            &["namespace", "store_kind", "provider", "model"],
+        );
+        let rerank_degraded_total = counter(
+            &registry,
+            "hevlayer_rerank_degraded_total",
+            "Search requests whose rerank stage failed (fused-order fallback, or 503 when required), by reason: provider_error, timeout, rate_limited, queue_timeout.",
+            &["namespace", "store_kind", "reason"],
+        );
         let query_router_total = counter(
             &registry,
             "hevlayer_query_router_decisions_total",
@@ -368,6 +527,12 @@ impl LayerMetrics {
             "Model tokens reported by the inference provider for agentic search.",
             &["agent", "turn", "token_type"],
         );
+        let embedder_demand = gauge_vec(
+            &registry,
+            "hevlayer_embedder_demand",
+            "Embedding requests arriving in the last 60 seconds, including waking requests.",
+            &["embedder"],
+        );
         let embed_tokens_total = counter(
             &registry,
             "hevlayer_embed_tokens_total",
@@ -384,19 +549,37 @@ impl LayerMetrics {
             &registry,
             "hevlayer_tpuf_billable_bytes_written_total",
             "Turbopuffer billable logical bytes written, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_billable_bytes_queried_total = counter(
             &registry,
             "hevlayer_tpuf_billable_bytes_queried_total",
             "Turbopuffer billable logical bytes queried, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_billable_bytes_returned_total = counter(
             &registry,
             "hevlayer_tpuf_billable_bytes_returned_total",
             "Turbopuffer billable logical bytes returned, copied from upstream billing objects.",
-            &["namespace", "store_kind"],
+            &[
+                "namespace",
+                "store_kind",
+                "operation",
+                "caller_kind",
+                "caller",
+            ],
         );
         let tpuf_logical_bytes = gauge_vec(
             &registry,
@@ -593,6 +776,24 @@ impl LayerMetrics {
             "Documents that landed in failed by pipeline and reason.",
             &["pipeline_id", "reason"],
         );
+        let udf_processing_leases = gauge_vec(
+            &registry,
+            "layer_udf_processing_leases",
+            "Processing leases classified by database expiry; unknown timestamps remain unknown.",
+            &["udf", "state"],
+        );
+        let udf_scheduled_lease_recoveries = gauge_vec(
+            &registry,
+            "layer_udf_scheduled_lease_recoveries",
+            "Durable cumulative scheduler lease recoveries per Function; use max across replicas.",
+            &["udf"],
+        );
+        let udf_lease_observed_at_seconds = gauge_vec(
+            &registry,
+            "layer_udf_lease_observed_at_seconds",
+            "Database observation time for lease counts and recovery receipts.",
+            &["udf"],
+        );
         let udf_queue_depth = gauge_vec(
             &registry,
             "layer_udf_queue_depth",
@@ -651,11 +852,19 @@ impl LayerMetrics {
             multi_query_upstream_calls,
             hybrid_text_total,
             hybrid_text_tokens,
+            search_total,
+            search_stage_seconds,
+            rerank_documents_total,
+            rerank_pruned_total,
+            rerank_tokens_total,
+            rerank_degraded_total,
             query_router_total,
             agent_query_total,
             agent_query_duration,
             agent_turns,
             agent_tokens_total,
+            embedder_demand,
+            embedder_requests: DashMap::new(),
             embed_tokens_total,
             embed_compute_seconds_total,
             embed_model_hints: DashMap::new(),
@@ -692,6 +901,9 @@ impl LayerMetrics {
             pipeline_indexed_total,
             pipeline_failed_total,
             udf_queue_depth,
+            udf_processing_leases,
+            udf_scheduled_lease_recoveries,
+            udf_lease_observed_at_seconds,
             udf_stage_count,
             indexed_seen: DashMap::new(),
             failed_seen: DashMap::new(),
@@ -715,7 +927,19 @@ impl LayerMetrics {
         self.namespace_purge_discovery_ready.set(i64::from(ready));
     }
 
+    pub fn record_embedder_demand(&self, embedder: &str) {
+        let mut requests = self.embedder_requests.entry(embedder.into()).or_default();
+        requests.retain(|t| t.elapsed().as_secs() < 60);
+        requests.push(Instant::now());
+    }
+
     pub fn encode(&self) -> Result<String, String> {
+        for mut requests in self.embedder_requests.iter_mut() {
+            requests.retain(|t| t.elapsed().as_secs() < 60);
+            self.embedder_demand
+                .with_label_values(&[requests.key()])
+                .set(requests.len() as i64);
+        }
         let encoder = TextEncoder::new();
         encoder
             .encode_to_string(&self.registry.gather())
@@ -871,6 +1095,54 @@ impl LayerMetrics {
         }
     }
 
+    pub fn observe_search(&self, namespace: &str, status: &str) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.search_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), status])
+            .inc();
+    }
+
+    /// `stage` is one of `embed`, `legs`, `fuse`, `l1`, `rerank` (`plan`
+    /// joins when the planner does).
+    pub fn observe_search_stage(&self, namespace: &str, stage: &str, elapsed: std::time::Duration) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.search_stage_seconds
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), stage])
+            .observe(elapsed.as_secs_f64());
+    }
+
+    pub fn observe_rerank(
+        &self,
+        namespace: &str,
+        provider: &str,
+        model: &str,
+        documents: u64,
+        pruned: u64,
+        input_tokens: u64,
+    ) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.rerank_documents_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str()])
+            .inc_by(documents);
+        self.rerank_pruned_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str()])
+            .inc_by(pruned);
+        self.rerank_tokens_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), provider, model])
+            .inc_by(input_tokens);
+    }
+
+    pub fn observe_rerank_degraded(&self, namespace: &str, reason: &str) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.rerank_degraded_total
+            .with_label_values(&[namespace.as_str(), store_kind.as_str(), reason])
+            .inc();
+    }
+
     pub fn observe_query_router(&self, namespace: &str, route: &str, executed: bool) {
         let namespace = self.labels.namespace(namespace);
         let store_kind = self.store_kind();
@@ -983,22 +1255,51 @@ impl LayerMetrics {
             .map(|serving| serving.clone())
     }
 
-    pub fn observe_tpuf_billing(&self, namespace: &str, billing: &Value) {
+    pub fn observe_tpuf_billing(
+        &self,
+        namespace: &str,
+        operation: BillingOperation,
+        billing: &Value,
+    ) {
+        let caller = BILLING_CALLER.try_with(Clone::clone).ok();
+        let operation = if caller.as_ref().is_some_and(|c| c.snapshot) {
+            BillingOperation::Snapshot
+        } else {
+            operation
+        };
+        let kind = caller.as_ref().map_or("unknown", |c| c.kind);
+        let name = caller.as_ref().map_or("unknown", |c| c.name.as_str());
+        // Lock admission and insertion together: concurrent requests cannot exceed the cap.
+        let mut seen = self.labels.billing_callers.lock().unwrap();
+        let key = format!("{kind}:{name}");
+        let name = if kind == "unknown" || kind == "system" {
+            name
+        } else if name.len() > 128 || name.is_empty() {
+            "other"
+        } else if seen.contains(&key) {
+            name
+        } else if seen.len() < 100 {
+            seen.insert(key);
+            name
+        } else {
+            "other"
+        };
+        let operation = operation.label();
         let namespace = self.labels.namespace(namespace);
         let store_kind = self.store_kind();
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_written") {
             self.tpuf_billable_bytes_written_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_queried") {
             self.tpuf_billable_bytes_queried_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_returned") {
             self.tpuf_billable_bytes_returned_total
-                .with_label_values(&[&namespace, &store_kind])
+                .with_label_values(&[&namespace, &store_kind, operation, kind, name])
                 .inc_by(bytes);
         }
     }
@@ -1333,6 +1634,27 @@ impl LayerMetrics {
     #[cfg(feature = "pro")]
     pub fn refresh_udf_metrics(&self, snapshot: UdfMetricsSnapshot) {
         self.udf_stage_count.reset();
+        self.udf_processing_leases.reset();
+        self.udf_scheduled_lease_recoveries.reset();
+        self.udf_lease_observed_at_seconds.reset();
+        for row in snapshot.leases {
+            let udf = self.labels.pipeline(&row.udf_id);
+            for (state, count) in [
+                ("expired", row.expired),
+                ("live", row.live),
+                ("unknown", row.unknown),
+            ] {
+                self.udf_processing_leases
+                    .with_label_values(&[&udf, state])
+                    .set(count);
+            }
+            self.udf_scheduled_lease_recoveries
+                .with_label_values(&[&udf])
+                .set(row.recovered);
+            self.udf_lease_observed_at_seconds
+                .with_label_values(&[&udf])
+                .set(row.observed_at_seconds);
+        }
         self.udf_queue_depth.reset();
         for row in snapshot.stage_counts {
             let udf = self.labels.pipeline(&row.udf_id);
@@ -1521,8 +1843,20 @@ fn pg_status<T>(result: &Result<T, PipelineStoreError>) -> &'static str {
 fn udf_pg_status<T>(result: &Result<T, UdfStoreError>) -> &'static str {
     match result {
         Ok(_) => STATUS_OK,
-        Err(UdfStoreError::Database(_)) => STATUS_PG_ERROR,
+        Err(UdfStoreError::Database(_) | UdfStoreError::QueueFailure { .. }) => STATUS_PG_ERROR,
         Err(_) => STATUS_LAYER_ERROR,
+    }
+}
+
+#[cfg(feature = "pro")]
+fn udf_error_kind<T>(result: &Result<T, UdfStoreError>) -> &'static str {
+    match result {
+        Err(UdfStoreError::Database(_)) => "database",
+        Err(UdfStoreError::QueueFailure { kind, .. }) => kind.as_str(),
+        Err(UdfStoreError::CompletionConflict(_)) => "completion_conflict",
+        Err(UdfStoreError::Conflict(_)) => "conflict",
+        Err(UdfStoreError::NotFound(_)) => "not_found",
+        Ok(_) => "none",
     }
 }
 
@@ -1630,7 +1964,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         sha256: &str,
         bytes: &[u8],
     ) -> Result<(), TurbopufferError> {
-        self.inner.put_blob(namespace, sha256, bytes).await
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Upsert, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.put_blob(namespace, sha256, bytes),
+        )
+        .await
     }
 
     async fn get_blob(
@@ -1638,7 +1980,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         namespace: &str,
         sha256: &str,
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
-        self.inner.get_blob(namespace, sha256).await
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.get_blob(namespace, sha256),
+        )
+        .await
     }
 
     async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>, TurbopufferError> {
@@ -1662,11 +2012,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(response) = &result {
             if (200..300).contains(&response.status) {
-                if let Some(namespace) = namespace {
-                    if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
-                        if let Some(billing) = body.get("billing") {
-                            self.metrics.observe_tpuf_billing(namespace, billing);
-                        }
+                if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
+                    if let Some(billing) = body.get("billing") {
+                        self.metrics.observe_tpuf_billing(
+                            namespace.unwrap_or("unknown"),
+                            BillingOperation::Passthrough,
+                            billing,
+                        );
+                    }
+                    if let Some(namespace) = namespace {
                         if let (Some((model, serving)), Some(performance)) =
                             (embedding.as_ref(), body.get("performance"))
                         {
@@ -1696,12 +2050,33 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.delete_namespace(namespace).await;
         self.metrics.dec_tpuf_inflight();
+        if let Ok(response) = &result {
+            if (200..300).contains(&response.status) {
+                if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
+                    if let Some(billing) = body.get("billing") {
+                        self.metrics.observe_tpuf_billing(
+                            namespace,
+                            BillingOperation::Delete,
+                            billing,
+                        );
+                    }
+                }
+            }
+        }
         result
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.hint_cache_warm(namespace).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.hint_cache_warm(namespace),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -1716,7 +2091,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Upsert, billing);
             }
         }
         result
@@ -1732,7 +2108,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Patch, billing);
             }
         }
         result
@@ -1748,7 +2125,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Patch, billing);
             }
         }
         result
@@ -1764,7 +2142,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Delete, billing);
             }
         }
         result
@@ -1780,7 +2159,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Delete, billing);
             }
         }
         result
@@ -1802,7 +2182,8 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics
+                    .observe_tpuf_billing(namespace, BillingOperation::Query, billing);
             }
         }
         result
@@ -1824,7 +2205,11 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(outcome) = &result {
             if let Some(billing) = outcome.billing.as_ref() {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics.observe_tpuf_billing(
+                    namespace,
+                    BillingOperation::RankedQuery,
+                    billing,
+                );
             }
         }
         result
@@ -1844,7 +2229,11 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         self.metrics.dec_tpuf_inflight();
         if let Ok(body) = &result {
             if let Some(billing) = body.get("billing") {
-                self.metrics.observe_tpuf_billing(namespace, billing);
+                self.metrics.observe_tpuf_billing(
+                    namespace,
+                    BillingOperation::RankedQuery,
+                    billing,
+                );
             }
         }
         result
@@ -1856,7 +2245,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch(namespace, id).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch(namespace, id),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -1867,37 +2264,34 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch_many(namespace, ids).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_many(namespace, ids),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
 
-    async fn fetch_with_attributes(
+    async fn fetch_siblings(
         &self,
         namespace: &str,
-        id: &str,
-        include: &[String],
-    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        parent: &str,
+    ) -> Result<Vec<DocumentResponse>, crate::clients::turbopuffer::TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self
-            .inner
-            .fetch_with_attributes(namespace, id, include)
-            .await;
-        self.metrics.dec_tpuf_inflight();
-        result
-    }
-
-    async fn fetch_many_with_attributes(
-        &self,
-        namespace: &str,
-        ids: &[String],
-        include: &[String],
-    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
-        self.metrics.inc_tpuf_inflight();
-        let result = self
-            .inner
-            .fetch_many_with_attributes(namespace, ids, include)
-            .await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_siblings(namespace, parent),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -1908,7 +2302,15 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         id: &str,
     ) -> Result<Option<Vec<f64>>, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.fetch_vector(namespace, id).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_vector(namespace, id),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
@@ -1922,17 +2324,31 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self
-            .inner
-            .scan_page(namespace, cursor, page_size, filters, include_attributes)
-            .await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Scan, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .scan_page(namespace, cursor, page_size, filters, include_attributes),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         result
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
         self.metrics.inc_tpuf_inflight();
-        let result = self.inner.head_namespace(namespace).await;
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.head_namespace(namespace),
+        )
+        .await;
         self.metrics.dec_tpuf_inflight();
         if let Ok(meta) = &result {
             if let Some(bytes) = meta.approx_logical_bytes {
@@ -2178,6 +2594,37 @@ impl AerospikeClient for MetricsAerospikeClient {
         self.metrics.inc_aerospike_inflight();
         let result = self.inner.count_set(namespace).await;
         self.finish(start, "scan", &set, &result);
+        result
+    }
+
+    async fn get_raw_gen(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u32)>, AerospikeError> {
+        let start = Instant::now();
+        let set = self.set_name(namespace);
+        self.metrics.inc_aerospike_inflight();
+        let result = self.inner.get_raw_gen(namespace, key).await;
+        self.finish(start, "get", &set, &result);
+        result
+    }
+
+    async fn put_raw_cas(
+        &self,
+        namespace: &str,
+        key: &str,
+        data: &[u8],
+        expected_generation: Option<u32>,
+    ) -> Result<bool, AerospikeError> {
+        let start = Instant::now();
+        let set = self.set_name(namespace);
+        self.metrics.inc_aerospike_inflight();
+        let result = self
+            .inner
+            .put_raw_cas(namespace, key, data, expected_generation)
+            .await;
+        self.finish(start, "put", &set, &result);
         result
     }
 }
@@ -2507,6 +2954,24 @@ struct MetricsUdfStore {
 #[cfg(feature = "pro")]
 #[async_trait]
 impl UdfStore for MetricsUdfStore {
+    async fn reserve_queries(
+        &self,
+        udf_id: &str,
+        version: &str,
+        keys: &[crate::udf::UdfItemKey],
+        maximum: Option<u32>,
+        queries: u32,
+    ) -> Result<(), crate::udf::UdfStoreError> {
+        self.inner
+            .reserve_queries(udf_id, version, keys, maximum, queries)
+            .await
+    }
+    async fn query_budget_status(
+        &self,
+        udf_id: &str,
+    ) -> Result<crate::udf::UdfQueryBudgetStatus, crate::udf::UdfStoreError> {
+        self.inner.query_budget_status(udf_id).await
+    }
     async fn create_udf(
         &self,
         id: &str,
@@ -2514,6 +2979,19 @@ impl UdfStore for MetricsUdfStore {
     ) -> Result<UdfResource, UdfStoreError> {
         let start = Instant::now();
         let result = self.inner.create_udf(id, spec).await;
+        self.metrics
+            .observe_pg_query("create_udf", udf_pg_status(&result), elapsed(start));
+        result
+    }
+
+    async fn create_udf_paused(
+        &self,
+        id: &str,
+        spec: &crate::models::UdfSpec,
+        paused: bool,
+    ) -> Result<crate::udf::UdfResource, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.create_udf_paused(id, spec, paused).await;
         self.metrics
             .observe_pg_query("create_udf", udf_pg_status(&result), elapsed(start));
         result
@@ -2571,6 +3049,30 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn discovery_checkpoints(
+        &self,
+        id: &str,
+        version: &str,
+        namespaces: &[String],
+        source_stores: &[String],
+        restart: bool,
+    ) -> Result<Vec<crate::udf::UdfDiscoveryCheckpoint>, UdfStoreError> {
+        self.inner
+            .discovery_checkpoints(id, version, namespaces, source_stores, restart)
+            .await
+    }
+    async fn advance_discovery(
+        &self,
+        id: &str,
+        checkpoint: &crate::udf::UdfDiscoveryCheckpoint,
+        cursor: Option<&str>,
+        lease_token: &str,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .advance_discovery(id, checkpoint, cursor, lease_token)
+            .await
+    }
+
     async fn record_discovery_sweep(
         &self,
         id: &str,
@@ -2585,6 +3087,390 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn claim_discovery_now(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::udf::UdfDiscoveryLease>, UdfStoreError> {
+        self.inner.claim_discovery_now(id).await
+    }
+    async fn claim_discovery(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::udf::UdfDiscoveryLease>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.claim_discovery(id).await;
+        self.metrics.observe_pg_query(
+            "claim_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "claim_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+
+    async fn renew_discovery(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+    ) -> Result<bool, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.renew_discovery(lease).await;
+        self.metrics.observe_pg_query(
+            "renew_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "renew_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+
+    async fn prepare_discovery_checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &crate::udf::UdfDiscoveryCheckpoint,
+        watermark: Option<&str>,
+        token: &str,
+    ) -> Result<crate::udf::UdfDiscoveryCheckpoint, UdfStoreError> {
+        self.inner
+            .prepare_discovery_checkpoint(id, checkpoint, watermark, token)
+            .await
+    }
+    async fn record_discovery_write_intent(
+        &self,
+        id: &str,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .record_discovery_write_intent(id, namespace, ids)
+            .await
+    }
+    async fn dirty_discovery_ids(
+        &self,
+        id: &str,
+        namespace: &str,
+    ) -> Result<Vec<(String, i64)>, UdfStoreError> {
+        self.inner.dirty_discovery_ids(id, namespace).await
+    }
+    async fn finish_discovery(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        outcome: layer_transform::udf::UdfDiscoveryOutcome,
+    ) -> Result<(), UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.finish_discovery(lease, outcome).await;
+        self.metrics.observe_pg_query(
+            "finish_udf_discovery",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "finish_udf_discovery",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+
+    async fn lock_namespaces(
+        &self,
+        namespaces: &[String],
+    ) -> Result<Box<dyn layer_transform::udf::UdfNamespaceLock>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.lock_namespaces(namespaces).await;
+        self.metrics.observe_pg_query(
+            "lock_udf_namespaces",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "lock_udf_namespaces",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn invalidate_namespace_receipts(&self, namespace: &str) -> Result<(), UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.invalidate_namespace_receipts(namespace).await;
+        self.metrics.observe_pg_query(
+            "invalidate_udf_namespace_receipts",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "invalidate_udf_namespace_receipts",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn observe_input(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        document_id: &str,
+        digest: &str,
+    ) -> Result<bool, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .observe_input(udf_id, namespace, document_id, digest)
+            .await;
+        self.metrics
+            .observe_pg_query("observe_udf_input", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_input",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn observe_inputs(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        inputs: &[(String, String)],
+    ) -> Result<Vec<bool>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.observe_inputs(udf_id, namespace, inputs).await;
+        self.metrics
+            .observe_pg_query("observe_udf_inputs", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn prepare_completion_dispositions(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        intents: &[crate::udf::UdfCompletionIntent],
+    ) -> Result<Vec<Result<bool, crate::udf::CompletionConflictReason>>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .prepare_completion_dispositions(udf_id, worker_id, intents)
+            .await;
+        self.metrics.observe_pg_query(
+            "prepare_udf_completion_batch",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "prepare_udf_completion_batch",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn complete_item_dispositions(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        items: &[UdfItemKey],
+    ) -> Result<Vec<Result<u64, crate::udf::CompletionConflictReason>>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .complete_item_dispositions(udf_id, worker_id, items)
+            .await;
+        self.metrics.observe_pg_query(
+            "ack_udf_completion_batch",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "ack_udf_completion_batch",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn observe_enqueue_page(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        namespace: &str,
+        inputs: &[(String, String)],
+        eligible: &[String],
+    ) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .observe_enqueue_page(lease, namespace, inputs, eligible)
+            .await;
+        self.metrics.observe_pg_query(
+            "observe_enqueue_page",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
+    async fn observe_absent_inputs(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<(), UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .observe_absent_inputs(udf_id, namespace, ids)
+            .await;
+        self.metrics.observe_pg_query(
+            "observe_udf_absent_inputs",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "observe_udf_absent_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn capture_input(
+        &self,
+        udf_id: &str,
+        namespace: &str,
+        document_id: &str,
+        digest: &str,
+    ) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .capture_input(udf_id, namespace, document_id, digest)
+            .await;
+        self.metrics
+            .observe_pg_query("capture_udf_input", udf_pg_status(&result), elapsed(start));
+        if result.is_err() {
+            tracing::warn!(
+                operation = "capture_udf_input",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn capture_claim_inputs(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        inputs: &[(UdfItemKey, String)],
+    ) -> Result<Vec<(u64, Option<crate::udf::UdfPreparedReceipt>)>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .capture_claim_inputs(udf_id, worker_id, inputs)
+            .await;
+        self.metrics.observe_pg_query(
+            "capture_udf_claim_inputs",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "capture_udf_claim_inputs",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn validate_completion(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        items: &[UdfItemKey],
+        revisions: &[Option<u64>],
+    ) -> Result<bool, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .validate_completion(udf_id, worker_id, items, revisions)
+            .await;
+        self.metrics.observe_pg_query(
+            "validate_udf_completion",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "validate_udf_completion",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn prepared_receipt(
+        &self,
+        udf_id: &str,
+        key: &UdfItemKey,
+    ) -> Result<Option<crate::udf::UdfPreparedReceipt>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.prepared_receipt(udf_id, key).await;
+        self.metrics.observe_pg_query(
+            "read_udf_prepared_receipt",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        if result.is_err() {
+            tracing::warn!(
+                operation = "read_udf_prepared_receipt",
+                error_kind = udf_error_kind(&result),
+                "Function queue operation failed"
+            );
+        }
+        result
+    }
+    async fn prepare_completion(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        intents: &[crate::udf::UdfCompletionIntent],
+    ) -> Result<Vec<bool>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .prepare_completion(udf_id, worker_id, intents)
+            .await;
+        self.metrics.observe_pg_query(
+            "prepare_udf_completion",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
     async fn enqueue_items(
         &self,
         udf_id: &str,
@@ -2601,6 +3487,17 @@ impl UdfStore for MetricsUdfStore {
         result
     }
 
+    async fn recover_expired_items(&self) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.recover_expired_items().await;
+        self.metrics.observe_pg_query(
+            "recover_expired_udf_items",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
+
     async fn claim_items(
         &self,
         args: ClaimUdfItemsArgs,
@@ -2609,6 +3506,27 @@ impl UdfStore for MetricsUdfStore {
         let result = self.inner.claim_items(args).await;
         self.metrics
             .observe_pg_query("claim_udf_items", udf_pg_status(&result), elapsed(start));
+        result
+    }
+
+    async fn claim_group_members(
+        &self,
+        udf_id: &str,
+        worker_id: &str,
+        lease_seconds: i64,
+        namespace: &str,
+        document_ids: &[String],
+    ) -> Result<Vec<crate::udf::UdfWorkItem>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .claim_group_members(udf_id, worker_id, lease_seconds, namespace, document_ids)
+            .await;
+        self.metrics.observe_pg_query(
+            "claim_udf_group_members",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
         result
     }
 
@@ -2681,7 +3599,8 @@ impl UdfStore for MetricsUdfStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        aerospike_status, LayerMetrics, STATUS_AEROSPIKE_ERROR, STATUS_AEROSPIKE_STOP_WRITES,
+        aerospike_status, BillingOperation, LayerMetrics, STATUS_AEROSPIKE_ERROR,
+        STATUS_AEROSPIKE_STOP_WRITES,
     };
     use crate::clients::aerospike::AerospikeError;
     use serde_json::json;
@@ -2689,6 +3608,24 @@ mod tests {
     #[test]
     fn registered_metrics_must_have_catalog_docs() {
         let _ = LayerMetrics::new();
+    }
+
+    #[test]
+    fn embedder_demand_expires_without_another_request() {
+        let metrics = LayerMetrics::new();
+        metrics.record_embedder_demand("bge");
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("hevlayer_embedder_demand{embedder=\"bge\"} 1"));
+        metrics.embedder_requests.insert(
+            "bge".into(),
+            vec![std::time::Instant::now() - std::time::Duration::from_secs(61)],
+        );
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("hevlayer_embedder_demand{embedder=\"bge\"} 0"));
     }
 
     #[test]
@@ -2710,6 +3647,7 @@ mod tests {
         let metrics = LayerMetrics::new();
         metrics.observe_tpuf_billing(
             "ns",
+            BillingOperation::Query,
             &json!({
                 "billable_logical_bytes_written": 1000,
                 "billable_logical_bytes_queried": 2000,
@@ -2720,16 +3658,122 @@ mod tests {
 
         let encoded = metrics.encode().unwrap();
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_written_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 1000"
+            "hevlayer_tpuf_billable_bytes_written_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 1000"
         ));
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_queried_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 2000"
+            "hevlayer_tpuf_billable_bytes_queried_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 2000"
         ));
         assert!(encoded.contains(
-            "hevlayer_tpuf_billable_bytes_returned_total{namespace=\"ns\",store_kind=\"turbopuffer\"} 3000"
+            "hevlayer_tpuf_billable_bytes_returned_total{caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\",store_kind=\"turbopuffer\"} 3000"
         ));
         assert!(encoded.contains(
             "hevlayer_tpuf_logical_bytes{namespace=\"ns\",store_kind=\"turbopuffer\"} 4000"
         ));
+    }
+    #[tokio::test]
+    async fn billing_callers_are_bounded_under_concurrency_and_scopes_do_not_leak() {
+        use super::{scope_billing_caller, BillingCaller};
+        use std::sync::Arc;
+        let metrics = Arc::new(LayerMetrics::new());
+        let mut tasks = Vec::new();
+        for i in 0..200 {
+            let metrics = metrics.clone();
+            tasks.push(tokio::spawn(async move {
+                scope_billing_caller(BillingCaller::function(&format!("function-{i}")), async {
+                    tokio::task::yield_now().await;
+                    metrics.observe_tpuf_billing(
+                        "ns",
+                        BillingOperation::Scan,
+                        &json!({"billable_logical_bytes_queried": 1}),
+                    );
+                })
+                .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(metrics.labels.billing_callers.lock().unwrap().len(), 100);
+        let family = metrics
+            .registry
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == "hevlayer_tpuf_billable_bytes_queried_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 101);
+        assert_eq!(
+            family
+                .get_metric()
+                .iter()
+                .map(|m| m.get_counter().value())
+                .sum::<f64>(),
+            200.0
+        );
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("caller=\"other\",caller_kind=\"function\""));
+        metrics.observe_tpuf_billing(
+            "ns",
+            BillingOperation::Query,
+            &json!({"billable_logical_bytes_queried": 9}),
+        );
+        assert!(metrics.encode().unwrap().contains(
+            "caller=\"unknown\",caller_kind=\"unknown\",namespace=\"ns\",operation=\"query\""
+        ));
+    }
+
+    #[tokio::test]
+    async fn billing_operation_contract_and_snapshot_override() {
+        use super::{scope_billing_caller, BillingCaller};
+        let metrics = LayerMetrics::new();
+        let operations = [
+            BillingOperation::Query,
+            BillingOperation::RankedQuery,
+            BillingOperation::Scan,
+            BillingOperation::Fetch,
+            BillingOperation::Passthrough,
+            BillingOperation::Upsert,
+            BillingOperation::Patch,
+            BillingOperation::Delete,
+            BillingOperation::Snapshot,
+        ];
+        let labels: Vec<_> = operations.iter().map(|o| o.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "query",
+                "ranked_query",
+                "scan",
+                "fetch",
+                "passthrough",
+                "upsert",
+                "patch",
+                "delete",
+                "snapshot"
+            ]
+        );
+        scope_billing_caller(BillingCaller::snapshot(), async {
+            metrics.observe_tpuf_billing(
+                "ns",
+                BillingOperation::Scan,
+                &json!({"billable_logical_bytes_queried": 11}),
+            );
+        })
+        .await;
+        scope_billing_caller(BillingCaller::api_key(&"x".repeat(129)), async {
+            metrics.observe_tpuf_billing(
+                "ns",
+                BillingOperation::Fetch,
+                &json!({"billable_logical_bytes_queried": 3}),
+            );
+        })
+        .await;
+        let encoded = metrics.encode().unwrap();
+        assert!(encoded.contains(
+            "caller=\"snapshot\",caller_kind=\"system\",namespace=\"ns\",operation=\"snapshot\""
+        ));
+        assert!(encoded.contains("caller=\"other\",caller_kind=\"api_key\""));
+        assert!(!encoded.contains(&"x".repeat(129)));
     }
 }

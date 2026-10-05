@@ -47,7 +47,7 @@ const MIN_TOKEN_CHARS: usize = 2;
 /// time so we never emit a token longer than any term the index stored.
 const MAX_TOKEN_LENGTH_BYTES: usize = 39;
 
-const DEFAULT_RANK_CONSTANT: u64 = 60;
+pub(crate) const DEFAULT_RANK_CONSTANT: u64 = 60;
 const PER_LEG_LIMIT_FLOOR: u64 = 50;
 const PER_LEG_LIMIT_CEIL: u64 = 200;
 const FUSED_CURSOR_MAX_OFFSET: u32 = 10_000;
@@ -114,7 +114,7 @@ impl StopwordsOption {
         }
     }
 
-    fn echo(&self) -> Value {
+    pub(crate) fn echo(&self) -> Value {
         match self {
             Self::English => Value::String("en".to_string()),
             Self::Off => Value::Bool(false),
@@ -206,7 +206,7 @@ impl Fuzziness {
     /// edit distance 2; `Fixed(d)` caps the ladder at `d`, so `Fixed(0)` is
     /// exact-only. A term below the smallest `min_query_chars` (3) gets no rule
     /// and matches exactly, mirroring upstream.
-    fn max_edit_distance(self) -> Value {
+    pub(crate) fn max_edit_distance(self) -> Value {
         let cap = match self {
             Self::Auto => 2,
             Self::Fixed(d) => d,
@@ -217,7 +217,7 @@ impl Fuzziness {
         Value::Array(rules)
     }
 
-    fn echo(self) -> Value {
+    pub(crate) fn echo(self) -> Value {
         match self {
             Self::Auto => Value::String("auto".to_string()),
             Self::Fixed(d) => Value::from(d),
@@ -743,7 +743,7 @@ fn ensure_fusable(mut legs: Vec<Value>) -> Vec<Value> {
     legs
 }
 
-fn is_unsupported_by_store(error: &TurbopufferError) -> bool {
+pub(crate) fn is_unsupported_by_store(error: &TurbopufferError) -> bool {
     AppError::is_store_support_error(error)
 }
 
@@ -1005,7 +1005,7 @@ async fn run_surfacing_fused(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn collect_surfacing_leg(
+pub(crate) async fn collect_surfacing_leg(
     state: &AppState,
     namespace: &str,
     spec: &LegSpec,
@@ -1114,7 +1114,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// and merge to the global per-leg ranking: sort by the leg's score order
 /// (BM25 descending, ANN ascending) and truncate to `per_leg_limit`, the
 /// same view upstream fusion ranks.
-async fn scatter_leg(
+pub(crate) async fn scatter_leg(
     state: &AppState,
     namespace: &str,
     spec: &LegSpec,
@@ -1340,6 +1340,15 @@ async fn run_fused_specs(
     }
 }
 
+/// Missing fuzzy configuration on a known attribute means lexical BM25 only.
+/// Stores without attribute metadata retain their existing capability routing.
+pub(crate) fn attribute_fuzzy_enabled(metadata: &Value, field: &str) -> Option<bool> {
+    metadata.get("schema")?.get(field).map(|attr| {
+        attr.get("fuzzy")
+            .is_some_and(|value| value == true || value.is_object())
+    })
+}
+
 /// The expansion shared by the `HybridText` handler and the router's
 /// `hybrid_text` / `fused` routes: tokenize, build leg specs (plus any
 /// router-supplied extra leg), issue one `ranked_query` per leg spec, and
@@ -1383,6 +1392,12 @@ pub(crate) async fn run_hybrid_text(
             "phase-one hybrid takes no temporal_filter",
         ));
     }
+    let metadata = state
+        .turbopuffer()
+        .head_namespace(namespace)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "HybridText namespace schema read failed"))?;
+    let bm25_only = attribute_fuzzy_enabled(&metadata.raw, &expr.field) == Some(false);
     let policy = tokenize_query_input_with_stopwords(&expr.input, &expr.stopwords);
     // Zero-token guard (RFC 0090): stop-word removal must not turn a valid
     // input into a 422 — an all-stop-word query keeps its BM25 anchor leg
@@ -1427,7 +1442,7 @@ pub(crate) async fn run_hybrid_text(
         .unwrap_or_else(|| default_per_leg_limit(fetch_depth));
 
     let had_extra_leg = extra_leg.is_some();
-    let mut specs = if phase_one {
+    let mut specs = if phase_one || bm25_only {
         vec![LegSpec {
             label: "bm25".to_string(),
             rank_by: json!([expr.field, "BM25", expr.input]),
@@ -1478,7 +1493,18 @@ pub(crate) async fn run_hybrid_text(
     // queries never reach this branch — the fallback is purely additive.
     // An all-stop-word query has no fuzzy tokens to surface on; the BM25-only
     // fusion result stands.
-    let surfaced = !phase_one && rows.is_empty() && !had_extra_leg && !policy.tokens.is_empty();
+    // The search store's exact-only policy cannot rescue a typo through
+    // fuzzy candidate surfacing. In particular, its adapter cannot execute
+    // the neutral `id asc` rank used by that fallback. Keep a successful
+    // empty lexical result instead of turning it into an unsupported query.
+    let search_exact_only =
+        state.namespace_uses_search_store(namespace) && expr.fuzziness == Fuzziness::Fixed(0);
+    let surfaced = !phase_one
+        && !bm25_only
+        && !search_exact_only
+        && rows.is_empty()
+        && !had_extra_leg
+        && !policy.tokens.is_empty();
     if surfaced {
         let surfacing = build_surfacing_leg_specs(expr, &policy.tokens, request.filters.as_ref());
         effective_leg_count = surfacing.len();

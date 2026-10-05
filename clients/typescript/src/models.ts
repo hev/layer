@@ -146,6 +146,7 @@ export interface PutVectorsRequest {
 export interface CreateUdfRequest {
   [key: string]: unknown;
   id: string;
+  paused?: boolean;
   spec: UdfSpec;
 }
 
@@ -176,6 +177,7 @@ export interface GetUdfResponse {
 
 export interface UdfStatus {
   [key: string]: unknown;
+  query_budget?: UdfQueryBudget;
   udf_id: string;
   paused: boolean;
   active_namespaces: string[];
@@ -190,14 +192,44 @@ export interface UdfStatus {
 
 export interface UdfDiscoveryStatus {
   [key: string]: unknown;
+  consecutive_failures?: number;
+  pause_reason?: string | null;
   sweeps_completed: number;
   last_completed_at: string | null;
+}
+
+export interface UdfQueryBudget {
+  [key: string]: unknown;
+  queries_per_item: number | null;
+  provider_queries: number;
+  rejected_queries: number;
+  exhausted_items: number;
+  discovery_queries: number;
+}
+
+export interface UdfLookupRequest {
+  [key: string]: unknown;
+  worker_id: string;
+  "namespace": string;
+  id: string;
+  input_revision: number;
+  include_attributes?: string[];
+}
+
+export interface UdfLookupResponse {
+  [key: string]: unknown;
+  udf_id: string;
+  "namespace": string;
+  parent_id: string;
+  page_two_id: string | null;
+  documents: Document[];
 }
 
 export interface UdfSpec {
   [key: string]: unknown;
   index_selector?: unknown;
   target_namespaces?: string[];
+  queries_per_item?: number;
   inputs?: string[];
   version?: string;
   filter?: TurbopufferFilter;
@@ -206,6 +238,63 @@ export interface UdfSpec {
   retry?: UdfRetrySpec;
   triggers?: UdfTrigger[];
   invalidates?: string[];
+  group_by_parent?: boolean;
+  candidate?: UdfCandidateSpec;
+}
+
+export interface UdfCandidateSpec {
+  [key: string]: unknown;
+  "of": string;
+  outputs: string[];
+}
+
+export interface UdfCandidateRequest {
+  [key: string]: unknown;
+  version: string;
+  outputs: string[];
+  inputs?: string[];
+  filter?: TurbopufferFilter;
+  worker?: UdfWorkerSpec;
+  target_namespaces?: string[];
+}
+
+export interface UdfCandidatePromoteRequest {
+  [key: string]: unknown;
+  allow_partial?: boolean;
+  namespaces?: string[];
+}
+
+export interface UdfCandidatePromoteResponse {
+  [key: string]: unknown;
+  udf_id: string;
+  promoted_rows: number;
+  version: string;
+}
+
+export interface UdfCandidateComparison {
+  [key: string]: unknown;
+  udf_id: string;
+  candidate_id: string;
+  live_version: string;
+  candidate_version: string;
+  rows_compared: number;
+  rows_agreed: number;
+  agreement_rate: number | null;
+  truncated: boolean;
+  pending_count: number;
+  processing_count: number;
+  failed_count: number;
+  outputs: UdfCandidateOutputComparison[];
+  disagreements: Record<string, unknown>[];
+}
+
+export interface UdfCandidateOutputComparison {
+  [key: string]: unknown;
+  output: string;
+  compared: number;
+  agreed: number;
+  agreement_rate: number | null;
+  confusion: Record<string, Record<string, number>> | null;
 }
 
 export type UdfTrigger = "discovery" | "write";
@@ -239,6 +328,8 @@ export interface UdfDiscoverRequest {
   [key: string]: unknown;
   namespaces?: string[];
   page_size?: number;
+  max_pages?: number;
+  cursor?: string | null;
 }
 
 export interface UdfDiscoverResponse {
@@ -246,6 +337,9 @@ export interface UdfDiscoverResponse {
   udf_id: string;
   enqueued: number;
   namespaces: string[];
+  pages_scanned: number;
+  complete: boolean;
+  next_cursor?: string | null;
 }
 
 export interface UdfClaimRequest {
@@ -259,7 +353,32 @@ export interface UdfClaimedItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  prepared_receipt?: UdfPreparedReceipt;
+  input_revision?: number;
   input: Record<string, unknown>;
+  pages?: UdfClaimedPage[];
+}
+
+export interface UdfClaimedPage {
+  [key: string]: unknown;
+  id: string;
+  input_revision: number;
+  prepared_receipt?: UdfPreparedReceipt;
+  input: Record<string, unknown>;
+}
+
+export interface UdfPageRef {
+  [key: string]: unknown;
+  id: string;
+  input_revision?: number;
+  prepared_input_revision?: number;
+}
+
+export interface UdfPreparedReceipt {
+  [key: string]: unknown;
+  input_revision: number;
+  intent_digest: string;
+  output_digest: string;
 }
 
 export interface UdfClaimResponse {
@@ -273,6 +392,7 @@ export interface UdfItemRef {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  pages?: UdfPageRef[];
 }
 
 export interface UdfHeartbeatRequest {
@@ -283,6 +403,7 @@ export interface UdfHeartbeatRequest {
 
 export interface UdfCompleteRequest {
   [key: string]: unknown;
+  report_dispositions?: boolean;
   worker_id: string;
   items: UdfCompleteItem[];
 }
@@ -291,9 +412,12 @@ export interface UdfCompleteItem {
   [key: string]: unknown;
   "namespace": string;
   id: string;
+  prepared_input_revision?: number;
+  input_revision?: number;
   vector?: number[];
   vectors?: number[][];
   attributes?: Record<string, unknown>;
+  pages?: UdfPageRef[];
 }
 
 export type UdfErrorKind = "transient" | "permanent";
@@ -310,12 +434,21 @@ export interface UdfFailItem {
   id: string;
   kind: UdfErrorKind;
   message?: string | null;
+  pages?: UdfPageRef[];
 }
 
 export interface UdfItemsResponse {
   [key: string]: unknown;
   udf_id: string;
   updated: number;
+  items?: UdfCompletionOutcome[];
+}
+
+export interface UdfCompletionOutcome {
+  [key: string]: unknown;
+  index: number;
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "prepared_owner_changed" | "ownership_lost_before_ack" | "source_absent";
+  disposition: "completed" | "reclaim" | "discard" | "stop";
 }
 
 export type CostWindow = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -442,7 +575,7 @@ export interface Document {
 
 export interface FetchDocumentsRequest {
   [key: string]: unknown;
-  ids: string[];
+  ids: (string | number)[];
   include_attributes?: string[];
 }
 
@@ -486,6 +619,15 @@ export type TurbopufferSchema = Record<string, unknown>;
 export interface TurbopufferMetadataPatch {
   [key: string]: unknown;
   pinning?: unknown;
+}
+
+export interface PutPipelineRowsRequest {
+  [key: string]: unknown;
+  patch_condition?: unknown;
+  patch_rows?: Record<string, unknown>[];
+  upsert_rows?: Record<string, unknown>[];
+  schema?: Record<string, unknown>;
+  distance_metric?: "cosine_distance" | "euclidean_squared";
 }
 
 export type TurbopufferWriteRequest = Record<string, unknown>;
@@ -880,8 +1022,28 @@ export interface NamespaceMetadata {
   layer?: NamespaceMetadataLayer;
 }
 
+export interface NamespaceFieldStats {
+  [key: string]: unknown;
+  as_of?: number | null;
+  rows?: number | null;
+  fields?: Record<string, FieldStat>;
+  untracked?: string[];
+}
+
+export interface FieldStat {
+  [key: string]: unknown;
+  missing: number;
+  distinct: Record<string, unknown>;
+  min?: number;
+  max?: number;
+  top?: Record<string, unknown>[];
+  state: "exact" | "approximate";
+  approximate_since?: number;
+}
+
 export interface NamespaceMetadataLayer {
   [key: string]: unknown;
+  field_stats?: NamespaceFieldStats;
   stable_as_of?: number | null;
   is_stable?: boolean;
   indexed?: boolean | null;
@@ -916,6 +1078,7 @@ export interface QueryRequest {
   as_of?: number;
   between?: number[];
   include_attributes?: boolean | string[];
+  collapse?: CollapseRequest;
   include_leg_breakdown?: boolean;
   cursor?: string;
   rank_by?: TurbopufferRankBy;
@@ -930,6 +1093,7 @@ export interface FederatedQueryRequest {
   as_of?: number;
   between?: number[];
   include_attributes?: boolean | string[];
+  collapse?: CollapseRequest;
   include_leg_breakdown?: boolean;
   cursor?: string;
   rank_by?: TurbopufferRankBy;
@@ -1017,7 +1181,7 @@ export interface RoutingEcho {
 
 export interface QueryResponse {
   [key: string]: unknown;
-  rows?: Record<string, unknown>[];
+  rows: Record<string, unknown>[];
   aggregations?: Record<string, unknown>;
   aggregation_groups?: Record<string, unknown>[];
   billing?: Record<string, unknown>;
@@ -1026,12 +1190,177 @@ export interface QueryResponse {
   next_cursor?: string | null;
   hybrid?: HybridEcho;
   routing?: RoutingEcho;
+  groups?: CollapseGroup[];
+  collapse?: Record<string, unknown>;
+}
+
+export interface CollapseRequest {
+  [key: string]: unknown;
+  by: string | string[];
+  expansion?: number;
+  missing?: "own" | "together" | "drop" | Record<string, unknown>;
+}
+
+export interface CollapseGroup {
+  [key: string]: unknown;
+  key: unknown;
+  by: string | null;
+  rows: Record<string, unknown>[];
+}
+
+export interface SearchRequest {
+  [key: string]: unknown;
+  query: string;
+  top_k?: number;
+  filters?: TurbopufferFilter;
+  include_attributes?: boolean | string[];
+  pool?: number;
+  embed?: SearchEmbedOptions;
+  text?: SearchTextOptions;
+  rerank?: boolean | SearchRerankOptions;
+  explain?: boolean;
+  collapse?: CollapseRequest;
+}
+
+export interface SearchEmbedOptions {
+  [key: string]: unknown;
+  attribute?: string;
+}
+
+export interface SearchTextOptions {
+  [key: string]: unknown;
+  fuzziness?: "auto" | number;
+  stopwords?: "en" | boolean | string[];
+}
+
+export interface SearchRerankOptions {
+  [key: string]: unknown;
+  provider?: "jev";
+  threshold?: number;
+  attributes?: string[];
+  docs_per_call?: number;
+  max_chars?: number;
+  question?: "generic-1";
+  required?: boolean;
+}
+
+export interface SearchResponse {
+  [key: string]: unknown;
+  rows: SearchRow[];
+  groups?: SearchCollapseGroup[];
+  collapse?: Record<string, unknown>;
+  routing: SearchRoutingEcho;
+  plan: SearchPlanEcho;
+  hybrid: SearchHybridEcho;
+  rerank: SearchRerankEcho;
+  performance: SearchPerformance;
+}
+
+export interface SearchCollapseGroup {
+  [key: string]: unknown;
+  key: unknown;
+  by: string | null;
+  rows: SearchRow[];
+}
+
+export interface SearchRow {
+  [key: string]: unknown;
+  id: unknown;
+  score: number;
+  attributes: Record<string, unknown>;
+  explain?: SearchRowExplain;
+}
+
+export interface SearchRowExplain {
+  [key: string]: unknown;
+  features: SearchL1Features;
+  contributions: SearchL1Features;
+  l1_score: number;
+  legs: Record<string, unknown>[];
+}
+
+export interface SearchL1Features {
+  [key: string]: unknown;
+  rrf_sum: number;
+  fetch_count_30d?: number;
+  age_seconds?: number;
+}
+
+export interface SearchRoutingEcho {
+  [key: string]: unknown;
+  route: "hybrid_text" | "semantic" | "fused";
+  policy: string;
+  tokens: number;
+  executed: boolean;
+  advisory: boolean;
+}
+
+export interface SearchPlanEcho {
+  [key: string]: unknown;
+  executed: boolean;
+  reason?: string;
+}
+
+export interface SearchHybridEcho {
+  [key: string]: unknown;
+  tokens: string[];
+  tokens_dropped: number;
+  stopwords: unknown;
+  stopwords_dropped: string[];
+  fuzziness: unknown;
+  fuzziness_clamped?: boolean;
+  rank_constant: number;
+  per_leg_limit: number;
+  legs: SearchLegEcho[];
+  dropped_legs: number;
+  threads?: number;
+  surfaced: boolean;
+}
+
+export interface SearchLegEcho {
+  [key: string]: unknown;
+  label: string;
+  kind: "ann" | "bm25" | "fuzzy";
+  attribute?: string;
+  rows: number;
+}
+
+export interface SearchRerankEcho {
+  [key: string]: unknown;
+  provider: string;
+  model?: string;
+  question: string;
+  executed: boolean;
+  reason?: "disabled" | "empty_pool" | "provider_error" | "timeout" | "rate_limited" | "queue_timeout";
+  pool: number;
+  calls: number;
+  docs_per_call: number;
+  threshold: number;
+  pruned: number;
+  input_tokens: number;
+  latency_ms: number;
+}
+
+export interface SearchPerformance {
+  [key: string]: unknown;
+  embedding_tokens?: number;
+  embedding_ms?: number;
+  legs_ms: number;
+  fuse_ms: number;
+  l1_ms: number;
+  rerank_ms: number;
+  total_ms: number;
 }
 
 export interface Error {
   [key: string]: unknown;
+  reason?: "stale_claim" | "claim_not_owned" | "prepared_receipt_mismatch" | "prepared_source_changed" | "prepared_owner_changed" | "ownership_lost_before_ack" | "source_absent";
+  disposition?: "reclaim" | "discard" | "stop";
   error: string;
   message: string;
+  upstream_status?: number;
+  upstream_category?: "validation" | "rate_limited" | "unavailable" | "timeout" | "unknown";
+  retryable?: boolean;
   feature?: string;
 }
 
@@ -1290,7 +1619,25 @@ export interface RestWarehouseAuth {
   [key: string]: unknown;
   "in": "query" | "header";
   name: string;
+  secretRef?: WarehouseSecretRef;
+  prefix?: string;
+  login?: RestWarehouseLogin;
+}
+
+export interface RestWarehouseLogin {
+  [key: string]: unknown;
+  path: string;
+  body: Record<string, unknown>;
   secretRef: WarehouseSecretRef;
+  tokenPath: string;
+  expiresInPath?: string;
+  refresh?: RestWarehouseRefresh;
+}
+
+export interface RestWarehouseRefresh {
+  [key: string]: unknown;
+  path: string;
+  body: Record<string, unknown>;
 }
 
 export interface RestWarehouseRateLimit {
@@ -1340,7 +1687,7 @@ export interface WarehouseList {
 
 export interface ApiKeyEntitlement {
   [key: string]: unknown;
-  scopes?: ("read" | "write" | "admin")[];
+  scopes?: ("read" | "write" | "admin" | "mint")[];
   namespaces?: string[];
   claims?: string[];
 }

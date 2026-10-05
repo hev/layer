@@ -141,6 +141,13 @@ impl EmbeddedSearchClient {
 
 #[async_trait]
 impl TurbopufferClient for EmbeddedSearchClient {
+    /// The embedded engine is hev search in-process; it answers the
+    /// per-namespace lookup with that declaration. `capabilities()` stays
+    /// undeclared so default-method rejections keep their wording.
+    fn capabilities_for_namespace(&self, _namespace: &str) -> crate::capabilities::Capabilities {
+        crate::search::SEARCH_CAPABILITIES
+    }
+
     async fn passthrough(
         &self,
         method: &str,

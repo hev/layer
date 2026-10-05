@@ -14,6 +14,7 @@ use crate::clients::turbopuffer::{
 
 mod http;
 mod local_clip;
+pub mod worker;
 pub use http::{HttpEmbeddingOptions, HttpEmbeddingProvider, ProfilePin};
 pub(crate) use local_clip::is_clip_model;
 pub use local_clip::LocalClipEmbeddingProvider;
@@ -345,6 +346,7 @@ impl EmbeddingProvider for TurbopufferEmbeddingProvider {
             )
             .await?;
         let write_body = successful_json(write_response, "embedding provider write")?;
+        vectorstore_core::turbopuffer::observe_projected_billing(&namespace, &write_body);
 
         let ids = unique.iter().map(|(id, _)| id).collect::<Vec<_>>();
         let query = json!({
@@ -364,6 +366,7 @@ impl EmbeddingProvider for TurbopufferEmbeddingProvider {
             )
             .await?;
         let query_body = successful_json(query_response, "embedding provider read")?;
+        vectorstore_core::turbopuffer::observe_projected_billing(&namespace, &query_body);
 
         let mut by_id = query_body
             .get("rows")

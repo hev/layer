@@ -46,6 +46,7 @@ asyncio.run(main())
 - `branch_namespace`
 - `claim_documents`
 - `claim_udf_items`
+- `compare_udf_candidate`
 - `complete_udf_items`
 - `copy_namespace`
 - `create_checkpoint`
@@ -53,11 +54,13 @@ asyncio.run(main())
 - `create_scan`
 - `create_snapshot`
 - `create_udf`
+- `create_udf_candidate`
 - `delete_key`
 - `delete_namespace`
 - `delete_pipeline`
 - `delete_scan`
 - `delete_udf`
+- `discard_udf_candidate`
 - `discover_udf`
 - `evaluate_turbopuffer_recall`
 - `explain_turbopuffer_query`
@@ -84,6 +87,7 @@ asyncio.run(main())
 - `get_turbopuffer_namespace_schema`
 - `get_turbopuffer_v1_namespace_metadata`
 - `get_udf`
+- `get_udf_candidate`
 - `get_udf_status`
 - `get_vectorstore`
 - `get_vector_store_capabilities`
@@ -110,10 +114,13 @@ asyncio.run(main())
 - `list_vectorstores`
 - `list_warehouses`
 - `list_warm_jobs`
+- `lookup_udf_siblings`
 - `mint_key`
 - `pause_udf`
+- `promote_udf_candidate`
 - `put_blob`
 - `put_pipeline_document_chunks`
+- `put_pipeline_document_rows`
 - `put_pipeline_document_vectors`
 - `put_snapshot_policy`
 - `query`
@@ -127,6 +134,7 @@ asyncio.run(main())
 - `reset_failed_udf`
 - `resume_udf`
 - `revoke_key`
+- `search_namespace`
 - `set_documents_stage`
 - `update_turbopuffer_namespace_metadata`
 - `update_turbopuffer_namespace_schema`

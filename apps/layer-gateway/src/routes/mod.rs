@@ -1,6 +1,7 @@
 pub mod blobs;
 pub mod branch;
 pub mod capabilities;
+pub mod collapse;
 pub mod embed_wire;
 pub mod federated_query;
 pub mod fetch;
@@ -15,6 +16,7 @@ pub mod namespaces;
 pub mod query;
 pub mod query_router;
 pub mod scans;
+pub mod search;
 pub mod snapshot_policy;
 pub mod turbopuffer;
 pub mod upsert;

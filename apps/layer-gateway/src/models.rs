@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 #[cfg(feature = "pro")]
 pub use layer_transform::models::{
-    UdfErrorKind, UdfRetrySpec, UdfScheduleSpec, UdfSpec, UdfTrigger, UdfWorkerSpec,
+    UdfCandidateSpec, UdfErrorKind, UdfRetrySpec, UdfScheduleSpec, UdfSpec, UdfTrigger,
+    UdfWorkerSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,6 +147,8 @@ pub struct UdfSpec {
     pub target_namespaces: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries_per_item: Option<u32>,
     #[serde(default = "default_udf_version")]
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +162,17 @@ pub struct UdfSpec {
     pub triggers: Vec<UdfTrigger>,
     #[serde(default)]
     pub invalidates: Vec<String>,
+    #[serde(default)]
+    pub group_by_parent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<UdfCandidateSpec>,
+}
+
+#[cfg(not(feature = "pro"))]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UdfCandidateSpec {
+    pub of: String,
+    pub outputs: Vec<String>,
 }
 
 #[cfg(not(feature = "pro"))]
@@ -248,9 +262,30 @@ fn default_top_k() -> u32 {
 
 #[derive(Debug, Deserialize)]
 pub struct FetchManyRequest {
+    #[serde(deserialize_with = "deserialize_fetch_ids")]
     pub ids: Vec<String>,
     #[serde(default)]
     pub include_attributes: Option<Vec<String>>,
+}
+
+fn deserialize_fetch_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        String(String),
+        Integer(u64),
+    }
+    Vec::<Id>::deserialize(deserializer).map(|ids| {
+        ids.into_iter()
+            .map(|id| match id {
+                Id::String(id) => id,
+                Id::Integer(id) => id.to_string(),
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1238,13 +1273,15 @@ fn default_udf_lease_seconds() -> i64 {
 }
 
 fn default_scan_page_size() -> u32 {
-    10_000
+    1000
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUdfRequest {
     pub id: String,
     pub spec: UdfSpec,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1274,6 +1311,8 @@ pub struct GetUdfResponse {
 
 #[derive(Debug, Serialize)]
 pub struct UdfStatusResponse {
+    #[cfg(feature = "pro")]
+    pub query_budget: crate::udf::UdfQueryBudgetStatus,
     pub udf_id: String,
     pub paused: bool,
     pub active_namespaces: Vec<String>,
@@ -1288,6 +1327,8 @@ pub struct UdfStatusResponse {
 
 #[derive(Debug, Serialize)]
 pub struct UdfDiscoveryStatusResponse {
+    pub consecutive_failures: u32,
+    pub pause_reason: Option<String>,
     pub sweeps_completed: u64,
     pub last_completed_at: Option<String>,
 }
@@ -1298,6 +1339,14 @@ pub struct UdfDiscoverRequest {
     pub namespaces: Vec<String>,
     #[serde(default = "default_scan_page_size")]
     pub page_size: u32,
+    #[serde(default = "default_discovery_max_pages")]
+    pub max_pages: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+fn default_discovery_max_pages() -> u32 {
+    10
 }
 
 #[derive(Debug, Serialize)]
@@ -1305,6 +1354,9 @@ pub struct UdfDiscoverResponse {
     pub udf_id: String,
     pub enqueued: u64,
     pub namespaces: Vec<String>,
+    pub pages_scanned: u32,
+    pub next_cursor: Option<String>,
+    pub complete: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1317,10 +1369,46 @@ pub struct UdfClaimRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UdfPreparedReceipt {
+    pub input_revision: u64,
+    pub intent_digest: String,
+    pub output_digest: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct UdfClaimedItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_receipt: Option<UdfPreparedReceipt>,
+    pub input_revision: u64,
     pub namespace: String,
     pub id: String,
     pub input: HashMap<String, Value>,
+    /// Every page of the document when the Function groups by parent id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<UdfClaimedPage>,
+    /// `_hevlayer_parent_id` of the source row, read at claim; never serialized.
+    #[serde(skip)]
+    pub parent_id: Option<String>,
+}
+
+/// One page row of a grouped claim, with its own captured input revision.
+#[derive(Debug, Serialize)]
+pub struct UdfClaimedPage {
+    pub id: String,
+    pub input_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_receipt: Option<UdfPreparedReceipt>,
+    pub input: HashMap<String, Value>,
+}
+
+/// A page row of a grouped claim echoed back on complete, fail and heartbeat.
+#[derive(Debug, Deserialize, Clone)]
+pub struct UdfPageRef {
+    pub id: String,
+    #[serde(default)]
+    pub input_revision: Option<u64>,
+    #[serde(default)]
+    pub prepared_input_revision: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1340,6 +1428,8 @@ pub struct UdfHeartbeatRequest {
 pub struct UdfItemRef {
     pub namespace: String,
     pub id: String,
+    #[serde(default)]
+    pub pages: Vec<UdfPageRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1350,12 +1440,18 @@ pub struct UdfItemsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct UdfCompleteRequest {
+    #[serde(default)]
+    pub report_dispositions: bool,
     pub worker_id: String,
     pub items: Vec<UdfCompleteItem>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UdfCompleteItem {
+    #[serde(default)]
+    pub prepared_input_revision: Option<u64>,
+    #[serde(default)]
+    pub input_revision: Option<u64>,
     pub namespace: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1364,6 +1460,9 @@ pub struct UdfCompleteItem {
     pub vectors: Option<Vec<Vec<f64>>>,
     #[serde(default)]
     pub attributes: HashMap<String, Value>,
+    /// Pages of a grouped claim. The outputs apply to each, with its own revision.
+    #[serde(default)]
+    pub pages: Vec<UdfPageRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1379,4 +1478,6 @@ pub struct UdfFailItem {
     pub kind: UdfErrorKind,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub pages: Vec<UdfPageRef>,
 }

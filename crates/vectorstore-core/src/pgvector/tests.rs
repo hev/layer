@@ -40,6 +40,19 @@ fn schema_preflights_types_and_dimensions() {
 }
 
 #[test]
+fn schema_keeps_the_collapse_document_marker() {
+    let marked = json!({"doc_id": {"type": "string", "document": true}});
+    let schema = Schema::parse(&marked).unwrap();
+    assert_eq!(schema.value(), marked, "metadata echoes the marker");
+    for bad in [
+        json!({"n": {"type": "int", "document": true}}),
+        json!({"doc_id": {"type": "string", "document": "yes"}}),
+    ] {
+        assert!(Schema::parse(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn schema_accepts_several_full_text_search_fields() {
     let fts = json!({"type":"string","full_text_search":true});
     let schema = Schema::parse(&json!({"text": fts, "workdir": fts, "vector": "[2]f32"})).unwrap();

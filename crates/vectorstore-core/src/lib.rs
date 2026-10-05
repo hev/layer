@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod capabilities;
+pub mod delete_timing;
+pub mod document_cache;
 #[cfg(feature = "embedded-engine")]
 pub mod embedded_search;
 pub mod models;

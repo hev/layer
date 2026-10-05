@@ -237,6 +237,14 @@ spec:
             - containerPort: {{ .Values.gateway.port }}
               name: http
           env:
+            - name: LAYER_MCP_ENABLED
+              value: {{ .Values.gateway.mcp.enabled | quote }}
+            {{- if .Values.gateway.mcp.enabled }}
+            - name: LAYER_MCP_ALLOWED_HOSTS
+              value: {{ .Values.gateway.mcp.allowedHosts | quote }}
+            - name: LAYER_MCP_JSON
+              value: {{ .Values.gateway.mcp.servers | toJson | quote }}
+            {{- end }}
             - name: PORT
               value: {{ .Values.gateway.port | quote }}
             {{- if not (dig "telemetry" "enabled" true .Values.gateway) }}

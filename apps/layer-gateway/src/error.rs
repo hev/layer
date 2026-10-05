@@ -6,7 +6,7 @@ use vectorstore_core::capabilities::{StoreRejection, UNSUPPORTED_BY_STORE};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("Upstream HTTP response: {status}")]
+    #[error("Upstream HTTP response {status}: {}", String::from_utf8_lossy(.body))]
     UpstreamResponse {
         status: u16,
         content_type: Option<String>,
@@ -15,6 +15,14 @@ pub enum AppError {
 
     #[error("Upstream error: {0}")]
     Upstream(String),
+
+    /// Function completion never exposes upstream response bodies or inputs.
+    #[error("Function store completion failed ({category})")]
+    CompletionUpstream {
+        upstream_status: Option<u16>,
+        category: &'static str,
+        retryable: Option<bool>,
+    },
 
     #[error("Retryable upstream error: {message}")]
     RetryableUpstream {
@@ -35,6 +43,9 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("GPU embedding worker unavailable: {0}")]
+    EmbedWorkerUnavailable(String),
+
     #[error("Unsupported by store: {message}")]
     UnsupportedByStore {
         store: Option<String>,
@@ -47,6 +58,17 @@ pub enum AppError {
         message: String,
     },
 
+    /// A `/search` precondition the namespace or gateway does not meet
+    /// (RFC 0116). `code` is the body's `error` string, the machine code:
+    /// `embed_attribute_missing`, `embed_attribute_invalid`,
+    /// `full_text_attribute_missing`, `rerank_unconfigured`.
+    #[error("Search rejected ({code}): {message}")]
+    SearchRejected { code: &'static str, message: String },
+
+    /// The rerank provider failed and the request set `rerank.required`.
+    #[error("Rerank unavailable: {0}")]
+    RerankUnavailable(String),
+
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
@@ -58,6 +80,10 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[cfg(feature = "pro")]
+    #[error("Function completion conflict: {0:?}")]
+    CompletionConflict(layer_transform::udf::CompletionConflictReason),
 
     #[error("Precondition failed: {0}")]
     PreconditionFailed(String),
@@ -121,17 +147,59 @@ struct ErrorBody {
     feature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_category: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retryable: Option<bool>,
 }
 
 impl AppError {
+    pub fn from_completion_store(error: crate::clients::turbopuffer::TurbopufferError) -> Self {
+        use crate::clients::turbopuffer::TurbopufferError;
+        if matches!(error, TurbopufferError::QueryBudgetExhausted) {
+            return Self::Conflict("Function provider query budget exhausted".into());
+        }
+        let upstream_status = match error {
+            TurbopufferError::Response(response) => Some(response.status),
+            TurbopufferError::RateLimited(_) => Some(429),
+            TurbopufferError::NotFound(_) => Some(404),
+            TurbopufferError::Other(_) | TurbopufferError::QueryBudgetExhausted => None,
+        };
+        // Classify structured status only. Free-form bodies and adapter strings
+        // are private and cannot manufacture a permanent/transient diagnosis.
+        let (category, retryable) = match upstream_status {
+            Some(400 | 422) => ("validation", Some(false)),
+            Some(429) => ("rate_limited", Some(true)),
+            Some(503) => ("unavailable", Some(true)),
+            Some(504) => ("timeout", Some(true)),
+            _ => ("unknown", None),
+        };
+        Self::CompletionUpstream {
+            upstream_status,
+            category,
+            retryable,
+        }
+    }
+
     pub fn from_turbopuffer(
         error: crate::clients::turbopuffer::TurbopufferError,
         context: impl AsRef<str>,
     ) -> Self {
         match error {
+            crate::clients::turbopuffer::TurbopufferError::QueryBudgetExhausted => {
+                Self::Conflict("Function provider query budget exhausted".into())
+            }
             crate::clients::turbopuffer::TurbopufferError::Response(response) => {
                 Self::UpstreamResponse {
-                    status: response.status,
+                    // Caller errors retain the origin status. Origin failures
+                    // are bad-gateway responses, with the original body intact.
+                    status: if (400..500).contains(&response.status) {
+                        response.status
+                    } else {
+                        StatusCode::BAD_GATEWAY.as_u16()
+                    },
                     content_type: response.content_type,
                     body: response.body,
                 }
@@ -250,6 +318,14 @@ impl IntoResponse for AppError {
         };
         let (status, error_type, message, store, route, cache_state) = match &self {
             AppError::UpstreamResponse { .. } => unreachable!("handled above"),
+            AppError::CompletionUpstream { category, .. } => (
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                format!("Function completion store failure: {category}"),
+                None,
+                None,
+                None,
+            ),
             AppError::Upstream(msg) => (
                 StatusCode::BAD_GATEWAY,
                 "upstream_error",
@@ -304,6 +380,14 @@ impl IntoResponse for AppError {
                 None,
                 None,
             ),
+            AppError::EmbedWorkerUnavailable(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "embed_worker_unavailable",
+                message.clone(),
+                None,
+                None,
+                None,
+            ),
             AppError::UnsupportedByStore {
                 store,
                 route,
@@ -315,6 +399,22 @@ impl IntoResponse for AppError {
                 message.clone(),
                 store.clone(),
                 route.clone(),
+                None,
+            ),
+            AppError::SearchRejected { code, message } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                *code,
+                message.clone(),
+                None,
+                None,
+                None,
+            ),
+            AppError::RerankUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rerank_unavailable",
+                msg.clone(),
+                None,
+                None,
                 None,
             ),
             AppError::Forbidden(msg) => (
@@ -341,6 +441,17 @@ impl IntoResponse for AppError {
                 None,
                 None,
             ),
+            #[cfg(feature = "pro")]
+            AppError::CompletionConflict(reason) => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": "conflict", "message": "Function completion rejected",
+                        "reason": reason, "disposition": reason.disposition()
+                    })),
+                )
+                    .into_response();
+            }
             AppError::Conflict(msg) => (
                 StatusCode::CONFLICT,
                 "conflict",
@@ -399,6 +510,14 @@ impl IntoResponse for AppError {
             ),
         };
 
+        let (upstream_status, upstream_category, retryable) = match &self {
+            AppError::CompletionUpstream {
+                upstream_status,
+                category,
+                retryable,
+            } => (*upstream_status, Some(*category), *retryable),
+            _ => (None, None, None),
+        };
         let body = ErrorBody {
             error: error_type.to_string(),
             message,
@@ -406,6 +525,9 @@ impl IntoResponse for AppError {
             route,
             feature,
             cache_state,
+            upstream_status,
+            upstream_category,
+            retryable,
         };
 
         let mut response = (status, axum::Json(body)).into_response();
@@ -489,5 +611,59 @@ mod capability_tests {
             body["message"],
             "UnsupportedByStore: pgvector: fuzzy: phase-one hybrid requires fuzziness: 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod completion_error_tests {
+    use super::*;
+    use crate::clients::turbopuffer::{TurbopufferError, TurbopufferPassthroughResponse};
+
+    #[tokio::test]
+    async fn completion_errors_classify_only_structured_status_and_hide_private_bodies() {
+        for (status, category, retryable) in [
+            (400, "validation", Some(false)),
+            (422, "validation", Some(false)),
+            (429, "rate_limited", Some(true)),
+            (503, "unavailable", Some(true)),
+            (504, "timeout", Some(true)),
+            (502, "unknown", None),
+            (404, "unknown", None),
+        ] {
+            let response = AppError::from_completion_store(TurbopufferError::Response(
+                TurbopufferPassthroughResponse {
+                    status,
+                    content_type: Some("application/json".into()),
+                    body:
+                        br#"{"error":"synthetic_private_input","message":"schema type inference"}"#
+                            .to_vec(),
+                },
+            ))
+            .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("synthetic_private_input"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("schema type inference"));
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["upstream_status"], status);
+            assert_eq!(body["upstream_category"], category);
+            assert_eq!(
+                body.get("retryable").and_then(serde_json::Value::as_bool),
+                retryable
+            );
+        }
+        let response = AppError::from_completion_store(TurbopufferError::Other(
+            "HTTP 400 schema: synthetic_private_input".into(),
+        ))
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["upstream_category"], "unknown");
+        assert!(body.get("upstream_status").is_none());
+        assert!(body.get("retryable").is_none());
     }
 }

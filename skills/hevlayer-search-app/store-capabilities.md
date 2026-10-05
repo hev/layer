@@ -57,10 +57,12 @@ request does once a turbopuffer key is set.
 | Embedding expressions / schema | [api/embed](https://hevlayer.com/docs/api/embed) | partial | yes |
 | Query by stored vector ID | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | as_of / between filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
+| Collapse: one result per group (gateway-grouped) | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
 | Fused leg provenance | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Auto query routing | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Query scatter/gather | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Wire vector encoding | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
+| One-call search (embed, text legs, RRF, rerank) | [api/search](https://hevlayer.com/docs/api/search) | partial | yes |
 
 ## Notes
 
@@ -70,7 +72,8 @@ request does once a turbopuffer key is set.
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
-- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.
+- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding requires explicit turbopuffer serving (autoscaler alias).
+- **One-call search (embed, text legs, RRF, rerank)** on pgvector (local): BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).
 
 ## Full-text ranking
 

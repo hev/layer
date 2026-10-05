@@ -304,6 +304,55 @@ q(
 )
 add("type change rejected", "write", {"schema": {"n": "string"}}, status=400)
 add("dimension change rejected", "write", {"schema": {"vector": "[3]f32"}}, status=400)
+# LYR-87: exercise the gateway wire on a fresh multi-field namespace, not
+# only schema growth on the main fixture. Swapped terms expose cross-field
+# matching; a third field forces the single BM25 index to rebuild again.
+fts = {"type": "string", "full_text_search": True}
+add(
+    "fresh namespace accepts two full-text fields",
+    "write",
+    {
+        "schema": {"text": fts, "workdir": fts},
+        "upsert_rows": [
+            {"id": "text-only", "text": "database", "workdir": "forest"},
+            {"id": "workdir-only", "text": "forest", "workdir": "database"},
+            {"id": "neither", "text": "ocean", "workdir": "ocean"},
+        ],
+    },
+    ns="multi-fts",
+    count=3,
+)
+for field, match in [("text", "text-only"), ("workdir", "workdir-only")]:
+    add(
+        f"fresh BM25 matches and scores only {field}",
+        "query",
+        {"rank_by": [field, "BM25", "database"], "top_k": 10},
+        ns="multi-fts",
+        ids=[match],
+        positive_scores=True,
+    )
+add(
+    "third full-text field rebuilds the fresh namespace index",
+    "write",
+    {
+        "schema": {"title": fts},
+        "upsert_rows": [
+            {"id": "title-only", "text": "ocean", "workdir": "forest", "title": "database"},
+        ],
+    },
+    ns="multi-fts",
+    count=1,
+)
+for field, match in [("text", "text-only"), ("workdir", "workdir-only"), ("title", "title-only")]:
+    add(
+        f"rebuilt BM25 matches and scores only {field}",
+        "query",
+        {"rank_by": [field, "BM25", "database"], "top_k": 10},
+        ns="multi-fts",
+        ids=[match],
+        positive_scores=True,
+    )
+
 # A second full_text_search field on an existing namespace rebuilds the single
 # BM25 index in the same write; each field then ranks by its own text.
 add(
@@ -323,12 +372,14 @@ q(
     ids=["e"],
     query={"rank_by": ["title", "BM25", "database"]},
     first="e",
+    positive_scores=True,
 )
 q(
     "BM25 on the original field is unchanged",
     ids=["a", "b"],
     query={"rank_by": ["text", "BM25", "database"]},
     first="a",
+    positive_scores=True,
 )
 q(
     "BM25 on a non-text field rejected",

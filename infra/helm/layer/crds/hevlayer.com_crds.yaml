@@ -94,6 +94,124 @@ spec:
                 - replicationFactor
                 - scaling
                 type: object
+              embedders:
+                default: []
+                items:
+                  description: A customer container serving OpenAI-compatible embeddings and GET /health.
+                  properties:
+                    dims:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    image:
+                      type: string
+                    maxInputTokens:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    model:
+                      type: string
+                    name:
+                      type: string
+                    port:
+                      default: 8080
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    scaling:
+                      properties:
+                        mode:
+                          default: autoscale
+                          enum:
+                          - autoscale
+                          - fixed
+                          - disabled
+                          type: string
+                        pool:
+                          type: string
+                        replicas:
+                          properties:
+                            max:
+                              format: int32
+                              type: integer
+                            min:
+                              default: 0
+                              format: int32
+                              type: integer
+                          required:
+                          - max
+                          type: object
+                        warmWindowSeconds:
+                          format: int32
+                          nullable: true
+                          type: integer
+                      required:
+                      - replicas
+                      type: object
+                  required:
+                  - dims
+                  - image
+                  - maxInputTokens
+                  - model
+                  - name
+                  - scaling
+                  type: object
+                type: array
+              ocr:
+                default: []
+                items:
+                  description: An OCR container serving LiteParse POST /ocr or page POST /markdown.
+                  properties:
+                    backend:
+                      type: string
+                    image:
+                      type: string
+                    name:
+                      type: string
+                    port:
+                      default: 8080
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    scaling:
+                      properties:
+                        mode:
+                          default: autoscale
+                          enum:
+                          - autoscale
+                          - fixed
+                          - disabled
+                          type: string
+                        pool:
+                          type: string
+                        replicas:
+                          properties:
+                            max:
+                              format: int32
+                              type: integer
+                            min:
+                              default: 0
+                              format: int32
+                              type: integer
+                          required:
+                          - max
+                          type: object
+                        warmWindowSeconds:
+                          format: int32
+                          nullable: true
+                          type: integer
+                      required:
+                      - replicas
+                      type: object
+                  required:
+                  - backend
+                  - image
+                  - name
+                  - scaling
+                  type: object
+                type: array
             type: object
           status:
             nullable: true
@@ -127,10 +245,99 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              embedders:
+                default: []
+                items:
+                  properties:
+                    conditions:
+                      default: []
+                      items:
+                        properties:
+                          lastTransitionTime:
+                            nullable: true
+                            type: string
+                          message:
+                            nullable: true
+                            type: string
+                          reason:
+                            nullable: true
+                            type: string
+                          status:
+                            type: string
+                          type:
+                            type: string
+                        required:
+                        - status
+                        - type
+                        type: object
+                      type: array
+                    endpoint:
+                      type: string
+                    image:
+                      description: The declared image this status describes; changing it resets digest identity.
+                      type: string
+                    imageDigest:
+                      nullable: true
+                      type: string
+                    model:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - endpoint
+                  - image
+                  - model
+                  - name
+                  type: object
+                type: array
               observedGeneration:
                 format: int64
                 nullable: true
                 type: integer
+              ocr:
+                default: []
+                items:
+                  properties:
+                    backend:
+                      type: string
+                    conditions:
+                      default: []
+                      items:
+                        properties:
+                          lastTransitionTime:
+                            nullable: true
+                            type: string
+                          message:
+                            nullable: true
+                            type: string
+                          reason:
+                            nullable: true
+                            type: string
+                          status:
+                            type: string
+                          type:
+                            type: string
+                        required:
+                        - status
+                        - type
+                        type: object
+                      type: array
+                    endpoint:
+                      type: string
+                    image:
+                      type: string
+                    imageDigest:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - backend
+                  - endpoint
+                  - image
+                  - name
+                  type: object
+                type: array
               poolCount:
                 default: 0
                 format: uint
@@ -145,6 +352,7 @@ spec:
     storage: true
     subresources:
       status: {}
+
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -221,6 +429,7 @@ spec:
                             - read
                             - write
                             - admin
+                            - mint
                             type: string
                           type: array
                         secretRef:
@@ -392,18 +601,19 @@ spec:
                         - read
                         - write
                         - admin
+                        - mint
                         type: string
                       type: array
                   type: object
                 description: |-
                   Map keyed by target resource: `vectorstore.<name>`,
-                  `warehouse.<name>`, `agent.<name>`, or `layer`. Unknown prefixes
+                  `warehouse.<name>`, `agent.<name>`, `mcp.<name>`, or `layer`. Unknown prefixes
                   are rejected at admission; a missing target is an
                   `EntitlementTargetMissing` status condition, not an error.
                 type: object
                 x-kubernetes-validations:
-                - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', or 'agent.<name>'
-                  rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6))
+                - message: entitlement keys must be 'layer', 'vectorstore.<name>', 'warehouse.<name>', 'agent.<name>', or 'mcp.<name>'
+                  rule: self.all(k, k == 'layer' || (k.startsWith('vectorstore.') && k.size() > 12) || (k.startsWith('warehouse.') && k.size() > 10) || (k.startsWith('agent.') && k.size() > 6) || (k.startsWith('mcp.') && k.size() > 4))
               expiresAfter:
                 default: 365d
                 description: |-
@@ -536,6 +746,51 @@ spec:
         properties:
           spec:
             properties:
+              clouddrive:
+                nullable: true
+                properties:
+                  msgraph:
+                    properties:
+                      clientId:
+                        type: string
+                      credentialSecretRef:
+                        description: 'Same-namespace Secret: certificate.pem + private-key.pem, or client-secret.'
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      tenantId:
+                        type: string
+                    required:
+                    - clientId
+                    - credentialSecretRef
+                    - tenantId
+                    type: object
+                  provider:
+                    enum:
+                    - msgraph
+                    type: string
+                  rateLimit:
+                    nullable: true
+                    properties:
+                      concurrentDownloads:
+                        format: uint32
+                        minimum: 1.0
+                        type: integer
+                      requestsPerSecond:
+                        format: double
+                        minimum: 0.001
+                        type: number
+                    required:
+                    - concurrentDownloads
+                    - requestsPerSecond
+                    type: object
+                required:
+                - msgraph
+                - provider
+                type: object
               huggingface:
                 nullable: true
                 properties:
@@ -560,7 +815,7 @@ spec:
               kind:
                 description: |-
                   Warehouse source kind. `databricks` and `iceberg` remain reserved;
-                  `snowflake`, `huggingface`, `rss`, `youtube`, and `rest` are admitted
+                  `snowflake`, `huggingface`, `rss`, `youtube`, `rest`, and `clouddrive` are admitted
                   and reconciled.
                 enum:
                 - snowflake
@@ -568,17 +823,18 @@ spec:
                 - rss
                 - youtube
                 - rest
+                - clouddrive
                 - databricks
                 - iceberg
                 type: string
                 x-kubernetes-validations:
-                - message: spec.kind is reserved but not implemented; v1 supports snowflake, huggingface, rss, youtube, and rest
-                  rule: self in ['snowflake', 'huggingface', 'rss', 'youtube', 'rest']
+                - message: spec.kind is reserved but not implemented; v1 supports snowflake, huggingface, rss, youtube, rest, and clouddrive
+                  rule: self in ['snowflake', 'huggingface', 'rss', 'youtube', 'rest', 'clouddrive']
               rest:
                 nullable: true
                 properties:
                   auth:
-                    description: Optional static credential applied to every probe and source request.
+                    description: Optional static credential or login applied to probes and source requests.
                     nullable: true
                     properties:
                       in:
@@ -586,9 +842,50 @@ spec:
                         - query
                         - header
                         type: string
+                      login:
+                        nullable: true
+                        properties:
+                          body:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                          expiresInPath:
+                            nullable: true
+                            type: string
+                          path:
+                            type: string
+                          refresh:
+                            nullable: true
+                            properties:
+                              body:
+                                type: object
+                                x-kubernetes-preserve-unknown-fields: true
+                              path:
+                                type: string
+                            required:
+                            - body
+                            - path
+                            type: object
+                          secretRef:
+                            properties:
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          tokenPath:
+                            type: string
+                        required:
+                        - body
+                        - path
+                        - secretRef
+                        - tokenPath
+                        type: object
                       name:
                         type: string
+                      prefix:
+                        type: string
                       secretRef:
+                        nullable: true
                         properties:
                           name:
                             type: string
@@ -598,8 +895,10 @@ spec:
                     required:
                     - in
                     - name
-                    - secretRef
                     type: object
+                    x-kubernetes-validations:
+                    - message: set exactly one of secretRef or login
+                      rule: has(self.secretRef) != has(self.login)
                   baseUrl:
                     description: JSON API origin, for example `https://api.fda.gov`.
                     type: string
@@ -770,6 +1069,12 @@ spec:
                 - Verified
                 - Failed
                 type: string
+              roles:
+                default: []
+                description: Application roles from the latest Microsoft Graph token exchange.
+                items:
+                  type: string
+                type: array
               sourceRevisions:
                 additionalProperties:
                   type: string
@@ -1284,6 +1589,31 @@ spec:
                     type: integer
                 type: object
               sourceRef:
+                properties:
+                  pagination:
+                    properties:
+                      allowEmptySnapshot:
+                        default: false
+                        type: boolean
+                      kind:
+                        description: REST supports offset, page, and searchAfter pagination.
+                        type: string
+                      pageParam:
+                        minLength: 1
+                        type: string
+                      pageSize:
+                        minimum: 1.0
+                        type: integer
+                      pageSizeParam:
+                        minLength: 1
+                        type: string
+                      startPage:
+                        default: 1
+                        minimum: 0.0
+                        type: integer
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
                 x-kubernetes-preserve-unknown-fields: true
               target:
                 properties:
@@ -1421,6 +1751,9 @@ spec:
             properties:
               filter:
                 x-kubernetes-preserve-unknown-fields: true
+              groupByParent:
+                default: false
+                type: boolean
               indexSelector:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
@@ -1434,6 +1767,10 @@ spec:
                 items:
                   type: string
                 type: array
+              queriesPerItem:
+                type: integer
+                format: uint32
+                minimum: 0.0
               paused:
                 default: false
                 type: boolean

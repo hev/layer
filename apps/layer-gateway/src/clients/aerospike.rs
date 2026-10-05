@@ -73,6 +73,16 @@ pub trait AerospikeClient: Send + Sync {
         docs: &HashMap<String, HashMap<String, Value>>,
     ) -> Result<(), AerospikeError>;
 
+    /// Rebuildable canonical certificates have a one-hour TTL, independent of
+    /// namespace defaults. Implementations without expiry retain test semantics.
+    async fn put_ephemeral(
+        &self,
+        namespace: &str,
+        docs: &HashMap<String, HashMap<String, Value>>,
+    ) -> Result<(), AerospikeError> {
+        self.put_many(namespace, docs).await
+    }
+
     async fn get(
         &self,
         namespace: &str,
@@ -121,6 +131,30 @@ pub trait AerospikeClient: Send + Sync {
     async fn delete_set(&self, namespace: &str) -> Result<(), AerospikeError>;
 
     async fn count_set(&self, namespace: &str) -> Result<u64, AerospikeError>;
+
+    /// Read a raw record together with its generation, for compare-and-set
+    /// updates through [`put_raw_cas`](Self::put_raw_cas).
+    async fn get_raw_gen(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u32)>, AerospikeError> {
+        Ok(self.get_raw(namespace, key).await?.map(|bytes| (bytes, 0)))
+    }
+
+    /// Write a raw record only if its generation still equals
+    /// `expected_generation` (`None`: only if the record does not exist yet).
+    /// Returns `false` when another writer got there first.
+    async fn put_raw_cas(
+        &self,
+        namespace: &str,
+        key: &str,
+        data: &[u8],
+        _expected_generation: Option<u32>,
+    ) -> Result<bool, AerospikeError> {
+        self.put_raw(namespace, key, data).await?;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +399,14 @@ impl AerospikeClient for AerospikeRuntime {
         self.call(client.put_many(namespace, docs)).await
     }
 
+    async fn put_ephemeral(
+        &self,
+        namespace: &str,
+        docs: &HashMap<String, HashMap<String, Value>>,
+    ) -> Result<(), AerospikeError> {
+        let client = self.current().await?;
+        self.call(client.put_ephemeral(namespace, docs)).await
+    }
     async fn get(
         &self,
         namespace: &str,
@@ -440,6 +482,27 @@ impl AerospikeClient for AerospikeRuntime {
         let client = self.current_for_bulk().await?;
         self.call_bulk(client.count_set(namespace)).await
     }
+
+    async fn get_raw_gen(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u32)>, AerospikeError> {
+        let client = self.current().await?;
+        self.call(client.get_raw_gen(namespace, key)).await
+    }
+
+    async fn put_raw_cas(
+        &self,
+        namespace: &str,
+        key: &str,
+        data: &[u8],
+        expected_generation: Option<u32>,
+    ) -> Result<bool, AerospikeError> {
+        let client = self.current().await?;
+        self.call(client.put_raw_cas(namespace, key, data, expected_generation))
+            .await
+    }
 }
 
 // The concrete Aerospike-backed implementation is pro-only and is not
@@ -464,6 +527,7 @@ type VectorNamespaceStore = HashMap<String, HashMap<String, Vec<f64>>>;
 pub struct MockAerospikeClient {
     store: tokio::sync::RwLock<NamespaceStore>,
     vectors: tokio::sync::RwLock<VectorNamespaceStore>,
+    raw_generations: tokio::sync::Mutex<HashMap<(String, String), u32>>,
 }
 
 impl Default for MockAerospikeClient {
@@ -477,12 +541,57 @@ impl MockAerospikeClient {
         Self {
             store: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
+            raw_generations: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 }
 
 #[async_trait]
 impl AerospikeClient for MockAerospikeClient {
+    async fn get_raw_gen(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u32)>, AerospikeError> {
+        let generations = self.raw_generations.lock().await;
+        let generation = generations
+            .get(&(namespace.to_string(), key.to_string()))
+            .copied()
+            .unwrap_or(0);
+        Ok(self
+            .get_raw(namespace, key)
+            .await?
+            .map(|bytes| (bytes, generation)))
+    }
+
+    async fn put_raw_cas(
+        &self,
+        namespace: &str,
+        key: &str,
+        data: &[u8],
+        expected_generation: Option<u32>,
+    ) -> Result<bool, AerospikeError> {
+        let mut generations = self.raw_generations.lock().await;
+        let slot = (namespace.to_string(), key.to_string());
+        let exists = self
+            .store
+            .read()
+            .await
+            .get(namespace)
+            .is_some_and(|ns| ns.contains_key(key));
+        let current = generations.get(&slot).copied().unwrap_or(0);
+        let matches = match expected_generation {
+            None => !exists,
+            Some(generation) => exists && generation == current,
+        };
+        if !matches {
+            return Ok(false);
+        }
+        self.put_raw(namespace, key, data).await?;
+        generations.insert(slot, current + 1);
+        Ok(true)
+    }
+
     async fn put(
         &self,
         namespace: &str,
@@ -646,10 +755,99 @@ fn filter_attributes(
     }
 }
 
+/// Canonical reads use their own ephemeral sets. Ordinary fetch/scan rows may
+/// have been projected or mirrored before upstream commit and are never trusted.
+pub struct FunctionDocumentCache(pub Arc<dyn AerospikeClient>);
+#[async_trait]
+impl vectorstore_core::document_cache::DocumentReadCache for FunctionDocumentCache {
+    async fn get_many(
+        &self,
+        scope: &str,
+        ids: &[String],
+    ) -> Result<
+        HashMap<String, Option<HashMap<String, Value>>>,
+        vectorstore_core::turbopuffer::TurbopufferError,
+    > {
+        let physical: Vec<_> = ids.iter().map(|id| format!("{scope}/{id}")).collect();
+        let rows = self
+            .0
+            .get_many("__function_reads", &physical, None)
+            .await
+            .map_err(|e| vectorstore_core::turbopuffer::TurbopufferError::Other(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, mut row)| {
+                let id = id.strip_prefix(&format!("{scope}/"))?.to_owned();
+                match row.remove("canonical") {
+                    Some(Value::Null) => Some((id, None)),
+                    Some(Value::Object(attrs)) => Some((id, Some(attrs.into_iter().collect()))),
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+    async fn invalidate(
+        &self,
+        scope: &str,
+        ids: &[String],
+    ) -> Result<(), vectorstore_core::turbopuffer::TurbopufferError> {
+        for id in ids {
+            self.0
+                .delete("__function_reads", &format!("{scope}/{id}"))
+                .await
+                .map_err(|e| {
+                    vectorstore_core::turbopuffer::TurbopufferError::Other(e.to_string())
+                })?;
+        }
+        Ok(())
+    }
+    async fn put_many(
+        &self,
+        scope: &str,
+        rows: &HashMap<String, Option<HashMap<String, Value>>>,
+    ) -> Result<(), vectorstore_core::turbopuffer::TurbopufferError> {
+        let rows = rows
+            .iter()
+            .map(|(id, attrs)| {
+                (
+                    format!("{scope}/{id}"),
+                    HashMap::from([(
+                        "canonical".into(),
+                        serde_json::to_value(attrs).expect("JSON attributes"),
+                    )]),
+                )
+            })
+            .collect();
+        self.0
+            .put_ephemeral("__function_reads", &rows)
+            .await
+            .map_err(|e| vectorstore_core::turbopuffer::TurbopufferError::Other(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn namespace_purge_skips_impossible_sets_without_truncating_valid_names() {
+        let baseline = "hevlayer-baseline-1790949129792-multivector";
+        assert_eq!(
+            purge_set_name("tpuf_", baseline),
+            Some(format!("tpuf_{baseline}"))
+        );
+        let history = crate::history::search_history_cache_namespace(baseline);
+        assert!(purge_set_name("tpuf_", &history).is_none());
+        assert_eq!(
+            purge_set_name("tpuf_", &"x".repeat(58)),
+            Some(format!("tpuf_{}", "x".repeat(58)))
+        );
+        assert!(purge_set_name("tpuf_", &"x".repeat(59)).is_none());
+        // Byte boundaries, not Unicode character counts.
+        assert!(purge_set_name("", &"é".repeat(32)).is_none());
+        assert_eq!(purge_set_name("", &"é".repeat(31)), Some("é".repeat(31)));
+    }
 
     struct SleepingAerospikeClient {
         calls: AtomicU64,
@@ -872,8 +1070,6 @@ mod tests {
         assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
     }
 
-    // `scanned_id` ships only in the pro composition.
-    #[cfg(feature = "pro")]
     #[test]
     fn scanned_id_prefers_user_key_then_document_id() {
         let mut doc = HashMap::new();

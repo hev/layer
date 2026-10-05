@@ -124,6 +124,7 @@ class PutVectorsRequest(BaseModel):
 class CreateUdfRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     id: str
+    paused: bool | None = False
     spec: UdfSpec
 
 class UpdateUdfRequest(BaseModel):
@@ -149,6 +150,7 @@ class GetUdfResponse(BaseModel):
 
 class UdfStatus(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    query_budget: UdfQueryBudget | None = None
     udf_id: str
     paused: bool
     active_namespaces: list[str]
@@ -162,13 +164,40 @@ class UdfStatus(BaseModel):
 
 class UdfDiscoveryStatus(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    consecutive_failures: int | None = None
+    pause_reason: str | None = None
     sweeps_completed: int
     last_completed_at: str | None
+
+class UdfQueryBudget(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    queries_per_item: int | None
+    provider_queries: int
+    rejected_queries: int
+    exhausted_items: int
+    discovery_queries: int
+
+class UdfLookupRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    worker_id: str
+    namespace: str
+    id: str
+    input_revision: int
+    include_attributes: list[str] | None = None
+
+class UdfLookupResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    udf_id: str
+    namespace: str
+    parent_id: str
+    page_two_id: str | None
+    documents: list[Document]
 
 class UdfSpec(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     index_selector: Any | None = None
     target_namespaces: list[str] | None = []
+    queries_per_item: int | None = None
     inputs: list[str] | None = []
     version: str | None = "v1"
     filter: Any | None = None
@@ -177,6 +206,57 @@ class UdfSpec(BaseModel):
     retry: UdfRetrySpec | None = None
     triggers: list[UdfTrigger] | None = ["discovery"]
     invalidates: list[str] | None = []
+    group_by_parent: bool | None = False
+    candidate: UdfCandidateSpec | None = None
+
+class UdfCandidateSpec(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    of: str
+    outputs: list[str]
+
+class UdfCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    version: str
+    outputs: list[str]
+    inputs: list[str] | None = None
+    filter: Any | None = None
+    worker: UdfWorkerSpec | None = None
+    target_namespaces: list[str] | None = None
+
+class UdfCandidatePromoteRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    allow_partial: bool | None = False
+    namespaces: list[str] | None = None
+
+class UdfCandidatePromoteResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    udf_id: str
+    promoted_rows: int
+    version: str
+
+class UdfCandidateComparison(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    udf_id: str
+    candidate_id: str
+    live_version: str
+    candidate_version: str
+    rows_compared: int
+    rows_agreed: int
+    agreement_rate: float | None
+    truncated: bool
+    pending_count: int
+    processing_count: int
+    failed_count: int
+    outputs: list[UdfCandidateOutputComparison]
+    disagreements: list[dict[str, Any]]
+
+class UdfCandidateOutputComparison(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    output: str
+    compared: int
+    agreed: int
+    agreement_rate: float | None
+    confusion: dict[str, dict[str, int]] | None
 
 UdfTrigger = Literal["discovery", "write"]
 
@@ -205,13 +285,18 @@ class UdfRetrySpec(BaseModel):
 class UdfDiscoverRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespaces: list[str] | None = []
-    page_size: int | None = 10000
+    page_size: int | None = 1000
+    max_pages: int | None = 10
+    cursor: str | None = None
 
 class UdfDiscoverResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     udf_id: str
     enqueued: int
     namespaces: list[str]
+    pages_scanned: int
+    complete: bool
+    next_cursor: str | None = None
 
 class UdfClaimRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -223,7 +308,29 @@ class UdfClaimedItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    prepared_receipt: UdfPreparedReceipt | None = None
+    input_revision: int | None = None
     input: dict[str, Any]
+    pages: list[UdfClaimedPage] | None = None
+
+class UdfClaimedPage(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    input_revision: int
+    prepared_receipt: UdfPreparedReceipt | None = None
+    input: dict[str, Any]
+
+class UdfPageRef(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    input_revision: int | None = None
+    prepared_input_revision: int | None = None
+
+class UdfPreparedReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    input_revision: int
+    intent_digest: str
+    output_digest: str
 
 class UdfClaimResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -235,6 +342,7 @@ class UdfItemRef(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    pages: list[UdfPageRef] | None = None
 
 class UdfHeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -243,6 +351,7 @@ class UdfHeartbeatRequest(BaseModel):
 
 class UdfCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    report_dispositions: bool | None = False
     worker_id: str
     items: list[UdfCompleteItem]
 
@@ -250,9 +359,12 @@ class UdfCompleteItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     namespace: str
     id: str
+    prepared_input_revision: int | None = None
+    input_revision: int | None = None
     vector: list[float] | None = None
     vectors: list[list[float]] | None = None
     attributes: dict[str, Any] | None = {}
+    pages: list[UdfPageRef] | None = None
 
 UdfErrorKind = Literal["transient", "permanent"]
 
@@ -267,11 +379,19 @@ class UdfFailItem(BaseModel):
     id: str
     kind: UdfErrorKind
     message: str | None = None
+    pages: list[UdfPageRef] | None = None
 
 class UdfItemsResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     udf_id: str
     updated: int
+    items: list[UdfCompletionOutcome] | None = None
+
+class UdfCompletionOutcome(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    index: int
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "prepared_owner_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    disposition: Literal["completed", "reclaim", "discard", "stop"]
 
 CostWindow = Literal["1h", "6h", "24h", "7d", "30d"]
 
@@ -385,7 +505,7 @@ class Document(BaseModel):
 
 class FetchDocumentsRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    ids: list[str]
+    ids: list[str | int]
     include_attributes: list[str] | None = None
 
 class FetchDocumentsResponse(BaseModel):
@@ -425,6 +545,14 @@ class TurbopufferSchema(BaseModel):
 class TurbopufferMetadataPatch(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     pinning: Any | None = None
+
+class PutPipelineRowsRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    patch_condition: Any | None = None
+    patch_rows: list[dict[str, Any]] | None = None
+    upsert_rows: list[dict[str, Any]] | None = None
+    schema: dict[str, Any] | None = None
+    distance_metric: Literal["cosine_distance", "euclidean_squared"] | None = None
 
 class TurbopufferWriteRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -777,8 +905,26 @@ class NamespaceMetadata(BaseModel):
     index: IndexState | None = None
     layer: NamespaceMetadataLayer | None = None
 
+class NamespaceFieldStats(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    as_of: int | None = None
+    rows: int | None = None
+    fields: dict[str, FieldStat] | None = None
+    untracked: list[str] | None = None
+
+class FieldStat(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    missing: int
+    distinct: dict[str, Any]
+    min: float | None = None
+    max: float | None = None
+    top: list[dict[str, Any]] | None = None
+    state: Literal["exact", "approximate"]
+    approximate_since: int | None = None
+
 class NamespaceMetadataLayer(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    field_stats: NamespaceFieldStats | None = None
     stable_as_of: int | None = None
     is_stable: bool | None = None
     indexed: bool | None = None
@@ -810,6 +956,7 @@ class QueryRequest(BaseModel):
     as_of: int | None = None
     between: list[int] | None = None
     include_attributes: bool | list[str] | None = None
+    collapse: CollapseRequest | None = None
     include_leg_breakdown: bool | None = False
     cursor: str | None = None
     rank_by: list[Any] | None = None
@@ -823,6 +970,7 @@ class FederatedQueryRequest(BaseModel):
     as_of: int | None = None
     between: list[int] | None = None
     include_attributes: bool | list[str] | None = None
+    collapse: CollapseRequest | None = None
     include_leg_breakdown: bool | None = False
     cursor: str | None = None
     rank_by: list[Any] | None = None
@@ -900,7 +1048,7 @@ class RoutingEcho(BaseModel):
 
 class QueryResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    rows: list[dict[str, Any]] | None = None
+    rows: list[dict[str, Any]]
     aggregations: dict[str, Any] | None = None
     aggregation_groups: list[dict[str, Any]] | None = None
     billing: dict[str, Any] | None = None
@@ -909,11 +1057,159 @@ class QueryResponse(BaseModel):
     next_cursor: str | None = None
     hybrid: HybridEcho | None = None
     routing: RoutingEcho | None = None
+    groups: list[CollapseGroup] | None = None
+    collapse: dict[str, Any] | None = None
+
+class CollapseRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    by: str | list[str]
+    expansion: int | None = 10
+    missing: Literal["own", "together", "drop"] | dict[str, Any] | None = None
+
+class CollapseGroup(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    key: Any
+    by: str | None
+    rows: list[dict[str, Any]]
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    query: str
+    top_k: int | None = 10
+    filters: Any | None = None
+    include_attributes: bool | list[str] | None = None
+    pool: int | None = 50
+    embed: SearchEmbedOptions | None = None
+    text: SearchTextOptions | None = None
+    rerank: bool | SearchRerankOptions | None = None
+    explain: bool | None = False
+    collapse: CollapseRequest | None = None
+
+class SearchEmbedOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    attribute: str | None = None
+
+class SearchTextOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    fuzziness: Literal["auto"] | int | None = None
+    stopwords: Literal["en"] | bool | list[str] | None = None
+
+class SearchRerankOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    provider: Literal["jev"] | None = "jev"
+    threshold: float | None = 0
+    attributes: list[str] | None = None
+    docs_per_call: int | None = 30
+    max_chars: int | None = 2000
+    question: Literal["generic-1"] | None = "generic-1"
+    required: bool | None = False
+
+class SearchResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    rows: list[SearchRow]
+    groups: list[SearchCollapseGroup] | None = None
+    collapse: dict[str, Any] | None = None
+    routing: SearchRoutingEcho
+    plan: SearchPlanEcho
+    hybrid: SearchHybridEcho
+    rerank: SearchRerankEcho
+    performance: SearchPerformance
+
+class SearchCollapseGroup(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    key: Any
+    by: str | None
+    rows: list[SearchRow]
+
+class SearchRow(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: Any
+    score: float
+    attributes: dict[str, Any]
+    explain: SearchRowExplain | None = None
+
+class SearchRowExplain(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    features: SearchL1Features
+    contributions: SearchL1Features
+    l1_score: float
+    legs: list[dict[str, Any]]
+
+class SearchL1Features(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    rrf_sum: float
+    fetch_count_30d: float | None = None
+    age_seconds: float | None = None
+
+class SearchRoutingEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    route: Literal["hybrid_text", "semantic", "fused"]
+    policy: str
+    tokens: int
+    executed: bool
+    advisory: bool
+
+class SearchPlanEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    executed: bool
+    reason: str | None = None
+
+class SearchHybridEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    tokens: list[str]
+    tokens_dropped: int
+    stopwords: Any
+    stopwords_dropped: list[str]
+    fuzziness: Any
+    fuzziness_clamped: bool | None = None
+    rank_constant: int
+    per_leg_limit: int
+    legs: list[SearchLegEcho]
+    dropped_legs: int
+    threads: int | None = None
+    surfaced: bool
+
+class SearchLegEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    label: str
+    kind: Literal["ann", "bm25", "fuzzy"]
+    attribute: str | None = None
+    rows: int
+
+class SearchRerankEcho(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    provider: str
+    model: str | None = None
+    question: str
+    executed: bool
+    reason: Literal["disabled", "empty_pool", "provider_error", "timeout", "rate_limited", "queue_timeout"] | None = None
+    pool: int
+    calls: int
+    docs_per_call: int
+    threshold: float
+    pruned: int
+    input_tokens: int
+    latency_ms: int
+
+class SearchPerformance(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    embedding_tokens: float | None = None
+    embedding_ms: float | None = None
+    legs_ms: int
+    fuse_ms: int
+    l1_ms: int
+    rerank_ms: int
+    total_ms: int
 
 class Error(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    reason: Literal["stale_claim", "claim_not_owned", "prepared_receipt_mismatch", "prepared_source_changed", "prepared_owner_changed", "ownership_lost_before_ack", "source_absent"] | None = None
+    disposition: Literal["reclaim", "discard", "stop"] | None = None
     error: str
     message: str
+    upstream_status: int | None = None
+    upstream_category: Literal["validation", "rate_limited", "unavailable", "timeout", "unknown"] | None = None
+    retryable: bool | None = None
     feature: str | None = None
 
 class SnapshotHistoryEntry(BaseModel):
@@ -1143,7 +1439,23 @@ class RestWarehouseAuth(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     in_: Literal["query", "header"] = Field(..., alias="in")
     name: str
+    secretRef: WarehouseSecretRef | None = None
+    prefix: str | None = None
+    login: RestWarehouseLogin | None = None
+
+class RestWarehouseLogin(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    path: str
+    body: dict[str, Any]
     secretRef: WarehouseSecretRef
+    tokenPath: str
+    expiresInPath: str | None = None
+    refresh: RestWarehouseRefresh | None = None
+
+class RestWarehouseRefresh(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    path: str
+    body: dict[str, Any]
 
 class RestWarehouseRateLimit(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -1186,7 +1498,7 @@ class WarehouseList(BaseModel):
 
 class ApiKeyEntitlement(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    scopes: list[Literal["read", "write", "admin"]] | None = None
+    scopes: list[Literal["read", "write", "admin", "mint"]] | None = None
     namespaces: list[str] | None = None
     claims: list[str] | None = None
 

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/hev/layer/apps/layer-cli/cmd"
 	"golang.org/x/term"
@@ -14,7 +16,9 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(cmd.Execute(context.Background(), os.Args[1:], cmd.Options{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(cmd.Execute(ctx, os.Args[1:], cmd.Options{
 		Stdin:            os.Stdin,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,

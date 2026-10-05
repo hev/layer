@@ -103,7 +103,7 @@ func watchInit(ctx context.Context, out io.Writer, client *hevlayer.Client, name
 		interval = 2 * time.Second
 	}
 	for {
-		metadata, err := client.GetNamespaceMetadata(ctx, namespace)
+		metadata, err := client.GetNamespaceMetadata(ctx, namespace, nil)
 		if err != nil {
 			return initRow{}, err
 		}

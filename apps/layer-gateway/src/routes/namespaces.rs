@@ -20,8 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::auth::{authorize_namespace, can_list_namespace, can_list_store, ApiScope, CallerGrant};
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,7 +47,7 @@ fn checkpoint_s3_prefix(namespace: &str) -> String {
     format!("checkpoints/{namespace}/")
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ListNamespacesQuery {
     pub prefix: Option<String>,
     pub cursor: Option<String>,
@@ -56,13 +57,21 @@ pub struct ListNamespacesQuery {
 pub async fn list_namespaces(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListNamespacesQuery>,
+    grant: Option<Extension<CallerGrant>>,
 ) -> Result<Json<NamespaceList>, AppError> {
     let cache_key = cache_key_from(&params);
+    // The shared cache is only safe for unrestricted callers.
+    let unrestricted = match grant.as_ref().map(|grant| &grant.0) {
+        None | Some(CallerGrant::Declared(_)) => true,
+        #[cfg(feature = "pro")]
+        Some(CallerGrant::Minted(_)) => false,
+    };
+    let cache_enabled = unrestricted && !state.namespace_list_cache_ttl.is_zero();
 
     // Fast path: a fresh cached response covers the same query exactly. The
     // TTL is intentionally short (default 10s) so the dashboard still feels
     // live without N × per-namespace metadata calls per refresh.
-    if !state.namespace_list_cache_ttl.is_zero() {
+    if cache_enabled {
         if let Some(entry) = state.namespace_list_cache.get(&cache_key) {
             let (cached_at, list) = entry.value();
             if cached_at.elapsed() < state.namespace_list_cache_ttl {
@@ -71,9 +80,9 @@ pub async fn list_namespaces(
         }
     }
 
-    let response = fetch_namespace_list(&state, &params).await?;
+    let response = fetch_namespace_list(&state, &params, grant.as_ref().map(|g| &g.0)).await?;
 
-    if !state.namespace_list_cache_ttl.is_zero() {
+    if cache_enabled {
         state
             .namespace_list_cache
             .insert(cache_key, (Instant::now(), response.clone()));
@@ -85,35 +94,81 @@ pub async fn list_namespaces(
 pub async fn delete_namespace(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use vectorstore_core::delete_timing::Timings;
+    let timings = Timings::default();
+    let started = Instant::now();
+    let result = timings
+        .scope(delete_namespace_inner(state, namespace))
+        .await;
+    let mut response = result.into_response();
+    let header = timings.header(started.elapsed());
+    tracing::info!(server_timing = %header, "Namespace DELETE foreground completed");
+    response.headers_mut().insert(
+        "server-timing",
+        header.parse().expect("fixed labels and numeric durations"),
+    );
+    response
+}
+
+async fn delete_namespace_inner(
+    state: Arc<AppState>,
+    namespace: String,
 ) -> Result<Json<StatusResponse>, AppError> {
+    use vectorstore_core::delete_timing::{start, Phase};
     if namespace.trim().is_empty() {
         return Err(AppError::Validation("namespace is required".to_string()));
     }
 
-    let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
-
-    let upstream = state
-        .turbopuffer()
-        .delete_namespace_in_store(&namespace, &store)
-        .await
-        .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
-
-    if upstream.status >= 400 && upstream.status != 404 {
-        return Err(AppError::Upstream(format!(
-            "VectorStore namespace delete returned {}",
-            upstream.status
-        )));
-    }
-
-    // Keep in-memory invalidation on the request path, before any local I/O
-    // cleanup that may later run in the background.
-    purge_in_memory_namespace_state(&state, &namespace);
-    state.namespace_purges.upstream_deleted(&state, &intent);
-    let response = StatusResponse {
-        message: Some(crate::namespace_purge::DELETE_MESSAGE.into()),
-        ..Default::default()
+    // Namespace replacement must serialize with strong Function source reads
+    // and completion writes just like row mutations.
+    let function_timer = start(Phase::Function);
+    let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
+        Some(
+            trigger
+                .prepare_replacement(Arc::clone(&state), &namespace)
+                .await?,
+        )
+    } else {
+        None
     };
-    Ok(Json(response))
+    drop(function_timer);
+    crate::run_guarded_write(_function_guard.as_deref(), async {
+        let intent_timer = start(Phase::Intent);
+        let (intent, store) = state.namespace_purges.prepare(&state, &namespace).await?;
+        drop(intent_timer);
+        let upstream_timer = start(Phase::Upstream);
+
+        let upstream = state
+            .turbopuffer()
+            .delete_namespace_in_store(&namespace, &store)
+            .await
+            .map_err(|e| AppError::Upstream(format!("VectorStore namespace delete failed: {e}")))?;
+
+        drop(upstream_timer);
+        if upstream.status >= 400 && upstream.status != 404 {
+            return Err(AppError::Upstream(format!(
+                "VectorStore namespace delete returned {}",
+                upstream.status
+            )));
+        }
+
+        // Keep in-memory invalidation on the request path, before any local I/O
+        // cleanup that may later run in the background.
+        let invalidate_timer = start(Phase::Invalidate);
+        purge_in_memory_namespace_state(&state, &namespace);
+        drop(invalidate_timer);
+        let notify_timer = start(Phase::Notify);
+        state.namespace_purges.upstream_deleted(&state, &intent);
+        drop(notify_timer);
+        let response = StatusResponse {
+            message: Some(crate::namespace_purge::DELETE_MESSAGE.into()),
+            ..Default::default()
+        };
+        Ok(Json(response))
+    })
+    .await
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +242,13 @@ pub(crate) async fn reset_namespace_layer_state(
                 .push(format!("Aerospike latest snapshot purge failed: {e}"));
         }
 
+        #[cfg(feature = "pro")]
+        if let Err(e) = crate::field_stats::purge(state, namespace).await {
+            outcome
+                .errors
+                .push(format!("field stats purge failed: {e}"));
+        }
+
         let history_cache_namespace = search_history_cache_namespace(namespace);
         if let Err(e) = state.aerospike.delete_set(&history_cache_namespace).await {
             outcome
@@ -196,11 +258,17 @@ pub(crate) async fn reset_namespace_layer_state(
     }
 
     if state.s3.is_configured() {
-        let key = crate::lineage::lineage_key(namespace);
-        if let Err(e) = state.s3.delete_keys(std::slice::from_ref(&key)).await {
+        #[allow(unused_mut)]
+        let mut keys = vec![
+            crate::lineage::lineage_key(namespace),
+            crate::routes::collapse::marker_key(namespace),
+        ];
+        #[cfg(feature = "pro")]
+        keys.push(crate::field_stats::s3_key(namespace));
+        if let Err(e) = state.s3.delete_keys(&keys).await {
             outcome
                 .errors
-                .push(format!("S3 lineage purge for '{key}' failed: {e}"));
+                .push(format!("S3 key purge for {keys:?} failed: {e}"));
         }
     }
 
@@ -287,23 +355,9 @@ fn cache_key_from(params: &ListNamespacesQuery) -> String {
 async fn fetch_namespace_list(
     state: &Arc<AppState>,
     params: &ListNamespacesQuery,
+    grant: Option<&CallerGrant>,
 ) -> Result<NamespaceList, AppError> {
-    let upstream_query = build_upstream_query(params);
-    let upstream = state
-        .turbopuffer()
-        .passthrough("GET", "/v1/namespaces", upstream_query.as_deref(), None)
-        .await
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list: {}", e)))?;
-
-    if upstream.status >= 400 {
-        return Err(AppError::Upstream(format!(
-            "Turbopuffer namespace list returned {}",
-            upstream.status
-        )));
-    }
-
-    let body: Value = serde_json::from_slice(&upstream.body)
-        .map_err(|e| AppError::Upstream(format!("Turbopuffer namespace list parse: {}", e)))?;
+    let body = authorized_namespace_page(state, params, grant).await?;
 
     let names: Vec<String> = body
         .get("namespaces")
@@ -330,6 +384,92 @@ async fn fetch_namespace_list(
         namespaces: entries,
         next_cursor,
     })
+}
+
+/// Keep upstream cursors intact and scan through pages with no readable names.
+/// Filtering happens before metadata fanout or any caller-visible response.
+pub(crate) async fn authorized_namespace_page(
+    state: &AppState,
+    params: &ListNamespacesQuery,
+    grant: Option<&CallerGrant>,
+) -> Result<Value, AppError> {
+    if !can_list_store(state, grant) {
+        return Ok(serde_json::json!({"namespaces": [], "next_cursor": null}));
+    }
+    let mut params = params.clone();
+    let mut result: Option<Value> = None;
+    let mut seen = std::collections::HashSet::new();
+    if let Some(cursor) = &params.cursor {
+        seen.insert(cursor.clone());
+    }
+    loop {
+        let query = build_upstream_query(&params);
+        let upstream = state
+            .turbopuffer()
+            .passthrough("GET", "/v1/namespaces", query.as_deref(), None)
+            .await
+            .map_err(|e| AppError::from_turbopuffer(e, "namespace list"))?;
+        if upstream.status >= 400 {
+            return Err(AppError::from_turbopuffer(
+                TurbopufferError::Response(upstream),
+                "namespace list",
+            ));
+        }
+        let mut body: Value = serde_json::from_slice(&upstream.body)
+            .map_err(|e| AppError::Upstream(format!("namespace list parse: {e}")))?;
+        let items = body
+            .get_mut("namespaces")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| AppError::Upstream("namespace list missing namespaces array".into()))?;
+        items.retain(|item| {
+            item.as_str()
+                .or_else(|| item.get("id").and_then(Value::as_str))
+                .is_some_and(|name| {
+                    params
+                        .prefix
+                        .as_deref()
+                        .is_none_or(|prefix| name.starts_with(prefix))
+                        && can_list_namespace(state, grant, name)
+                        // v2 metadata and federated queries follow Index store
+                        // routing; discovery must not expose an unreadable target.
+                        && authorize_namespace(state, grant, ApiScope::Read, name).is_ok()
+                })
+        });
+        let empty = items.is_empty();
+        let cursor = body
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_owned);
+        if cursor.as_ref().is_some_and(|cursor| seen.contains(cursor)) {
+            return Err(AppError::Upstream(
+                "namespace list cursor did not advance".into(),
+            ));
+        }
+        if !empty {
+            if let Some(mut result) = result {
+                // Resume immediately before the next readable page. Looking
+                // ahead prevents a trailing denied-only page becoming an
+                // empty terminal response for a caller with more pages.
+                result["next_cursor"] = serde_json::to_value(&params.cursor)
+                    .map_err(|e| AppError::Upstream(e.to_string()))?;
+                return Ok(result);
+            }
+            result = Some(body.clone());
+        }
+        if cursor.is_none() {
+            let mut result = result.unwrap_or(body);
+            result["next_cursor"] = Value::Null;
+            return Ok(result);
+        }
+        let cursor = cursor.unwrap();
+        if !seen.insert(cursor.clone()) {
+            return Err(AppError::Upstream(
+                "namespace list cursor did not advance".into(),
+            ));
+        }
+        params.cursor = Some(cursor);
+    }
 }
 
 fn build_upstream_query(params: &ListNamespacesQuery) -> Option<String> {

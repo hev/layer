@@ -62,7 +62,11 @@ impl NamespacePurges {
         let durable = state.s3.is_configured();
         if durable {
             let body = serde_json::to_vec(&intent).expect("intent contains only strings");
+            let put_timer = vectorstore_core::delete_timing::start(
+                vectorstore_core::delete_timing::Phase::IntentPut,
+            );
             let result = tokio::time::timeout(INTENT_TIMEOUT, state.s3.put(&key, body)).await;
+            drop(put_timer);
             match result {
                 Ok(Ok(())) => {}
                 result => {
@@ -73,6 +77,9 @@ impl NamespacePurges {
                 }
             }
         }
+        let _queue_timer = vectorstore_core::delete_timing::start(
+            vectorstore_core::delete_timing::Phase::IntentQueue,
+        );
         let store = intent.store.clone();
         self.pending.entry(key.clone()).or_insert(Pending {
             intent,

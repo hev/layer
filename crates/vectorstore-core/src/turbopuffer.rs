@@ -71,8 +71,8 @@ fn turbopuffer_coverage(
         | AdvancedFilters | Fuzzy | AdvancedText | MultiVector | MultipleFields | MultiQuery
         | Pagination | OrderedScan | Aggregate | PatchRows | PatchColumns | ConditionalWrites
         | Copy | Branch | Encryption | Export | Warm | Consistency | Snapshots | Udf
-        | Passthrough | Embed | NearestToId | Temporal | LegBreakdown | Auto | Threads
-        | VectorEncoding => Coverage::supported(),
+        | Passthrough | Embed | NearestToId | Temporal | LegBreakdown | Collapse | Auto
+        | Threads | VectorEncoding | Search => Coverage::supported(),
         DeleteByFilter | Facet => Coverage::approximate(
             "Native wire request only; the optional portable adapter primitive is unavailable.",
         ),
@@ -104,8 +104,72 @@ where
     REQUEST_UPSTREAM_API_KEY.scope(api_key, future).await
 }
 
+/// Runs immediately before each physical provider query attempt. Cache hits
+/// and empty fetches do not call it. Failed/429/canceled dispatched attempts
+/// consume their reservation; callers never refund uncertain upstream work.
+pub type QueryPermit = Arc<
+    dyn Fn(
+            String,
+            u32,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), TurbopufferError>> + Send>,
+        > + Send
+        + Sync,
+>;
+tokio::task_local! { static QUERY_PERMIT: QueryPermit; }
+pub async fn scope_query_permit<F: std::future::Future>(
+    permit: QueryPermit,
+    future: F,
+) -> F::Output {
+    // Nested consumers must retain Function admission. A successful earlier
+    // reservation is never refunded if another permit rejects or is canceled.
+    let permit = if let Ok(inherited) = QUERY_PERMIT.try_with(Clone::clone) {
+        Arc::new(move |namespace: String, queries| {
+            let inherited = inherited.clone();
+            let permit = permit.clone();
+            Box::pin(async move {
+                inherited(namespace.clone(), queries).await?;
+                permit(namespace, queries).await
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<(), TurbopufferError>> + Send>,
+                >
+        }) as QueryPermit
+    } else {
+        permit
+    };
+    QUERY_PERMIT.scope(permit, future).await
+}
+async fn reserve_provider_query(namespace: &str, queries: u32) -> Result<(), TurbopufferError> {
+    let permit = QUERY_PERMIT.try_with(Clone::clone).ok();
+    if let Some(permit) = permit {
+        permit(namespace.to_owned(), queries).await?;
+    }
+    Ok(())
+}
+
+/// Observer for billing otherwise discarded by row-only read interfaces.
+pub type ReadBillingObserver = std::sync::Arc<dyn Fn(&str, &Value) + Send + Sync>;
+tokio::task_local! {
+    static READ_BILLING_OBSERVER: ReadBillingObserver;
+}
+pub async fn scope_read_billing<F: std::future::Future>(
+    observer: ReadBillingObserver,
+    future: F,
+) -> F::Output {
+    READ_BILLING_OBSERVER.scope(observer, future).await
+}
+/// Report upstream billing before projecting a response into another result.
+pub fn observe_projected_billing(namespace: &str, response: &Value) {
+    if let Some(billing) = response.get("billing") {
+        let _ = READ_BILLING_OBSERVER.try_with(|observer| observer(namespace, billing));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TurbopufferError {
+    #[error("Function provider query budget exhausted")]
+    QueryBudgetExhausted,
     /// Synthetic/mock HTTP 429. Real HTTP responses use `Response`; the
     /// query path recognizes both through `is_rate_limited`.
     #[error("Turbopuffer rate limited: {0}")]
@@ -407,29 +471,16 @@ pub trait TurbopufferClient: Send + Sync {
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError>;
 
-    /// [`fetch`](Self::fetch) that also guarantees the explicitly requested
-    /// `include` attributes. Turbopuffer's `include_attributes: true` omits
-    /// vector-typed columns, including a hosted embedding's generated column
-    /// (`embed_text`), so a store that behaves that way must top them up by
-    /// name. Stores whose `fetch` already returns every column keep this
-    /// default.
-    async fn fetch_with_attributes(
+    /// Complete parent membership, with full attributes. Never return a
+    /// truncated group: callers fan output back to every sibling.
+    async fn fetch_siblings(
         &self,
-        namespace: &str,
-        id: &str,
-        _include: &[String],
-    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
-        self.fetch(namespace, id).await
-    }
-
-    /// Batch form of [`fetch_with_attributes`](Self::fetch_with_attributes).
-    async fn fetch_many_with_attributes(
-        &self,
-        namespace: &str,
-        ids: &[String],
-        _include: &[String],
-    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
-        self.fetch_many(namespace, ids).await
+        _namespace: &str,
+        _parent: &str,
+    ) -> Result<Vec<DocumentResponse>, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "parent lookup is unavailable for this store".into(),
+        ))
     }
 
     /// Pull a document's embedding vector from Turbopuffer. Used as the
@@ -579,11 +630,21 @@ impl PatchColumns {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurbopufferPassthroughResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for TurbopufferPassthroughResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurbopufferPassthroughResponse")
+            .field("status", &self.status)
+            .field("content_type", &self.content_type)
+            .field("body", &String::from_utf8_lossy(&self.body))
+            .finish()
+    }
 }
 
 pub struct RoutingTurbopufferClient {
@@ -864,25 +925,13 @@ impl TurbopufferClient for RoutingTurbopufferClient {
             .await
     }
 
-    async fn fetch_with_attributes(
+    async fn fetch_siblings(
         &self,
         namespace: &str,
-        id: &str,
-        include: &[String],
-    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        parent: &str,
+    ) -> Result<Vec<DocumentResponse>, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
-            .fetch_with_attributes(namespace, id, include)
-            .await
-    }
-
-    async fn fetch_many_with_attributes(
-        &self,
-        namespace: &str,
-        ids: &[String],
-        include: &[String],
-    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
-        self.client_for_namespace(Some(namespace))?
-            .fetch_many_with_attributes(namespace, ids, include)
+            .fetch_siblings(namespace, parent)
             .await
     }
 
@@ -932,6 +981,28 @@ pub struct HttpTurbopufferClient {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    canonical_cache: Option<crate::document_cache::CanonicalCache>,
+    capture_metadata: bool,
+    shared_cache: Option<crate::document_cache::SharedCache>,
+    // Non-system attributes produced by native embedding cannot be inferred
+    // from a successful write body. Their complete rows require hydration.
+    generated_columns: RwLock<HashMap<String, HashMap<String, String>>>,
+    id_types: RwLock<HashMap<String, (std::time::Instant, bool)>>,
+}
+
+/// Opaque source provenance: boundary and client cannot be independently supplied.
+/// This binds source identity only, not witness/drain approval or a capture receipt.
+pub struct HttpCaptureSource {
+    client: Arc<HttpTurbopufferClient>,
+    boundary: crate::document_cache::CaptureWriterBoundary,
+}
+impl HttpCaptureSource {
+    pub fn client(&self) -> &Arc<HttpTurbopufferClient> {
+        &self.client
+    }
+    pub fn boundary(&self) -> &crate::document_cache::CaptureWriterBoundary {
+        &self.boundary
+    }
 }
 
 impl HttpTurbopufferClient {
@@ -959,6 +1030,421 @@ impl HttpTurbopufferClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
+            canonical_cache: None,
+            capture_metadata: false,
+            shared_cache: None,
+            generated_columns: Default::default(),
+            id_types: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Legacy isolated-fixture cache, without late-provider-commit fencing.
+    /// Production composition must not enable this helper. Shared mode clears it.
+    pub fn with_document_cache(
+        mut self,
+        backend: Arc<dyn crate::document_cache::DocumentReadCache>,
+        scope: String,
+    ) -> Self {
+        self.canonical_cache = Some(crate::document_cache::CanonicalCache::new(backend, scope));
+        self
+    }
+
+    /// Source-only shared mode. Production composition keeps this disabled
+    /// until the enforced upstream credential boundary is independently reviewed.
+    pub fn with_shared_document_cache(
+        mut self,
+        mut cache: crate::document_cache::SharedCache,
+    ) -> Self {
+        cache.bind_provider(&self.base_url, self.api_key.as_deref());
+        self.canonical_cache = None;
+        self.shared_cache = Some(cache);
+        self
+    }
+    /// Derive provenance from THIS immutable actual endpoint/static-key client.
+    /// No public constructor permits a caller-supplied boundary/client pairing.
+    /// Missing shared mode or mismatched/unreviewed identity refuses before IO.
+    pub fn capture_source(self: &Arc<Self>) -> Result<HttpCaptureSource, TurbopufferError> {
+        let cache = self.shared_cache.as_ref().ok_or_else(|| {
+            TurbopufferError::Other("capture source unavailable without bound shared cache".into())
+        })?;
+        let boundary = cache.capture_boundary()?;
+        Ok(HttpCaptureSource {
+            client: self.clone(),
+            boundary,
+        })
+    }
+    fn uncached(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            canonical_cache: None,
+            capture_metadata: self.shared_cache.is_some() || self.capture_metadata,
+            shared_cache: None,
+            generated_columns: Default::default(),
+            id_types: Default::default(),
+        }
+    }
+    async fn shared_session(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<crate::document_cache::CacheSession>, TurbopufferError> {
+        match &self.shared_cache {
+            Some(cache) if cache.certified() && self.api_key.is_some() => {
+                cache.acquire(namespace).await.map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    async fn shared_fetch_many(
+        &self,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        let uncached = self.uncached();
+        let Some(session) = self.shared_session(namespace).await.unwrap_or(None) else {
+            return uncached.fetch_many(namespace, ids).await;
+        };
+        session
+            .protect(async {
+                let hits = session.get_many(ids).await.unwrap_or_default();
+                let mut seen = HashSet::new();
+                let missing: Vec<_> = ids
+                    .iter()
+                    .filter(|id| !hits.contains_key(*id) && seen.insert((*id).clone()))
+                    .cloned()
+                    .collect();
+                let mut rows: HashMap<_, _> = hits
+                    .into_iter()
+                    .filter_map(|(id, row)| {
+                        row.map(|attributes| (id.clone(), DocumentResponse { id, attributes }))
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    let fetched = uncached.fetch_many(namespace, &missing).await?;
+                    let schema = uncached
+                        .generated_columns
+                        .read()
+                        .unwrap()
+                        .get(namespace)
+                        .cloned();
+                    let integer = uncached
+                        .id_types
+                        .read()
+                        .unwrap()
+                        .get(namespace)
+                        .map(|(_, integer)| *integer);
+                    if let (Some(generated), Some(integer_ids)) = (schema, integer) {
+                        let _ = session
+                            .put_schema(&crate::document_cache::NamespaceIdentity {
+                                integer_ids,
+                                generated,
+                            })
+                            .await;
+                    }
+
+                    let certificates = missing
+                        .iter()
+                        .map(|id| {
+                            (
+                                id.clone(),
+                                fetched.get(id).map(|row| row.attributes.clone()),
+                            )
+                        })
+                        .collect();
+                    // Read cache outages are soft; a failed publication is a miss.
+                    let _ = session.put_many(&certificates, false).await;
+                    rows.extend(fetched);
+                }
+                Ok(rows)
+            })
+            .await
+    }
+    async fn shared_fetch_siblings(
+        &self,
+        namespace: &str,
+        parent: &str,
+    ) -> Result<Vec<DocumentResponse>, TurbopufferError> {
+        let uncached = self.uncached();
+        let Some(session) = self.shared_session(namespace).await.unwrap_or(None) else {
+            return uncached.fetch_siblings(namespace, parent).await;
+        };
+        session
+            .protect(async {
+                if let Ok(Some(ids)) = session.group(parent).await {
+                    if let Ok(mut rows) = session.get_many(&ids).await {
+                        if rows.len() == ids.len() && rows.values().all(Option::is_some) {
+                            return Ok(ids
+                                .into_iter()
+                                .map(|id| DocumentResponse {
+                                    attributes: rows.remove(&id).unwrap().unwrap(),
+                                    id,
+                                })
+                                .collect());
+                        }
+                    }
+                }
+                let rows = uncached.fetch_siblings(namespace, parent).await?;
+                let certificates = rows
+                    .iter()
+                    .map(|row| (row.id.clone(), Some(row.attributes.clone())))
+                    .collect();
+                if session.put_many(&certificates, false).await.is_ok() {
+                    let _ = session
+                        .put_group(
+                            parent,
+                            &rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+                        )
+                        .await;
+                }
+                Ok(rows)
+            })
+            .await
+    }
+
+    async fn send_source_write(
+        &self,
+        namespace: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, TurbopufferError> {
+        if self.shared_cache.is_some() {
+            let Some(mut session) = self.shared_session(namespace).await? else {
+                return Err(TurbopufferError::Other(
+                    "shared-cache mutation requires a certified static writer boundary".into(),
+                ));
+            };
+            let identity = session.schema().await?;
+            let mut normalized = body.clone();
+            if canonical_write_effects(body).is_some() && body.get("schema").is_none() {
+                let identity=identity.as_ref().ok_or_else(||TurbopufferError::Other("namespace identity uncertain; strong canonical hydration required before typed mutation".into()))?;
+                normalize_source_ids(&mut normalized, identity.integer_ids)?;
+            }
+            let body = &normalized;
+            let effects = canonical_write_effects(body);
+            let ids = effects
+                .as_ref()
+                .map(|effects| effects.keys().cloned().collect::<Vec<_>>());
+            let mut before = match &ids {
+                Some(ids) => session.get_many(ids).await.unwrap_or_default(),
+                None => HashMap::new(),
+            };
+            let generated = if body.get("schema").is_some() {
+                None
+            } else {
+                identity.map(|identity| identity.generated)
+            };
+            session
+                .fence
+                .begin_write(if body.get("schema").is_some() {
+                    None
+                } else {
+                    ids.as_deref()
+                })
+                .await?;
+            let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
+            let response = session
+                .protect(async {
+                    let response = self
+                        .authorize(self.client.post(url).json(body))?
+                        .send()
+                        .await
+                        .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    // Completion requires the whole response, not just headers.
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+                    let mut buffered = http::Response::builder()
+                        .status(status)
+                        .body(bytes)
+                        .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+                    *buffered.headers_mut() = headers;
+                    Ok(reqwest::Response::from(buffered))
+                })
+                .await?;
+            if response.status().is_success() {
+                let mut after = HashMap::new();
+                for (id, effect) in effects.into_iter().flat_map(|effects| effects.into_iter()) {
+                    match effect {
+                        CanonicalWrite::Delete => {
+                            after.insert(id, None);
+                        }
+                        CanonicalWrite::Patch(attrs) => {
+                            if generated.as_ref().is_some_and(|columns| {
+                                !columns.values().any(|source| attrs.contains_key(source))
+                            }) {
+                                if let Some(old) = before.remove(&id) {
+                                    after.insert(
+                                        id,
+                                        old.map(|mut row| {
+                                            row.extend(attrs);
+                                            row
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                        CanonicalWrite::Upsert(attrs) => {
+                            if generated.as_ref().is_some_and(|columns| {
+                                columns.keys().all(|column| attrs.contains_key(column))
+                            }) {
+                                after.insert(id, Some(attrs));
+                            }
+                        }
+                    }
+                }
+                // Publication failure leaves pending durable; it cannot be
+                // silently healed by this or a later successful mutation.
+                if session.put_many(&after, true).await.is_ok() {
+                    // Preserve the known provider outcome and its single billing
+                    // observer. Cache/coordinator failures leave pending durable.
+                    let _ = session.fence.complete_write().await;
+                }
+            }
+            return Ok(response);
+        }
+        let mut cached = if self.api_key.is_some() {
+            match &self.canonical_cache {
+                Some(cache) => cache.lock(namespace).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let effects = canonical_write_effects(body);
+        let mut generated = self
+            .generated_columns
+            .read()
+            .unwrap()
+            .get(namespace)
+            .cloned();
+        if let Some(schema) = body.get("schema") {
+            let columns = generated_columns(schema);
+            if !columns.is_empty() {
+                generated.get_or_insert_with(HashMap::new).extend(columns);
+            }
+        }
+
+        let mut before = HashMap::new();
+        if let (Some(cache), Some(state)) = (&self.canonical_cache, &mut cached) {
+            state.groups.clear();
+            if let Some(effects) = &effects {
+                let ids: Vec<_> = effects.keys().cloned().collect();
+                before = cache
+                    .backend
+                    .get_many(&state.scope, &ids)
+                    .await
+                    .unwrap_or_default();
+                // Invalidate before dispatch, including when the future is canceled
+                // after dispatch and we cannot know whether the store committed.
+                if cache.backend.invalidate(&state.scope, &ids).await.is_err() {
+                    cache.reset(state);
+                    before.clear();
+                }
+            } else {
+                cache.reset(state);
+            }
+        }
+        let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
+        let resp = self
+            .authorize(self.client.post(&url).json(body))?
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        if resp.status().is_success() {
+            if let Some(generated) = generated.clone() {
+                self.generated_columns
+                    .write()
+                    .unwrap()
+                    .insert(namespace.to_owned(), generated);
+            }
+            if let (Some(cache), Some(state), Some(effects)) =
+                (&self.canonical_cache, &mut cached, effects)
+            {
+                let mut after = HashMap::new();
+                for (id, effect) in effects {
+                    match effect {
+                        CanonicalWrite::Delete => {
+                            after.insert(id, None);
+                        }
+                        CanonicalWrite::Patch(attrs) => {
+                            if generated.is_none()
+                                || generated.as_ref().is_some_and(|columns| {
+                                    columns.values().any(|source| attrs.contains_key(source))
+                                })
+                            {
+                                continue;
+                            }
+                            if let Some(old) = before.remove(&id) {
+                                // patch_rows never creates absent documents.
+                                after.insert(
+                                    id,
+                                    old.map(|mut row| {
+                                        row.extend(attrs);
+                                        row
+                                    }),
+                                );
+                            }
+                        }
+                        CanonicalWrite::Upsert(attrs) => {
+                            // Native upserts replace all non-vector attributes.
+                            if generated.as_ref().is_some_and(|columns| {
+                                columns.keys().all(|column| attrs.contains_key(column))
+                            }) {
+                                after.insert(id, Some(attrs));
+                            }
+                        }
+                    }
+                }
+                if cache.backend.put_many(&state.scope, &after).await.is_err() {
+                    cache.reset(state);
+                }
+            }
+        }
+        Ok(resp)
+    }
+
+    // ID types are immutable for a namespace's lifetime. Bound the cache and
+    // expire entries so namespaces recreated outside this client are rechecked.
+    // Request-scoped credentials bypass it: namespace names can overlap across
+    // upstream accounts, and a cache hit must not bypass their authorization.
+    async fn integer_ids(&self, namespace: &str) -> Result<bool, TurbopufferError> {
+        const TTL: Duration = Duration::from_secs(60);
+        if self.api_key.is_some() {
+            if let Some((at, integer)) = self.id_types.read().unwrap().get(namespace) {
+                if at.elapsed() < TTL {
+                    return Ok(*integer);
+                }
+            }
+        }
+        let meta = self.head_namespace(namespace).await?;
+        let integer = match meta.raw["schema"]["id"]["type"].as_str() {
+            Some("uint") => true,
+            Some("string" | "uuid") => false,
+            _ => {
+                return Err(TurbopufferError::Other(
+                    "namespace metadata has no supported id type".to_string(),
+                ));
+            }
+        };
+        if self.api_key.is_some() {
+            let mut cache = self.id_types.write().unwrap();
+            cache.retain(|_, (at, _)| at.elapsed() < TTL);
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+            cache.insert(namespace.to_string(), (std::time::Instant::now(), integer));
+        }
+        Ok(integer)
+    }
+
+    fn wire_id(id: &str, integer: bool) -> Option<Value> {
+        if integer {
+            id.parse::<u64>().ok().map(Value::from)
+        } else {
+            Some(Value::String(id.to_string()))
         }
     }
 
@@ -978,6 +1464,161 @@ impl HttpTurbopufferClient {
             })?;
         Ok(request.bearer_auth(api_key))
     }
+}
+
+fn normalize_source_ids(body: &mut Value, integer: bool) -> Result<(), TurbopufferError> {
+    fn normalize(id: &mut Value, integer: bool) -> Result<(), TurbopufferError> {
+        if integer {
+            let number = match id {
+                Value::Number(number) => number.as_u64(),
+                Value::String(text) => text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|number| number.to_string() == *text),
+                _ => None,
+            }
+            .ok_or_else(|| TurbopufferError::Other("noncanonical uint document id".into()))?;
+            *id = Value::from(number);
+        } else if !id.is_string() {
+            return Err(TurbopufferError::Other(
+                "string namespace requires string document ids".into(),
+            ));
+        }
+        Ok(())
+    }
+    for key in ["upsert_rows", "patch_rows"] {
+        if let Some(rows) = body.get_mut(key).and_then(Value::as_array_mut) {
+            for row in rows {
+                if let Some(id) = row.get_mut("id") {
+                    normalize(id, integer)?;
+                }
+            }
+        }
+    }
+    for key in ["upsert_columns", "patch_columns"] {
+        if let Some(ids) = body
+            .get_mut(key)
+            .and_then(|columns| columns.get_mut("id"))
+            .and_then(Value::as_array_mut)
+        {
+            for id in ids {
+                normalize(id, integer)?;
+            }
+        }
+    }
+    if let Some(ids) = body.get_mut("deletes").and_then(Value::as_array_mut) {
+        for id in ids {
+            normalize(id, integer)?;
+        }
+    }
+    Ok(())
+}
+
+fn generated_columns(schema: &Value) -> HashMap<String, String> {
+    schema
+        .as_object()
+        .into_iter()
+        .flat_map(|schema| schema.iter())
+        .filter_map(|(name, definition)| {
+            if is_system_column(name) {
+                return None;
+            }
+            definition
+                .get("embed")
+                .filter(|value| !value.is_null())
+                .map(|embed| {
+                    (
+                        name.clone(),
+                        embed
+                            .get("source_attribute")
+                            .and_then(Value::as_str)
+                            .unwrap_or(name)
+                            .to_owned(),
+                    )
+                })
+        })
+        .collect()
+}
+enum CanonicalWrite {
+    Upsert(HashMap<String, Value>),
+    Patch(HashMap<String, Value>),
+    Delete,
+}
+fn canonical_write_effects(body: &Value) -> Option<HashMap<String, CanonicalWrite>> {
+    let object = body.as_object()?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "upsert_rows"
+                | "upsert_columns"
+                | "patch_rows"
+                | "patch_columns"
+                | "deletes"
+                | "schema"
+                | "distance_metric"
+                | "return_affected_ids"
+        )
+    }) {
+        return None;
+    }
+    let mut effects = HashMap::new();
+    for (key, patch) in [("upsert_rows", false), ("patch_rows", true)] {
+        if let Some(rows) = object.get(key) {
+            for row in rows.as_array()? {
+                let row = row.as_object()?;
+                let (id, _) = id_from_wire(row.get("id")?)?;
+                let attrs = row
+                    .iter()
+                    .filter(|(key, _)| !is_system_column(key))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let effect = if patch {
+                    CanonicalWrite::Patch(attrs)
+                } else {
+                    CanonicalWrite::Upsert(attrs)
+                };
+                if effects.insert(id, effect).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    for (key, patch) in [("upsert_columns", false), ("patch_columns", true)] {
+        if let Some(columns) = object.get(key) {
+            let columns = columns.as_object()?;
+            let ids = columns.get("id")?.as_array()?;
+            for (i, id) in ids.iter().enumerate() {
+                let (id, _) = id_from_wire(id)?;
+                let mut attrs = HashMap::new();
+                for (key, values) in columns {
+                    if !is_system_column(key) {
+                        let values = values.as_array()?;
+                        if values.len() != ids.len() {
+                            return None;
+                        }
+                        attrs.insert(key.clone(), values[i].clone());
+                    }
+                }
+                let effect = if patch {
+                    CanonicalWrite::Patch(attrs)
+                } else {
+                    CanonicalWrite::Upsert(attrs)
+                };
+                if effects.insert(id, effect).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    if let Some(ids) = object.get("deletes") {
+        for id in ids.as_array()? {
+            let (id, _) = id_from_wire(id)?;
+            if effects.insert(id, CanonicalWrite::Delete).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(effects)
 }
 
 fn is_system_column(key: &str) -> bool {
@@ -1054,6 +1695,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
         }
+        if let Ok(body) = resp.json::<Value>().await {
+            observe_projected_billing(&blob_set_namespace(namespace), &body);
+        }
         Ok(())
     }
 
@@ -1069,6 +1713,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             "filters": ["id", "Eq", sha256],
             "include_attributes": [BLOB_DATA_ATTRIBUTE],
         });
+        reserve_provider_query(namespace, 1).await?;
         let url = format!(
             "{}/v2/namespaces/{}/query",
             self.base_url,
@@ -1090,6 +1735,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        observe_projected_billing(&blob_set_namespace(namespace), &resp_body);
         resp_body
             .get("rows")
             .and_then(Value::as_array)
@@ -1108,6 +1754,23 @@ impl TurbopufferClient for HttpTurbopufferClient {
         query: Option<&str>,
         body: Option<Value>,
     ) -> Result<TurbopufferPassthroughResponse, TurbopufferError> {
+        if matches!(method, "POST" | "PATCH" | "DELETE")
+            && !path.ends_with("/query")
+            && self
+                .shared_cache
+                .as_ref()
+                .is_some_and(|cache| !cache.certified() || self.api_key.is_none())
+        {
+            return Err(TurbopufferError::Other(
+                "unverified shared-cache writer cannot dispatch mutations".into(),
+            ));
+        }
+        if method == "DELETE" {
+            if let Some(namespace) = path.strip_prefix("/v2/namespaces/") {
+                self.generated_columns.write().unwrap().remove(namespace);
+                self.id_types.write().unwrap().remove(namespace);
+            }
+        }
         let mut url = format!("{}{}", self.base_url, path);
         if let Some(query) = query {
             if !query.is_empty() {
@@ -1116,6 +1779,97 @@ impl TurbopufferClient for HttpTurbopufferClient {
             }
         }
 
+        if method == "POST" {
+            if let Some(namespace) = path
+                .strip_prefix("/v2/namespaces/")
+                .filter(|ns| !ns.contains('/'))
+            {
+                if query.is_none() {
+                    let namespace =
+                        percent_encoding::percent_decode_str(namespace).decode_utf8_lossy();
+                    let resp = self
+                        .send_source_write(&namespace, body.as_ref().unwrap_or(&Value::Null))
+                        .await?;
+                    let status = resp.status().as_u16();
+                    let content_type = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let body = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| TurbopufferError::Other(e.to_string()))?
+                        .to_vec();
+                    return Ok(TurbopufferPassthroughResponse {
+                        status,
+                        content_type,
+                        body,
+                    });
+                }
+            }
+        }
+        let mut shared_mutation = if self
+            .shared_cache
+            .as_ref()
+            .is_some_and(|cache| cache.certified())
+            && self.api_key.is_some()
+            && matches!(method, "POST" | "PATCH" | "DELETE")
+            && !path.ends_with("/query")
+        {
+            let trimmed = path.trim_start_matches('/');
+            if trimmed.split('/').count() != 3 {
+                return Err(TurbopufferError::Other(
+                    "unsupported shared-cache mutation may affect another namespace".into(),
+                ));
+            }
+            let namespace = namespace_from_path(path).ok_or_else(|| {
+                TurbopufferError::Other("unsupported shared-cache mutation path".into())
+            })?;
+            let namespace = percent_encoding::percent_decode_str(namespace).decode_utf8_lossy();
+            let mut session = self.shared_session(&namespace).await?.ok_or_else(|| {
+                TurbopufferError::Other("shared mutation fence unavailable".into())
+            })?;
+            session.fence.begin_write(None).await?;
+            Some(session)
+        } else {
+            None
+        };
+        // Any other source mutation (delete, import, branch, copy, query flags)
+        // conservatively rotates the certified scope before dispatch.
+        let _mutation_guard = if matches!(method, "POST" | "PATCH" | "DELETE")
+            && !path.ends_with("/query")
+        {
+            if let (Some(cache), Some(namespace)) =
+                (&self.canonical_cache, namespace_from_path(path))
+            {
+                let namespace = percent_encoding::percent_decode_str(namespace).decode_utf8_lossy();
+                self.generated_columns
+                    .write()
+                    .unwrap()
+                    .remove(namespace.as_ref());
+                if let Some(mut state) = cache.lock(&namespace).await {
+                    cache.reset(&mut state);
+                    Some(state)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if method == "POST" && path.ends_with("/query") {
+            if let Some(namespace) = namespace_from_path(path) {
+                let queries = body
+                    .as_ref()
+                    .and_then(|v| v.get("queries"))
+                    .and_then(Value::as_array)
+                    .map_or(1, |legs| legs.len().max(1) as u32);
+                reserve_provider_query(namespace, queries).await?;
+            }
+        }
         let request = match method {
             "GET" => self.client.get(&url),
             "POST" => self.client.post(&url),
@@ -1134,28 +1888,45 @@ impl TurbopufferClient for HttpTurbopufferClient {
             request
         };
 
-        let resp = self
-            .authorize(request)?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?
-            .to_vec();
+        let dispatch = async {
+            let headers_timer =
+                crate::delete_timing::start(crate::delete_timing::Phase::UpstreamHeaders);
+            let resp = self
+                .authorize(request)?
+                .send()
+                .await
+                .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+            drop(headers_timer);
+            let status = resp.status().as_u16();
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body_timer = crate::delete_timing::start(crate::delete_timing::Phase::UpstreamBody);
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|e| TurbopufferError::Other(e.to_string()))?
+                .to_vec();
 
-        Ok(TurbopufferPassthroughResponse {
-            status,
-            content_type,
-            body,
-        })
+            drop(body_timer);
+            Ok(TurbopufferPassthroughResponse {
+                status,
+                content_type,
+                body,
+            })
+        };
+        let response = match &shared_mutation {
+            Some(session) => session.protect(dispatch).await?,
+            None => dispatch.await?,
+        };
+        if (200..300).contains(&response.status) {
+            if let Some(session) = &mut shared_mutation {
+                let _ = session.fence.complete_write().await;
+            }
+        }
+        Ok(response)
     }
 
     async fn hint_cache_warm(&self, namespace: &str) -> Result<(), TurbopufferError> {
@@ -1173,6 +1944,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
+        }
+        if let Ok(body) = resp.json::<Value>().await {
+            observe_projected_billing(namespace, &body);
         }
         Ok(())
     }
@@ -1208,12 +1982,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             "distance_metric": "cosine_distance",
         });
 
-        let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp = self.send_source_write(namespace, &body).await?;
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
@@ -1248,12 +2017,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         let body = serde_json::json!({ "patch_rows": rows });
 
-        let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp = self.send_source_write(namespace, &body).await?;
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
@@ -1284,12 +2048,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
         }
 
         let body = serde_json::json!({ "patch_columns": patch_columns });
-        let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp = self.send_source_write(namespace, &body).await?;
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
@@ -1314,12 +2073,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             "deletes": ids,
         });
 
-        let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp = self.send_source_write(namespace, &body).await?;
 
         if !resp.status().is_success() {
             return Err(TurbopufferError::from_response(resp).await);
@@ -1355,6 +2109,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             body["include_attributes"] = attrs.to_turbopuffer_value();
         }
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1400,6 +2155,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
             body["include_attributes"] = attrs.to_turbopuffer_value();
         }
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1436,6 +2192,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
         if let Some(rerank_by) = rerank_by {
             body["rerank_by"] = rerank_by.clone();
         }
+        reserve_provider_query(namespace, legs.len().max(1) as u32).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1457,16 +2214,29 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        if (self.capture_metadata || self.canonical_cache.is_some() || self.shared_cache.is_some())
+            && self.api_key.is_some()
+        {
+            return Ok(self
+                .fetch_many(namespace, &[id.to_owned()])
+                .await?
+                .remove(id));
+        }
         self.capabilities()
             .require(crate::capabilities::WireFeature::Fetch)?;
+        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
+            // String-only system markers cannot exist in an integer namespace.
+            return Ok(None);
+        };
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": 1,
-            "filters": ["id", "Eq", id],
+            "filters": ["id", "Eq", wire_id],
             "include_attributes": true,
             "consistency": {"level": "eventual"},
         });
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1482,6 +2252,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
 
         let rows = resp_body
             .get("rows")
@@ -1514,20 +2286,65 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        if self.shared_cache.is_some() {
+            return self.shared_fetch_many(namespace, ids).await;
+        }
         self.capabilities()
             .require(crate::capabilities::WireFeature::Fetch)?;
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
 
+        let mut cached = if self.api_key.is_some() {
+            match &self.canonical_cache {
+                Some(cache) => cache.lock(namespace).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut hits = HashMap::new();
+        if let (Some(cache), Some(state)) = (&self.canonical_cache, &mut cached) {
+            match cache.backend.get_many(&state.scope, ids).await {
+                Ok(rows) => hits = rows,
+                Err(_) => cache.reset(state),
+            }
+        }
+        let mut seen = HashSet::new();
+        let missing: Vec<_> = ids
+            .iter()
+            .filter(|id| !hits.contains_key(*id) && seen.insert((*id).clone()))
+            .cloned()
+            .collect();
+        let mut found: HashMap<String, DocumentResponse> = hits
+            .into_iter()
+            .filter_map(|(id, attrs)| {
+                attrs.map(|attributes| (id.clone(), DocumentResponse { id, attributes }))
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(found);
+        }
+        let ids = &missing;
+        let integer = self.integer_ids(namespace).await?;
+        let wire_ids: Vec<Value> = ids
+            .iter()
+            .filter_map(|id| Self::wire_id(id, integer))
+            .collect();
+        if wire_ids.is_empty() {
+            return Ok(found);
+        }
+        // Canonical Function inputs and completion fences must observe committed
+        // source writes/deletions, just like a native strong ID lookup.
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": ids.len(),
-            "filters": ["id", "In", ids],
+            "filters": ["id", "In", wire_ids],
             "include_attributes": true,
-            "consistency": {"level": "eventual"},
+            "consistency": {"level": "strong"},
         });
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1543,6 +2360,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
 
         let rows = resp_body
             .get("rows")
@@ -1564,85 +2383,102 @@ impl TurbopufferClient for HttpTurbopufferClient {
                 result.insert(id.clone(), DocumentResponse { id, attributes });
             }
         }
-        Ok(result)
+        if let (Some(cache), Some(state)) = (&self.canonical_cache, &mut cached) {
+            let rows = missing
+                .iter()
+                .map(|id| (id.clone(), result.get(id).map(|doc| doc.attributes.clone())))
+                .collect();
+            if cache.backend.put_many(&state.scope, &rows).await.is_err() {
+                cache.reset(state);
+            }
+        }
+        found.extend(result);
+        Ok(found)
     }
 
-    async fn fetch_with_attributes(
+    async fn fetch_siblings(
         &self,
         namespace: &str,
-        id: &str,
-        include: &[String],
-    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
-        let mut docs = self
-            .fetch_many_with_attributes(namespace, std::slice::from_ref(&id.to_string()), include)
-            .await?;
-        Ok(docs.remove(id))
-    }
-
-    async fn fetch_many_with_attributes(
-        &self,
-        namespace: &str,
-        ids: &[String],
-        include: &[String],
-    ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
-        let mut docs = self.fetch_many(namespace, ids).await?;
-        let wanted: Vec<&String> = include
-            .iter()
-            .filter(|name| !is_system_column(name))
-            .collect();
-        // `include_attributes: true` drops vector-typed columns such as a
-        // hosted embedding's `embed_text`; ask for the absent ones by name.
-        let missing: Vec<String> = wanted
-            .into_iter()
-            .filter(|name| docs.values().any(|doc| !doc.attributes.contains_key(*name)))
-            .cloned()
-            .collect();
-        let lacking: Vec<&String> = docs.keys().collect();
-        if missing.is_empty() || lacking.is_empty() {
-            return Ok(docs);
+        parent: &str,
+    ) -> Result<Vec<DocumentResponse>, TurbopufferError> {
+        if self.shared_cache.is_some() {
+            return self.shared_fetch_siblings(namespace, parent).await;
         }
-        let body = serde_json::json!({
-            "rank_by": ["id", "asc"],
-            "top_k": lacking.len(),
-            "filters": ["id", "In", lacking],
-            "include_attributes": missing,
-            "consistency": {"level": "eventual"},
-        });
-        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        // Best effort: a name that is not in the schema makes upstream answer
-        // 400, and the base row is still the right response then.
-        let Ok(resp) = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-        else {
-            return Ok(docs);
+        let mut cached = if self.api_key.is_some() {
+            match &self.canonical_cache {
+                Some(cache) => cache.lock(namespace).await,
+                None => None,
+            }
+        } else {
+            None
         };
-        if !resp.status().is_success() {
-            return Ok(docs);
-        }
-        let Ok(resp_body) = resp.json::<Value>().await else {
-            return Ok(docs);
-        };
-        for row in resp_body
-            .get("rows")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let Some((row_id, _)) = row.get("id").and_then(id_from_wire) else {
-                continue;
-            };
-            let (Some(doc), Some(obj)) = (docs.get_mut(&row_id), row.as_object()) else {
-                continue;
-            };
-            for (k, v) in obj {
-                if !is_system_column(k) {
-                    doc.attributes.insert(k.clone(), v.clone());
+        if let (Some(cache), Some(state)) = (&self.canonical_cache, &mut cached) {
+            if let Some(ids) = state.groups.get(parent) {
+                if let Ok(mut rows) = cache.backend.get_many(&state.scope, ids).await {
+                    if rows.len() == ids.len() && rows.values().all(Option::is_some) {
+                        // Preserve provider ordering (numeric IDs are not
+                        // lexicographic) and the same page-two selection.
+                        return Ok(ids
+                            .iter()
+                            .map(|id| DocumentResponse {
+                                id: id.clone(),
+                                attributes: rows.remove(id).unwrap().unwrap(),
+                            })
+                            .collect());
+                    }
                 }
             }
         }
-        Ok(docs)
+        let body = serde_json::json!({"rank_by":["id","asc"],"top_k":10000,"filters":["_hevlayer_parent_id","Eq",parent],"include_attributes":true,"consistency":{"level":"strong"}});
+        reserve_provider_query(namespace, 1).await?;
+        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
+        let resp = self
+            .authorize(self.client.post(&url).json(&body))?
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(TurbopufferError::from_response(resp).await);
+        }
+        let resp_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        observe_projected_billing(namespace, &resp_body);
+        let rows = rows_from_query_body(&resp_body);
+        if rows.len() >= 10000 {
+            return Err(TurbopufferError::Other(
+                "parent lookup exceeds 9999 siblings; refusing a truncated group".into(),
+            ));
+        }
+        let documents: Vec<_> = rows
+            .into_iter()
+            .map(|row| DocumentResponse {
+                id: row.id,
+                attributes: row.attributes,
+            })
+            .collect();
+        if let (Some(cache), Some(state)) = (&self.canonical_cache, &mut cached) {
+            let rows = documents
+                .iter()
+                .map(|doc| (doc.id.clone(), Some(doc.attributes.clone())))
+                .collect();
+            if cache.backend.put_many(&state.scope, &rows).await.is_ok() {
+                if state.groups.len() >= 4096
+                    || state.groups.values().map(Vec::len).sum::<usize>() + documents.len()
+                        > 100_000
+                {
+                    state.groups.clear();
+                }
+                state.groups.insert(
+                    parent.to_owned(),
+                    documents.iter().map(|doc| doc.id.clone()).collect(),
+                );
+            } else {
+                cache.reset(state);
+            }
+        }
+        Ok(documents)
     }
 
     async fn fetch_vector(
@@ -1656,14 +2492,19 @@ impl TurbopufferClient for HttpTurbopufferClient {
         // query rows unless requested. This is the *only* place the gateway
         // pulls a vector out of upstream; everywhere else, `is_system_column`
         // drops it before it reaches the caller.
+        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
+            // String-only system markers cannot exist in an integer namespace.
+            return Ok(None);
+        };
         let body = serde_json::json!({
             "rank_by": ["id", "asc"],
             "top_k": 1,
-            "filters": ["id", "Eq", id],
+            "filters": ["id", "Eq", wire_id],
             "include_attributes": ["vector"],
             "consistency": {"level": "eventual"},
         });
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1679,6 +2520,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
 
         let rows = resp_body
             .get("rows")
@@ -1716,7 +2559,15 @@ impl TurbopufferClient for HttpTurbopufferClient {
         self.capabilities()
             .require(crate::capabilities::WireFeature::OrderedScan)?;
         // Build filter: Id > cursor AND any user filters
-        let cursor_filter = cursor.map(|c| serde_json::json!(["id", "Gt", c]));
+        let cursor_filter = if let Some(cursor) = cursor {
+            let id =
+                Self::wire_id(cursor, self.integer_ids(namespace).await?).ok_or_else(|| {
+                    TurbopufferError::Other("invalid integer id scan cursor".to_string())
+                })?;
+            Some(serde_json::json!(["id", "Gt", id]))
+        } else {
+            None
+        };
 
         let combined_filter = match (cursor_filter, filters) {
             (Some(cf), Some(uf)) => Some(serde_json::json!(["And", [cf, uf.clone()]])),
@@ -1740,6 +2591,7 @@ impl TurbopufferClient for HttpTurbopufferClient {
                 serde_json::to_value(attrs).map_err(|e| TurbopufferError::Other(e.to_string()))?;
         }
 
+        reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
         let resp = self
             .authorize(self.client.post(&url).json(&body))?
@@ -1755,6 +2607,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
 
         let rows = resp_body
             .get("rows")
@@ -1815,6 +2669,15 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
 
+        if (self.capture_metadata || self.canonical_cache.is_some() || self.shared_cache.is_some())
+            && self.api_key.is_some()
+        {
+            let mut columns = self.generated_columns.write().unwrap();
+            if columns.len() < 4096 || columns.contains_key(namespace) {
+                columns.insert(namespace.to_owned(), generated_columns(&body["schema"]));
+            }
+        }
+        observe_projected_billing(namespace, &body);
         Ok(parse_metadata_body(body))
     }
 }
@@ -1879,6 +2742,8 @@ pub(crate) fn parse_metadata_body(body: Value) -> NamespaceMeta {
 // --- Mock implementation for testing ---
 
 pub struct MockTurbopufferClient {
+    metadata_requests: AtomicUsize,
+    fetch_many_requests: AtomicUsize,
     docs: tokio::sync::RwLock<HashMap<String, HashMap<String, DocumentResponse>>>,
     /// Per-namespace per-id vector, populated by `upsert`. `fetch_vector`
     /// reads here. Stored separately from `docs` because `DocumentResponse`
@@ -1897,6 +2762,7 @@ pub struct MockTurbopufferClient {
     /// `TurbopufferError::Other`. Used by tests that exercise the gateway's
     /// per-row `metadata_error` fallback in `/v2/namespaces`.
     head_failure: tokio::sync::RwLock<HashMap<String, String>>,
+    patch_failure_once: tokio::sync::RwLock<HashMap<String, bool>>,
     /// Per-namespace flag: when set, `head_namespace` returns
     /// `TurbopufferError::NotFound`, mirroring upstream's 404 for a missing
     /// namespace. Used by tests of the metadata route's 404 mapping.
@@ -1908,6 +2774,12 @@ pub struct MockTurbopufferClient {
     scan_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
     scan_include_attributes: tokio::sync::RwLock<Vec<Option<Vec<String>>>>,
     ranked_query_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
+    /// Every `ranked_query` call as the store received it, in arrival order.
+    ranked_query_calls: tokio::sync::RwLock<Vec<Value>>,
+    /// Test override for the store declaration and the native-wire flag, so
+    /// a route's per-store behaviour is testable without a second adapter.
+    capabilities_override: std::sync::RwLock<Option<crate::capabilities::Capabilities>>,
+    native_wire_override: std::sync::atomic::AtomicBool,
     missing_include_attributes: tokio::sync::RwLock<HashMap<String, HashSet<String>>>,
     scan_page_delay: tokio::sync::RwLock<Option<Duration>>,
     scan_page_active: AtomicUsize,
@@ -1968,17 +2840,23 @@ impl Default for MockTurbopufferClient {
 impl MockTurbopufferClient {
     pub fn new() -> Self {
         Self {
+            metadata_requests: AtomicUsize::new(0),
+            fetch_many_requests: AtomicUsize::new(0),
             docs: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
             status: tokio::sync::RwLock::new(HashMap::new()),
             metadata_overrides: tokio::sync::RwLock::new(HashMap::new()),
             rate_limit_once: tokio::sync::RwLock::new(HashMap::new()),
             head_failure: tokio::sync::RwLock::new(HashMap::new()),
+            patch_failure_once: tokio::sync::RwLock::new(HashMap::new()),
             head_not_found: tokio::sync::RwLock::new(std::collections::HashSet::new()),
             delete_namespace_status: tokio::sync::RwLock::new(HashMap::new()),
             scan_filters: tokio::sync::RwLock::new(Vec::new()),
             scan_include_attributes: tokio::sync::RwLock::new(Vec::new()),
             ranked_query_filters: tokio::sync::RwLock::new(Vec::new()),
+            ranked_query_calls: tokio::sync::RwLock::new(Vec::new()),
+            capabilities_override: std::sync::RwLock::new(None),
+            native_wire_override: std::sync::atomic::AtomicBool::new(false),
             missing_include_attributes: tokio::sync::RwLock::new(HashMap::new()),
             scan_page_delay: tokio::sync::RwLock::new(None),
             scan_page_active: AtomicUsize::new(0),
@@ -2030,6 +2908,12 @@ impl MockTurbopufferClient {
             .insert(namespace.to_string(), body);
     }
 
+    pub fn fetch_many_request_count(&self) -> usize {
+        self.fetch_many_requests.load(AtomicOrdering::SeqCst)
+    }
+    pub fn metadata_request_count(&self) -> usize {
+        self.metadata_requests.load(AtomicOrdering::SeqCst)
+    }
     pub async fn scan_filters(&self) -> Vec<Option<Value>> {
         self.scan_filters.read().await.clone()
     }
@@ -2040,6 +2924,27 @@ impl MockTurbopufferClient {
 
     pub async fn ranked_query_filters(&self) -> Vec<Option<Value>> {
         self.ranked_query_filters.read().await.clone()
+    }
+
+    /// Full request shape of every `ranked_query` call (`namespace`,
+    /// `rank_by`, `top_k`, `filters`, `include_attributes`), for tests that
+    /// pin the upstream wire.
+    pub async fn ranked_query_calls(&self) -> Vec<Value> {
+        self.ranked_query_calls.read().await.clone()
+    }
+
+    /// Answer `capabilities()` with another store's declaration.
+    pub fn set_capabilities(&self, capabilities: crate::capabilities::Capabilities) {
+        *self
+            .capabilities_override
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capabilities);
+    }
+
+    /// Answer `requires_native_wire` as a native SQL adapter would.
+    pub fn set_native_wire(&self, native: bool) {
+        self.native_wire_override
+            .store(native, AtomicOrdering::SeqCst);
     }
 
     pub async fn arm_missing_include_attribute(&self, namespace: &str, field: &str) {
@@ -2070,6 +2975,14 @@ impl MockTurbopufferClient {
     /// Arm `head_namespace` for this namespace to return an error on every
     /// call until cleared. Used to exercise the gateway's per-row
     /// `metadata_error` fallback in `/v2/namespaces`.
+    /// Fail one column patch before mutating the mock store.
+    pub async fn arm_patch_failure(&self, namespace: &str) {
+        self.patch_failure_once
+            .write()
+            .await
+            .insert(namespace.into(), true);
+    }
+
     pub async fn arm_head_failure(&self, namespace: &str, message: &str) {
         self.head_failure
             .write()
@@ -2180,7 +3093,14 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
     fn capabilities(&self) -> crate::capabilities::Capabilities {
-        self.declared
+        self.capabilities_override
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or(self.declared)
+    }
+
+    fn requires_native_wire(&self, _namespace: &str) -> bool {
+        self.native_wire_override.load(AtomicOrdering::SeqCst)
     }
 
     fn blob_storage(&self, namespace: &str) -> crate::capabilities::BlobStorage {
@@ -2373,6 +3293,17 @@ impl TurbopufferClient for MockTurbopufferClient {
         namespace: &str,
         columns: &PatchColumns,
     ) -> Result<TurbopufferWriteOutcome, TurbopufferError> {
+        if self
+            .patch_failure_once
+            .write()
+            .await
+            .remove(namespace)
+            .unwrap_or(false)
+        {
+            return Err(TurbopufferError::Other(
+                "synthetic transient patch failure".into(),
+            ));
+        }
         let docs: Vec<PatchDoc> = columns
             .ids
             .iter()
@@ -2488,7 +3419,7 @@ impl TurbopufferClient for MockTurbopufferClient {
         rank_by: &Value,
         top_k: u32,
         filters: Option<&Value>,
-        _include_attributes: Option<&IncludeAttributes>,
+        include_attributes: Option<&IncludeAttributes>,
     ) -> Result<TurbopufferQueryOutcome, TurbopufferError> {
         let _guard = enter_counter(&self.ranked_query_active, &self.ranked_query_max_active);
         if let Some(delay) = *self.ranked_query_delay.read().await {
@@ -2498,6 +3429,19 @@ impl TurbopufferClient for MockTurbopufferClient {
             .write()
             .await
             .push(filters.cloned());
+        self.ranked_query_calls
+            .write()
+            .await
+            .push(serde_json::json!({
+                "namespace": namespace,
+                "rank_by": rank_by,
+                "top_k": top_k,
+                "filters": filters,
+                "include_attributes": include_attributes.map(|include| match include {
+                    IncludeAttributes::All(all) => Value::Bool(*all),
+                    IncludeAttributes::Fields(fields) => serde_json::json!(fields),
+                }),
+            }));
         // Honor a one-shot 429 arm if present (consumes the flag), so existing
         // tests that probe retry behavior keep working through this path.
         if self
@@ -2653,6 +3597,8 @@ impl TurbopufferClient for MockTurbopufferClient {
         namespace: &str,
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
+        self.fetch_many_requests
+            .fetch_add(1, AtomicOrdering::SeqCst);
         let store = self.docs.read().await;
         let mut result = HashMap::new();
         if let Some(ns) = store.get(namespace) {
@@ -2738,6 +3684,7 @@ impl TurbopufferClient for MockTurbopufferClient {
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
+        self.metadata_requests.fetch_add(1, AtomicOrdering::SeqCst);
         if self.head_not_found.read().await.contains(namespace) {
             return Err(TurbopufferError::NotFound(format!(
                 "404 Not Found: namespace '{}' was not found",
@@ -2809,7 +3756,7 @@ async fn mock_passthrough(
     client: &MockTurbopufferClient,
     method: &str,
     path: &str,
-    _query: Option<&str>,
+    query: Option<&str>,
     body: Option<Value>,
 ) -> Result<Value, TurbopufferError> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
@@ -2817,9 +3764,26 @@ async fn mock_passthrough(
         ("GET", ["v1", "namespaces"]) => {
             let mut namespaces: Vec<String> = client.docs.read().await.keys().cloned().collect();
             namespaces.sort();
+            let url = reqwest::Url::parse(&format!("http://mock/?{}", query.unwrap_or_default()))
+                .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+            let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            if let Some(prefix) = params.get("prefix") {
+                namespaces.retain(|name| name.starts_with(prefix));
+            }
+            let offset = params
+                .get("cursor")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let page_size = params
+                .get("page_size")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1000)
+                .max(1);
+            let next = (offset.saturating_add(page_size) < namespaces.len())
+                .then(|| offset.saturating_add(page_size).to_string());
             Ok(serde_json::json!({
-                "namespaces": namespaces.into_iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
-                "next_cursor": null,
+                "namespaces": namespaces.into_iter().skip(offset).take(page_size).map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
+                "next_cursor": next,
             }))
         }
         ("POST", ["v2", "namespaces", namespace]) => {
@@ -2994,6 +3958,21 @@ async fn mock_write_body(
                     attributes,
                 },
             );
+            // Keep the mock's vector readback faithful to supported wire
+            // upserts, so output patch regressions can prove preservation.
+            if let Some(vector) = row_obj
+                .get("vector")
+                .and_then(Value::as_array)
+                .and_then(|values| values.iter().map(Value::as_f64).collect::<Option<Vec<_>>>())
+            {
+                client
+                    .vectors
+                    .write()
+                    .await
+                    .entry(namespace.to_string())
+                    .or_default()
+                    .insert(id.clone(), vector);
+            }
             upserted_ids.push(Value::String(id));
             rows_affected += 1;
         }
@@ -3221,6 +4200,8 @@ fn mock_id_to_string(value: &Value) -> String {
 /// JSON attribute key used by the gateway to stamp the server-assigned upsert
 /// timestamp (epoch ms, u64). Filterable in Turbopuffer.
 pub const UPSERTED_AT_ATTR: &str = "_hevlayer_upserted_at";
+/// Collision-resistant row revision shared by gateway and Function writers.
+pub const WRITE_REVISION_ATTR: &str = "_hevlayer_write_revision";
 
 /// Deterministic per-id pseudo-score used by the mock's `ranked_query` so
 /// score-band pagination tests can assert behavior without a real ranker.
@@ -3484,6 +4465,60 @@ mod metadata_parse_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn nested_query_permits_retain_function_admission_and_fail_closed() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_calls = calls.clone();
+        let function: QueryPermit = Arc::new(move |namespace, count| {
+            first_calls
+                .lock()
+                .unwrap()
+                .push(("function", namespace, count));
+            Box::pin(async { Ok(()) })
+        });
+        let second_calls = calls.clone();
+        let spend: QueryPermit = Arc::new(move |namespace, count| {
+            second_calls
+                .lock()
+                .unwrap()
+                .push(("spend", namespace, count));
+            Box::pin(async { Err(TurbopufferError::QueryBudgetExhausted) })
+        });
+        scope_query_permit(function, async {
+            let result = scope_query_permit(spend, reserve_provider_query("pages", 1)).await;
+            assert!(matches!(
+                result,
+                Err(TurbopufferError::QueryBudgetExhausted)
+            ));
+            // Leaving the inner scope restores the original Function permit.
+            reserve_provider_query("pages", 2).await.unwrap();
+        })
+        .await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ("function", "pages".into(), 1),
+                ("spend", "pages".into(), 1),
+                ("function", "pages".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_mutation_normalizes_upsert_and_patch_columns() {
+        let mut body = json!({
+            "upsert_columns": {"id": ["2", "18446744073709551615"]},
+            "patch_columns": {"id": ["3"]}
+        });
+        normalize_source_ids(&mut body, true).unwrap();
+        assert_eq!(body["upsert_columns"]["id"], json!([2, u64::MAX]));
+        assert_eq!(body["patch_columns"]["id"], json!([3]));
+        let mut noncanonical = json!({"upsert_columns": {"id": ["02"]}});
+        assert!(normalize_source_ids(&mut noncanonical, true).is_err());
+        let mut wrong_type = json!({"upsert_columns": {"id": [2]}});
+        assert!(normalize_source_ids(&mut wrong_type, false).is_err());
+    }
+
     #[test]
     fn up_to_date_status_yields_stable_and_no_unindexed_bytes() {
         // Matches the live response from a quiet `amazon-products` namespace.
@@ -3495,6 +4530,33 @@ mod metadata_parse_tests {
         assert_eq!(meta.index_status, IndexStatus::Stable);
         assert_eq!(meta.unindexed_bytes, None);
         assert!(meta.is_stable());
+    }
+
+    #[test]
+    fn live_metadata_count_can_lag_while_index_is_up_to_date() {
+        // Synthetic live upstream response immediately after committing two
+        // rows, then again 30 seconds later. Stable indexing is not a count
+        // freshness guarantee; preserve the reported approximate count.
+        let mut body = json!({
+            "approx_logical_bytes": 0,
+            "approx_row_count": 0,
+            "encryption": {"mode": "default"},
+            "index": {"status": "up-to-date"},
+            "schema": {
+                "id": {"type": "string"},
+                "text": {"type": "string", "filterable": false,
+                         "full_text_search": {"tokenizer": "word_v4", "b": 0.75, "k1": 1.2}}
+            }
+        });
+        let fresh = parse_metadata_body(body.clone());
+        assert_eq!(fresh.approx_row_count, 0);
+        assert!(fresh.is_stable());
+        body["approx_row_count"] = json!(2);
+        body["approx_logical_bytes"] = json!(13);
+        let settled = parse_metadata_body(body);
+        assert_eq!(settled.approx_row_count, 2);
+        assert_eq!(settled.approx_logical_bytes, Some(13));
+        assert!(settled.is_stable());
     }
 
     #[test]
@@ -3643,127 +4705,5 @@ mod metadata_parse_tests {
 
         let request = server.await.unwrap();
         assert!(request.contains("authorization: Bearer tpuf_request_token"));
-    }
-}
-
-/// LYR-238: the origin side of the hosted-embedding fetch regression. A fake
-/// upstream that, like turbopuffer, leaves vector-typed columns (a hosted
-/// embedding's `embed_text`) out of `include_attributes: true` and returns
-/// them only when named.
-#[cfg(test)]
-mod fetch_generated_column_tests {
-    use super::*;
-    use axum::{extract::Path, routing::post, Json, Router};
-    use serde_json::json;
-    use tokio::net::TcpListener;
-
-    const VECTOR_COLUMNS: &[&str] = &["embed_text"];
-
-    async fn query(
-        Path(_ns): Path<String>,
-        Json(body): Json<Value>,
-    ) -> (axum::http::StatusCode, Json<Value>) {
-        let rows = [
-            json!({"id": "d1", "title": "one", "embed_text": [0.1, 0.2]}),
-            json!({"id": "d2", "title": "two", "embed_text": [0.3, 0.4]}),
-        ];
-        let wanted_ids: Vec<Value> = match body["filters"][1].as_str() {
-            Some("Eq") => vec![body["filters"][2].clone()],
-            _ => body["filters"][2].as_array().cloned().unwrap_or_default(),
-        };
-        let include = &body["include_attributes"];
-        let mut out = Vec::new();
-        for row in rows.iter().filter(|r| wanted_ids.contains(&r["id"])) {
-            let mut shaped = serde_json::Map::new();
-            for (k, v) in row.as_object().unwrap() {
-                let keep = match include {
-                    Value::Bool(true) => k == "id" || !VECTOR_COLUMNS.contains(&k.as_str()),
-                    Value::Array(names) => k == "id" || names.iter().any(|n| n == k),
-                    _ => k == "id",
-                };
-                if keep {
-                    shaped.insert(k.clone(), v.clone());
-                }
-            }
-            out.push(Value::Object(shaped));
-        }
-        if let Some(names) = include.as_array() {
-            if let Some(bad) = names
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|n| !["id", "title", "embed_text"].contains(n))
-            {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({"error": format!("attribute \"{bad}\" not found in schema"), "status": "error"}),
-                    ),
-                );
-            }
-        }
-        (axum::http::StatusCode::OK, Json(json!({"rows": out})))
-    }
-
-    async fn client() -> HttpTurbopufferClient {
-        let app = Router::new().route("/v2/namespaces/{ns}/query", post(query));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        HttpTurbopufferClient::new("test-key", &format!("http://{addr}"))
-    }
-
-    #[tokio::test]
-    async fn plain_fetch_omits_the_generated_column() {
-        let c = client().await;
-        let doc = c.fetch("ns", "d1").await.unwrap().unwrap();
-        assert!(
-            !doc.attributes.contains_key("embed_text"),
-            "fake must model the omission"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_with_attributes_returns_the_generated_column() {
-        let c = client().await;
-        let want = vec!["embed_text".to_string()];
-        let doc = c
-            .fetch_with_attributes("ns", "d1", &want)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(doc.attributes["embed_text"], json!([0.1, 0.2]));
-        assert_eq!(doc.attributes["title"], json!("one"));
-        assert!(c
-            .fetch_with_attributes("ns", "missing", &want)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn fetch_many_with_attributes_returns_the_generated_column() {
-        let c = client().await;
-        let ids = vec!["d1".to_string(), "d2".to_string()];
-        let want = vec!["embed_text".to_string(), "vector".to_string()];
-        let docs = c
-            .fetch_many_with_attributes("ns", &ids, &want)
-            .await
-            .unwrap();
-        assert_eq!(docs["d1"].attributes["embed_text"], json!([0.1, 0.2]));
-        assert_eq!(docs["d2"].attributes["embed_text"], json!([0.3, 0.4]));
-        assert!(!docs["d1"].attributes.contains_key("vector"));
-    }
-
-    #[tokio::test]
-    async fn unknown_attribute_keeps_the_base_row() {
-        let c = client().await;
-        let want = vec!["nope".to_string()];
-        let doc = c
-            .fetch_with_attributes("ns", "d1", &want)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(doc.attributes["title"], json!("one"));
-        assert!(!doc.attributes.contains_key("nope"));
     }
 }

@@ -41,6 +41,17 @@ pub enum CallerGrant {
     Declared(Vec<ApiScope>),
 }
 
+pub fn can_list_store(_state: &AppState, grant: Option<&CallerGrant>) -> bool {
+    match grant {
+        None => true,
+        Some(CallerGrant::Declared(scopes)) => scopes.contains(&ApiScope::Admin) || scopes.contains(&ApiScope::Read),
+    }
+}
+
+pub fn can_list_namespace(state: &AppState, grant: Option<&CallerGrant>, namespace: &str) -> bool {
+    authorize_namespace(state, grant, ApiScope::Read, namespace).is_ok()
+}
+
 /// Require `scope` on `namespace` for the caller. `None` (open or
 /// `deriveFromStore` mode) allows.
 pub fn authorize_namespace(
@@ -71,7 +82,7 @@ pub async fn require_api_key(
 ) -> Response {
     let required_scope = required_scope(request.method(), request.uri().path());
     if state.inbound_auth.is_open() {
-        return next.run(request).await;
+        return run_with_billing_caller(request, next).await;
     }
 
     let Some(provided) = request
@@ -91,12 +102,12 @@ pub async fn require_api_key(
             namespaces: Vec::new(),
         };
         request.extensions_mut().insert(authenticated);
-        return vectorstore_core::turbopuffer::scope_upstream_api_key(provided, next.run(request))
+        return vectorstore_core::turbopuffer::scope_upstream_api_key(provided, run_with_billing_caller(request, next))
             .await;
     }
 
     let InboundAuth::Keys(keys) = &state.inbound_auth else {
-        return next.run(request).await;
+        return run_with_billing_caller(request, next).await;
     };
 
     for key in keys {
@@ -113,11 +124,18 @@ pub async fn require_api_key(
                 .extensions_mut()
                 .insert(CallerGrant::Declared(key.scopes.clone()));
             request.extensions_mut().insert(authenticated);
-            return next.run(request).await;
+            return run_with_billing_caller(request, next).await;
         }
     }
 
     forbidden()
+}
+
+async fn run_with_billing_caller(request: Request<axum::body::Body>, next: Next) -> Response {
+    let name = request.extensions().get::<AuthenticatedApiKey>().map(|key| key.name.clone());
+    if let Some(name) = name {
+        crate::metrics::scope_billing_caller(crate::metrics::BillingCaller::api_key(&name), next.run(request)).await
+    } else { next.run(request).await }
 }
 
 fn insufficient_scope(required: ApiScope) -> Response {
@@ -173,9 +191,17 @@ fn is_read_route(method: &Method, path: &str) -> bool {
             || path.ends_with("/multi_query")
             || path.ends_with("/explain_query")
             || path.ends_with("/scans")
-            || path.contains("/scans/");
+            || path.contains("/scans/")
+            || is_namespace_search_route(path);
     }
     false
+}
+
+/// `POST /v2/namespaces/{namespace}/search` exactly, so a write to a
+/// namespace named `search` stays a write.
+fn is_namespace_search_route(path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    matches!(segments.as_slice(), ["v2", "namespaces", _, "search"])
 }
 
 fn path_has_prefix_segments(path: &str, segments: &[&str]) -> bool {

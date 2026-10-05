@@ -181,7 +181,9 @@ impl Schema {
                 // Declaration keys are nested under `schema`, so the feature
                 // is dotted: `embed` rejects as `schema.embed` (RFC 0118).
                 for key in object(decl)?.keys() {
-                    if !["type", "full_text_search", "filterable"].contains(&key.as_str()) {
+                    if !["type", "full_text_search", "filterable", "document"]
+                        .contains(&key.as_str())
+                    {
                         return Err(unsupported(&format!("schema.{key}")));
                     }
                 }
@@ -201,6 +203,13 @@ impl Schema {
             };
             if decl.get("filterable").is_some_and(|v| !v.is_boolean()) {
                 return Err(invalid("filterable must be boolean"));
+            }
+            // Layer collapse (LYR-264): the attribute `by: "document"` groups on.
+            if decl.get("document").is_some_and(|v| !v.is_boolean()) {
+                return Err(invalid("document must be boolean"));
+            }
+            if decl.get("document") == Some(&Value::Bool(true)) && kind != "string" {
+                return Err(invalid("document requires string"));
             }
             let f = Field {
                 name: name.clone(),

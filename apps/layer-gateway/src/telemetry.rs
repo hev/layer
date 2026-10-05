@@ -26,6 +26,8 @@ pub struct TelemetryCounters {
     scans: AtomicU64,
     federated_query: AtomicU64,
     multi_store_routing: AtomicU64,
+    search: AtomicU64,
+    rerank: AtomicU64,
     gated_command_hit: AtomicU64,
     queries: AtomicU64,
     writes: AtomicU64,
@@ -77,6 +79,8 @@ pub struct TelemetryCounterSnapshot {
     pub scans: u64,
     pub federated_query: u64,
     pub multi_store_routing: u64,
+    pub search: u64,
+    pub rerank: u64,
     #[serde(rename = "gated_command_hit")]
     pub gated_command_hit: u64,
 }
@@ -108,6 +112,16 @@ impl TelemetryCounters {
 
     pub fn touch_multi_store_routing(&self) {
         self.multi_store_routing.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One `/search` request (RFC 0116).
+    pub fn touch_search(&self) {
+        self.search.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One `/search` request whose rerank stage executed.
+    pub fn touch_rerank(&self) {
+        self.rerank.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn touch_gated_command_hit(&self) {
@@ -159,6 +173,8 @@ impl TelemetryCounters {
             scans: self.scans.load(Ordering::Relaxed),
             federated_query: self.federated_query.load(Ordering::Relaxed),
             multi_store_routing: self.multi_store_routing.load(Ordering::Relaxed),
+            search: self.search.load(Ordering::Relaxed),
+            rerank: self.rerank.load(Ordering::Relaxed),
             gated_command_hit: self.gated_command_hit.load(Ordering::Relaxed),
         }
     }
@@ -306,6 +322,9 @@ pub fn classify_usage_route(method: &Method, path: &str) -> Option<UsageRoute> {
     let segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
     match segments.as_slice() {
         ["", "v2", "query"] => Some(UsageRoute::Query),
+        ["", "v2", "namespaces", namespace, "search"] if !namespace.is_empty() => {
+            Some(UsageRoute::Query)
+        }
         ["", "v1" | "v2", "namespaces", namespace, "query"] if !namespace.is_empty() => {
             Some(UsageRoute::Query)
         }
@@ -412,6 +431,9 @@ mod tests {
         counters.touch_hybrid_rrf();
         counters.touch_hybrid_rrf();
         counters.touch_multi_store_routing();
+        counters.touch_search();
+        counters.touch_search();
+        counters.touch_rerank();
         counters.touch_gated_command_hit();
 
         assert_eq!(
@@ -420,6 +442,8 @@ mod tests {
                 auto_routing: 1,
                 hybrid_rrf: 2,
                 multi_store_routing: 1,
+                search: 2,
+                rerank: 1,
                 gated_command_hit: 1,
                 ..TelemetryCounterSnapshot::default()
             }

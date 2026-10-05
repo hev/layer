@@ -67,6 +67,7 @@ async def run_udf_worker(
     resolved_base_url = base_url or os.environ.get("HEVLAYER_BASE_URL", "http://localhost:8080")
     signature = inspect.signature(fn)
     wants_tpuf = "tpuf" in signature.parameters
+    wants_pages = "pages" in signature.parameters
     output_attr = metadata.get("output")
     output_kind = metadata.get("kind")
     if output_attr is not None:
@@ -94,11 +95,21 @@ async def run_udf_worker(
                 kwargs = dict(item.input)
                 if wants_tpuf:
                     kwargs["tpuf"] = tpuf
+                pages = [
+                    {"id": page.id, "input_revision": page.input_revision}
+                    for page in item.pages or []
+                ]
+                if wants_pages and item.pages:
+                    kwargs["pages"] = [page.input for page in item.pages]
                 try:
                     output = fn(**kwargs)
                     if inspect.isawaitable(output):
                         output = await output
                     complete_item: dict[str, Any] = {"namespace": item.namespace, "id": item.id}
+                    if item.input_revision is not None:
+                        complete_item["input_revision"] = item.input_revision
+                    if pages:
+                        complete_item["pages"] = pages
                     if output_kind == "embedding":
                         complete_item["vector"] = output
                     elif output_attr:
@@ -107,11 +118,11 @@ async def run_udf_worker(
                         raise PermanentError("UDF returned a value but @udf(output=...) is not set")
                     complete_items.append(complete_item)
                 except TransientError as exc:
-                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "transient", "message": str(exc)})
+                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "transient", "message": str(exc), **({"pages": pages} if pages else {})})
                 except PermanentError as exc:
-                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "permanent", "message": str(exc)})
+                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "permanent", "message": str(exc), **({"pages": pages} if pages else {})})
                 except Exception as exc:
-                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "transient", "message": str(exc)})
+                    failed_items.append({"namespace": item.namespace, "id": item.id, "kind": "transient", "message": str(exc), **({"pages": pages} if pages else {})})
 
             if complete_items:
                 await client.complete_udf_items(

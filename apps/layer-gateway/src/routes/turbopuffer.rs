@@ -1,20 +1,59 @@
 use std::sync::Arc;
 
+use crate::auth::CallerGrant;
+use crate::routes::namespaces::{authorized_namespace_page, ListNamespacesQuery};
 use axum::body::Body;
-use axum::extract::{OriginalUri, Path, State};
+use axum::extract::{OriginalUri, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde_json::Value;
 
+use crate::clients::turbopuffer::TurbopufferPassthroughResponse;
 use crate::error::AppError;
 use crate::AppState;
 
 pub async fn passthrough_get(
     State(state): State<Arc<AppState>>,
     OriginalUri(uri): OriginalUri,
+    grant: Option<Extension<CallerGrant>>,
 ) -> Result<Response, AppError> {
+    if uri.path() == "/v1/namespaces" {
+        let Query(params) = match Query::<ListNamespacesQuery>::try_from_uri(&uri) {
+            Ok(params) => params,
+            Err(rejection) => return Ok(rejection.into_response()),
+        };
+        return Ok(Json(
+            authorized_namespace_page(&state, &params, grant.as_ref().map(|g| &g.0)).await?,
+        )
+        .into_response());
+    }
     passthrough(state, "GET", uri.path(), uri.query(), None).await
+}
+
+pub async fn get_namespace_schema(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Response, AppError> {
+    let mut response = state
+        .turbopuffer()
+        .passthrough("GET", uri.path(), uri.query(), None)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "namespace schema"))?;
+    if (200..300).contains(&response.status) {
+        let mut schema: Value = serde_json::from_slice(&response.body)
+            .map_err(|e| AppError::Upstream(format!("invalid namespace schema: {e}")))?;
+        let attrs = if schema.get("schema").is_some_and(Value::is_object) {
+            schema.get_mut("schema").expect("checked schema object")
+        } else {
+            &mut schema
+        };
+        crate::routes::embed_wire::annotate_schema(&state, &namespace, attrs).await?;
+        response.body = serde_json::to_vec(&schema)
+            .map_err(|e| AppError::Upstream(format!("serialize namespace schema: {e}")))?;
+    }
+    passthrough_response(response)
 }
 
 pub async fn passthrough_post(
@@ -89,6 +128,12 @@ pub async fn passthrough(
         .await
         .map_err(|e| AppError::Upstream(format!("Turbopuffer passthrough failed: {}", e)))?;
 
+    passthrough_response(response)
+}
+
+pub(crate) fn passthrough_response(
+    response: TurbopufferPassthroughResponse,
+) -> Result<Response, AppError> {
     let status = StatusCode::from_u16(response.status)
         .map_err(|e| AppError::Upstream(format!("invalid Turbopuffer status: {}", e)))?;
     let mut builder = Response::builder().status(status);

@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde_json::{json, Value};
 use tracing::warn;
@@ -37,7 +38,13 @@ use crate::AppState;
 pub async fn get_namespace_metadata(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    #[cfg(feature = "pro")]
+    let field_stats_request =
+        crate::field_stats::parse_request(&query).map_err(AppError::Validation)?;
+    #[cfg(not(feature = "pro"))]
+    let _ = &query;
     let start = Instant::now();
     let result = state.turbopuffer().head_namespace(&namespace).await;
     let meta = match result {
@@ -88,12 +95,34 @@ pub async fn get_namespace_metadata(
 
     body.entry("id")
         .or_insert_with(|| Value::String(namespace.clone()));
+    if let Some(schema) = body.get_mut("schema") {
+        crate::routes::embed_wire::annotate_schema(&state, &namespace, schema).await?;
+        crate::routes::collapse::annotate_schema(&state, &namespace, schema).await?;
+    }
 
     let marker_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
         .await
         .map_err(|e| AppError::Upstream(format!("namespace marker read failed: {e}")))?;
     let init = init_layer_status(&state, &namespace, 1, marker_shard_count).await?;
-    let layer = json!({
+    #[cfg(feature = "pro")]
+    let field_stats = match field_stats_request {
+        Some(top) => {
+            let schema = body.get("schema");
+            let upstream_rows = body
+                .get("approx_row_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let (stats, reconcile) =
+                crate::field_stats::read(&state, &namespace, schema, upstream_rows, top).await;
+            if reconcile {
+                crate::field_stats::request_reconcile(&state, &namespace);
+            }
+            Some(stats)
+        }
+        None => None,
+    };
+    #[allow(unused_mut)]
+    let mut layer = json!({
         "stable_as_of": state.consistency.get(&namespace),
         "is_stable": matches!(
             state.consistency.current_status(&namespace),
@@ -109,6 +138,10 @@ pub async fn get_namespace_metadata(
         "shard_lag_rows": init.shard_lag_rows,
         "scatter_gather_active": init.scatter_gather_active,
     });
+    #[cfg(feature = "pro")]
+    if let Some(stats) = field_stats {
+        layer["field_stats"] = stats;
+    }
     body.insert("layer".into(), layer);
 
     Ok(Json(Value::Object(body)))
@@ -168,7 +201,7 @@ fn has_vector_column(raw: &Value) -> bool {
         })
 }
 
-fn is_vector_field(name: &str, field: &Value) -> bool {
+pub(crate) fn is_vector_field(name: &str, field: &Value) -> bool {
     if name == "vector" {
         return true;
     }

@@ -5,3 +5,5 @@ cd "$(dirname "$0")/.."
 export PGVECTOR_GATEWAY_URL="${PGVECTOR_GATEWAY_URL:-http://127.0.0.1:8080}"
 PYTHONPATH="$PWD/clients/python/src${PYTHONPATH:+:$PYTHONPATH}" python3 tools/sdk-harness/test/pgvector/client.py
 (cd tools/sdk-harness && npx --no-install tsx test/pgvector/client.ts)
+
+python3 tools/sdk-harness/test/pgvector/ordered-contract.py

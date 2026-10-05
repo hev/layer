@@ -1,6 +1,6 @@
 //! Validation and routing for Turbopuffer-compatible native embeddings.
 //!
-//! Native requests remain transparent on Turbopuffer stores. Autoscaler and
+//! Native requests remain transparent on Turbopuffer stores. Turbopuffer and
 //! Lattice requests (plus native requests targeting hev search or Postgres,
 //! which cannot embed) are resolved through their selected gateway provider
 //! and lowered to concrete vectors, so Layer-only serving policy and `embed` /
@@ -31,7 +31,9 @@ const PROFILE_PREFIX: &str = "embedding-profiles";
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ServingPreference {
     Native,
-    Autoscaler,
+    Worker,
+    #[serde(alias = "autoscaler")]
+    Turbopuffer,
     #[serde(alias = "lattice")]
     Local,
 }
@@ -40,7 +42,8 @@ impl ServingPreference {
     fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
-            Self::Autoscaler => "autoscaler",
+            Self::Worker => "worker",
+            Self::Turbopuffer => "turbopuffer",
             Self::Local => "local",
         }
     }
@@ -101,8 +104,8 @@ pub struct EmbeddingProfile {
     /// namespace is re-indexed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_sha256: Option<String>,
-    /// The `embed` value the client wrote, kept only where the store holds
-    /// the profile (RFC 0118 step E) so `GET .../schema` can return it.
+    /// The client-written `embed` value for schema readback. Older S3
+    /// profiles omit this and reconstruct the supported declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     declaration: Option<Value>,
 }
@@ -139,6 +142,32 @@ struct ChunkConfig {
 }
 
 impl EmbeddingProfile {
+    fn schema_declaration(&self) -> Value {
+        self.declaration.clone().unwrap_or_else(|| {
+            let mut embed = json!({
+                "model": self.model,
+                "attribute": self.target,
+                "serving": {"prefer": self.serving},
+            });
+            if self.modality != EmbeddingModality::Text {
+                embed["modality"] = json!(self.modality);
+            }
+            if let Some(dims) = self.dims {
+                embed["dims"] = json!(dims);
+            }
+            if let Some(revision) = &self.revision {
+                embed["revision"] = json!(revision);
+            }
+            if self.instructions != EmbeddingInstructions::default() {
+                embed["instructions"] = json!(self.instructions);
+            }
+            if let Some(chunk) = &self.chunk {
+                embed["chunk"] = json!(chunk);
+            }
+            embed
+        })
+    }
+
     fn has_extensions(&self) -> bool {
         self.layer_extensions
             || self.revision.is_some()
@@ -236,13 +265,16 @@ async fn prepare_write_profiles(
             }
             has_embed_schema = true;
             let mut parsed = validate_embed(&attribute, embed)?;
+            parsed.declaration = Some(embed.clone());
             let previous = profiles
                 .iter()
                 .find(|profile| profile.source == attribute)
                 .cloned();
             if native_wire {
-                parsed.declaration = Some(embed.clone());
                 prepare_native_wire_profile(state, &route, &mut parsed, previous.as_ref()).await?;
+            }
+            if parsed.serving == ServingPreference::Worker {
+                pin_worker_profile(state, &mut parsed, previous.as_ref()).await?;
             }
             if parsed.serving == ServingPreference::Local {
                 match local_leg(state, &parsed.model) {
@@ -306,16 +338,20 @@ async fn prepare_write_profiles(
                     && parsed.revision.is_none()
                     && parsed.instructions == EmbeddingInstructions::default()
                     && parsed.chunk.is_none();
-                if parsed.serving != ServingPreference::Autoscaler && !local_clip_image {
+                if !matches!(
+                    parsed.serving,
+                    ServingPreference::Turbopuffer | ServingPreference::Worker
+                ) && !local_clip_image
+                {
                     return Err(AppError::Validation(format!(
-                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `autoscaler`, except CLIP image embeddings may use `local`"
+                        "schema attribute `{attribute}` Layer embedding extensions require `embed.serving.prefer` to be `worker` or `turbopuffer` (`autoscaler` is an alias), except CLIP image embeddings may use `local`"
                     )));
                 }
-                if parsed.serving == ServingPreference::Autoscaler
+                if parsed.serving == ServingPreference::Turbopuffer
                     && state.embedding_provider.is_none()
                 {
                     return Err(AppError::ServiceUnavailable(
-                        "Layer embedding extensions require a configured production autoscaler inference provider"
+                        "Layer embedding extensions require a configured Turbopuffer embedding provider"
                             .to_string(),
                     ));
                 }
@@ -389,8 +425,9 @@ async fn prepare_write_profiles(
     }
 
     let mut performance = json!({});
+    let mut pending_cache = Vec::new();
     for profile in gateway_profiles {
-        let inputs = prepare_write_inputs(body, profile)?;
+        let inputs = prepare_write_inputs(body, profile, store)?;
         if inputs.values.is_empty() {
             continue;
         }
@@ -409,8 +446,16 @@ async fn prepare_write_profiles(
             &mut performance,
         )
         .await?;
-        apply_write_vectors(body, profile, &inputs.row_indices, &vectors, store)?;
+        let mut row_indices = inputs.row_indices;
+        let mut row_vectors = vectors.vectors;
+        for (row_index, position) in inputs.parent_rows {
+            row_indices.push(row_index);
+            row_vectors.push(row_vectors[position].clone());
+        }
+        apply_write_vectors(body, profile, &row_indices, &row_vectors, store)?;
+        pending_cache.extend(vectors.cache);
     }
+    commit_embedding_cache(state, pending_cache);
 
     let requires_distance_check = native_embed_schema
         || profiles
@@ -490,6 +535,49 @@ pub(crate) async fn clear_profiles(state: &AppState, namespace: &str) -> Result<
     state
         .wire_embedding_profiles
         .insert(namespace.to_string(), Vec::new());
+    Ok(())
+}
+
+/// Source attributes with a gateway-held embedding profile. `/search` unions
+/// these with the store schema's `embed:` attributes. This also reloads
+/// profiles persisted by Postgres after a gateway restart without S3.
+pub(crate) async fn declared_embed_sources(
+    state: &AppState,
+    namespace: &str,
+) -> Result<Vec<String>, AppError> {
+    Ok(load_profiles(state, namespace)
+        .await?
+        .into_iter()
+        .map(|profile| profile.source)
+        .collect())
+}
+
+/// Reattach gateway-served declarations stripped before the store write.
+/// Older S3 profiles predate `declaration`; reconstruct their supported form.
+pub(crate) async fn annotate_schema(
+    state: &AppState,
+    namespace: &str,
+    schema: &mut Value,
+) -> Result<(), AppError> {
+    let profiles = load_profiles(state, namespace).await?;
+    let Some(attrs) = schema.as_object_mut() else {
+        return Ok(());
+    };
+    for profile in profiles {
+        if !profile
+            .serving
+            .gateway_served(EmbedStore::for_namespace(state, namespace))
+        {
+            continue;
+        }
+        let declaration = profile.schema_declaration();
+        let attr = attrs
+            .entry(profile.source)
+            .or_insert_with(|| json!({"type":"string"}));
+        if let Some(attr) = attr.as_object_mut() {
+            attr.insert("embed".into(), declaration);
+        }
+    }
     Ok(())
 }
 
@@ -646,7 +734,7 @@ async fn prepare_rank_by(
             profile.serving.label(),
         );
     }
-    if target.starts_with("embed_") && explicit_model.is_none() {
+    if target.starts_with("embed_") && explicit_model.is_none() && declared.is_none() {
         return Err(AppError::Validation(
             "a model name must be provided".to_string(),
         ));
@@ -768,7 +856,8 @@ async fn prepare_rank_by(
         &mut preparation.performance,
     )
     .await?;
-    rank_by[2] = serde_json::to_value(&vectors[0]).expect("vector is JSON");
+    rank_by[2] = serde_json::to_value(&vectors.vectors[0]).expect("vector is JSON");
+    commit_embedding_cache(state, vectors.cache);
     if store == EmbedStore::Search {
         rank_by[0] = Value::String("vector".to_string());
     } else {
@@ -1056,8 +1145,69 @@ async fn pin_local_profile(
     Ok(())
 }
 
+async fn worker_for_profile(
+    state: &AppState,
+    profile: &EmbeddingProfile,
+    count_demand: bool,
+) -> Result<crate::embedding::worker::WorkerEmbedder, AppError> {
+    let worker = state
+        .worker_embedders
+        .resolve(&profile.model)
+        .await
+        .map_err(|error| map_worker_error(error, &profile.source))?;
+    if count_demand || worker.image_digest.is_none() {
+        state.metrics.record_embedder_demand(&worker.name);
+    }
+    worker
+        .check(&EmbeddingRequest {
+            model: &profile.model,
+            dims: profile.dims,
+            revision: profile.revision.as_deref(),
+            modality: profile.modality,
+            purpose: EmbeddingPurpose::Document,
+            artifact: profile.artifact_sha256.as_deref(),
+        })
+        .map_err(|error| map_worker_error(error, &profile.source))?;
+    Ok(worker)
+}
+
+async fn pin_worker_profile(
+    state: &AppState,
+    parsed: &mut EmbeddingProfile,
+    previous: Option<&EmbeddingProfile>,
+) -> Result<(), AppError> {
+    let worker = worker_for_profile(state, parsed, false).await?;
+    if let Some(previous) = previous.filter(|p| p.materialized) {
+        if previous.model != parsed.model
+            || previous.serving != parsed.serving
+            || previous.artifact_sha256 != worker.image_digest
+            || previous.dims != Some(worker.dims)
+            || previous.instructions != parsed.instructions
+        {
+            return Err(AppError::Validation(
+                "worker embedding profile changed; re-index into a fresh namespace".into(),
+            ));
+        }
+    }
+    parsed.dims = Some(worker.dims);
+    parsed.artifact_sha256 = worker.image_digest;
+    Ok(())
+}
+
+fn map_worker_error(error: EmbeddingError, attribute: &str) -> AppError {
+    match error {
+        EmbeddingError::Unavailable(message) => AppError::RetryableUpstream {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            retry_after: Some("5".into()),
+        },
+        error => map_embedding_provider_error(error, attribute),
+    }
+}
+
 /// RFC 0118 rules for a declaration on a store that cannot embed natively,
-/// all before any provider call: no chunking (rule 5), `native` resolved to a
+/// all before any provider call: chunking requires the explicit Turbopuffer route,
+/// `native` resolved to a
 /// configured provider, and no model, dims or provider change once the
 /// namespace holds vectors (rule 9).
 async fn prepare_native_wire_profile(
@@ -1066,12 +1216,17 @@ async fn prepare_native_wire_profile(
     parsed: &mut EmbeddingProfile,
     previous: Option<&EmbeddingProfile>,
 ) -> Result<(), AppError> {
-    if parsed.chunk.is_some() {
+    if parsed.chunk.is_some()
+        && !matches!(
+            parsed.serving,
+            ServingPreference::Turbopuffer | ServingPreference::Worker
+        )
+    {
         return Err(AppError::unsupported_feature(
             "pgvector",
             Some(route.to_string()),
             "embed.chunk",
-            "chunked embedding writes more than one row shape",
+            "chunked embedding requires embed.serving.prefer: turbopuffer or worker",
         ));
     }
     resolve_native_wire_serving(state, parsed, previous).await?;
@@ -1208,12 +1363,13 @@ fn parse_serving_preference(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: autoscaler`, or `prefer: local` (`lattice` is an alias)"
+                "schema attribute `{attribute}` `embed.serving` requires `prefer: native`, `prefer: turbopuffer` (`autoscaler` is an alias), or `prefer: local` (`lattice` is an alias)"
             ))
         })?;
     match prefer {
         "native" => Ok(ServingPreference::Native),
-        "autoscaler" => Ok(ServingPreference::Autoscaler),
+        "turbopuffer" | "autoscaler" => Ok(ServingPreference::Turbopuffer),
+        "worker" => Ok(ServingPreference::Worker),
         "local" | "lattice" => Ok(ServingPreference::Local),
         _ => Err(AppError::Validation(format!(
             "schema attribute `{attribute}` has unsupported `embed.serving.prefer` value `{prefer}`"
@@ -1454,7 +1610,7 @@ fn reject_source_patches(body: &Value, profiles: &[&EmbeddingProfile]) -> Result
                     .is_some_and(|patch| patch.contains_key(source));
             if patches_source {
                 return Err(AppError::Validation(format!(
-                    "patching autoscaler-embedded source attribute `{source}` is unsupported; upsert the full row so Layer can recompute `{}`",
+                    "patching gateway-embedded source attribute `{source}` is unsupported; upsert the full row so Layer can recompute `{}`",
                     profile.target
                 )));
             }
@@ -1466,19 +1622,52 @@ fn reject_source_patches(body: &Value, profiles: &[&EmbeddingProfile]) -> Result
 struct PreparedWriteInputs {
     values: Vec<String>,
     row_indices: Vec<usize>,
+    /// Chunked writes keep the original row, which has no text of its own to
+    /// embed. On Turbopuffer each entry is (row index, position in `values`) of the chunk
+    /// whose vector the original row reuses, so no row reaches the store
+    /// without its vector.
+    parent_rows: Vec<(usize, usize)>,
 }
 
 fn prepare_write_inputs(
     body: &mut Value,
     profile: &EmbeddingProfile,
+    store: EmbedStore,
 ) -> Result<PreparedWriteInputs, AppError> {
     if let Some(chunk) = profile.chunk.as_ref() {
-        return prepare_chunk_rows(body, profile, chunk);
+        return prepare_chunk_rows(body, profile, chunk, store);
     }
     if let Some(rows) = body.get("upsert_rows").and_then(Value::as_array) {
-        let values = rows
-            .iter()
-            .map(|row| {
+        let mut values = Vec::new();
+        let mut row_indices = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            // Stock image workers own image decoding and cache the CLIP vector.
+            // A query profile must not force them to fetch/embed the image again.
+            // Source-bearing writes retain normal automatic embedding semantics.
+            if store != EmbedStore::Search
+                && profile.modality == EmbeddingModality::Image
+                && profile.serving == ServingPreference::Local
+                && row.get(&profile.source).is_none()
+                && row.get(&profile.target).is_some()
+            {
+                let vector = row[&profile.target].as_array().ok_or_else(|| {
+                    AppError::Validation(
+                        "precomputed image embedding must be a numeric vector".into(),
+                    )
+                })?;
+                if profile.dims != Some(vector.len() as u64)
+                    || vector.is_empty()
+                    || !vector
+                        .iter()
+                        .all(|v| v.as_f64().is_some_and(|n| (n as f32).is_finite()))
+                {
+                    return Err(AppError::Validation(
+                        "precomputed image embedding must match declared embed.dims and contain finite numbers".into(),
+                    ));
+                }
+                continue;
+            }
+            values.push(
                 row.get(&profile.source)
                     .and_then(Value::as_str)
                     .map(str::to_string)
@@ -1487,12 +1676,14 @@ fn prepare_write_inputs(
                             "upsert row must include string attribute `{}` for embedding",
                             profile.source
                         ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    })?,
+            );
+            row_indices.push(index);
+        }
         return Ok(PreparedWriteInputs {
-            row_indices: (0..values.len()).collect(),
+            row_indices,
             values,
+            parent_rows: Vec::new(),
         });
     }
     if let Some(columns) = body.get("upsert_columns").and_then(Value::as_object) {
@@ -1518,11 +1709,13 @@ fn prepare_write_inputs(
         return Ok(PreparedWriteInputs {
             row_indices: (0..values.len()).collect(),
             values,
+            parent_rows: Vec::new(),
         });
     }
     Ok(PreparedWriteInputs {
         values: Vec::new(),
         row_indices: Vec::new(),
+        parent_rows: Vec::new(),
     })
 }
 
@@ -1530,6 +1723,7 @@ fn prepare_chunk_rows(
     body: &mut Value,
     profile: &EmbeddingProfile,
     chunk: &ChunkConfig,
+    store: EmbedStore,
 ) -> Result<PreparedWriteInputs, AppError> {
     if body.get("upsert_columns").is_some() {
         return Err(AppError::Validation(
@@ -1547,6 +1741,7 @@ fn prepare_chunk_rows(
     let mut expanded = Vec::new();
     let mut values = Vec::new();
     let mut row_indices = Vec::new();
+    let mut parent_rows = Vec::new();
     for original in originals {
         let object = original.as_object().ok_or_else(|| {
             AppError::Validation("upsert rows must be objects for chunked embedding".to_string())
@@ -1580,6 +1775,11 @@ fn prepare_chunk_rows(
             values.push(chunks[0].value.as_str().expect("scalar chunk").to_string());
             expanded.push(original);
             continue;
+        }
+        // Turbopuffer rejects a row without the vector attribute. Postgres
+        // takes the row without one, which keeps it out of ANN results.
+        if store == EmbedStore::Native {
+            parent_rows.push((expanded.len(), values.len()));
         }
         expanded.push(original.clone());
         for generated in chunks {
@@ -1621,6 +1821,7 @@ fn prepare_chunk_rows(
     Ok(PreparedWriteInputs {
         values,
         row_indices,
+        parent_rows,
     })
 }
 
@@ -1843,6 +2044,17 @@ fn apply_write_vectors(
     Ok(())
 }
 
+struct ResolvedVectors {
+    vectors: Vec<Vec<f64>>,
+    cache: Vec<(String, Arc<Vec<f64>>)>,
+}
+
+fn commit_embedding_cache(state: &AppState, cache: Vec<(String, Arc<Vec<f64>>)>) {
+    for (key, vector) in cache {
+        state.embedding_cache.insert(key, (Instant::now(), vector));
+    }
+}
+
 async fn resolve_vectors(
     state: &AppState,
     namespace: &str,
@@ -1851,7 +2063,8 @@ async fn resolve_vectors(
     purpose: EmbeddingPurpose,
     texts: &[String],
     performance: &mut Value,
-) -> Result<Vec<Vec<f64>>, AppError> {
+) -> Result<ResolvedVectors, AppError> {
+    let mut pending_cache = Vec::new();
     let request = EmbeddingRequest {
         model: &profile.model,
         dims: profile.dims,
@@ -1860,6 +2073,17 @@ async fn resolve_vectors(
         purpose,
         artifact: profile.artifact_sha256.as_deref(),
     };
+    let worker_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>> =
+        if profile.serving == ServingPreference::Worker {
+            let worker = worker_for_profile(state, profile, true).await?;
+            worker
+                .validate_inputs(texts)
+                .and_then(|()| worker.require_ready())
+                .map_err(|e| map_worker_error(e, &profile.source))?;
+            Some(Arc::new(worker))
+        } else {
+            None
+        };
     let provider_model = request.provider_model();
     let mut vectors = vec![None; texts.len()];
     let mut misses = Vec::new();
@@ -1895,6 +2119,7 @@ async fn resolve_vectors(
     if !misses.is_empty() {
         let http_provider;
         let provider: &Arc<dyn crate::embedding::EmbeddingProvider> = match profile.serving {
+            ServingPreference::Worker => worker_provider.as_ref().expect("worker resolved before cache lookup"),
             ServingPreference::Local => match local_leg(state, &profile.model) {
                 LocalLeg::Lattice => state.lattice_embedding_provider.as_ref().ok_or_else(|| {
                     AppError::Validation(
@@ -1919,7 +2144,7 @@ async fn resolve_vectors(
                     &http_provider
                 }
             },
-            ServingPreference::Native | ServingPreference::Autoscaler => state
+            ServingPreference::Native | ServingPreference::Turbopuffer => state
                 .embedding_provider
                 .as_ref()
                 .ok_or_else(|| {
@@ -1932,13 +2157,40 @@ async fn resolve_vectors(
         let local_clip_image = profile.serving == ServingPreference::Local
             && is_clip_model(&profile.model)
             && modality == EmbeddingModality::Image;
-        let batch = if local_clip_image {
-            let images = resolve_image_inputs(namespace, &misses).await?;
-            provider.embed_images(&request, &images).await
+        // Native provider writes can be billed even when a later read or vector
+        // validation fails. Preserve the existing logical target namespace.
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_by_callback = Arc::clone(&observed);
+        let metrics = Arc::clone(&state.metrics);
+        let target_namespace = namespace.to_string();
+        let observer = Arc::new(move |_: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(
+                &target_namespace,
+                crate::metrics::BillingOperation::Passthrough,
+                billing,
+            );
+            observed_by_callback.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let images = if local_clip_image {
+            Some(resolve_image_inputs(namespace, &misses).await?)
         } else {
-            provider.embed(&request, &misses).await
-        }
-        .map_err(|error| map_embedding_provider_error(error, &profile.source))?;
+            None
+        };
+        let batch = vectorstore_core::turbopuffer::scope_read_billing(observer, async {
+            if let Some(images) = &images {
+                provider.embed_images(&request, images).await
+            } else {
+                provider.embed(&request, &misses).await
+            }
+        })
+        .await
+        .map_err(|error| {
+            if profile.serving == ServingPreference::Worker {
+                map_worker_error(error, &profile.source)
+            } else {
+                map_embedding_provider_error(error, &profile.source)
+            }
+        })?;
         if batch.vectors.len() != misses.len() {
             return Err(AppError::Upstream(format!(
                 "embedding provider returned {} vectors for {} inputs",
@@ -1953,26 +2205,34 @@ async fn resolve_vectors(
             profile.serving.label(),
             &batch.performance,
         );
-        if let Some(billing) = batch.billing.as_ref() {
-            state.metrics.observe_tpuf_billing(namespace, billing);
+        if !observed.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(billing) = batch.billing.as_ref() {
+                state.metrics.observe_tpuf_billing(
+                    namespace,
+                    crate::metrics::BillingOperation::Passthrough,
+                    billing,
+                );
+            }
         }
         for ((position, vector), key) in
             miss_positions.into_iter().zip(batch.vectors).zip(miss_keys)
         {
-            state
-                .embedding_cache
-                .insert(key, (Instant::now(), Arc::new(vector.clone())));
+            pending_cache.push((key, Arc::new(vector.clone())));
             vectors[position] = Some(vector);
         }
     }
 
-    vectors
+    let vectors = vectors
         .into_iter()
         .map(|vector| {
             vector
                 .ok_or_else(|| AppError::Upstream("embedding cache resolution failed".to_string()))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok(ResolvedVectors {
+        vectors,
+        cache: pending_cache,
+    })
 }
 
 /// Map a classified provider failure to the public error envelope: validation
@@ -2032,7 +2292,9 @@ fn cache_key(
 fn cache_variant(serving: ServingPreference, model: &str) -> &'static str {
     match serving {
         ServingPreference::Native => "native",
-        ServingPreference::Autoscaler => "autoscaler",
+        ServingPreference::Worker => "worker:openai:v1",
+        // Keep existing cache entries shared by both spellings.
+        ServingPreference::Turbopuffer => "autoscaler",
         ServingPreference::Local if model == crate::embedding::LatticeEmbeddingProvider::MODEL => {
             "local:lattice:fp32"
         }
@@ -2296,6 +2558,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_local_text_declaration_roundtrips_without_adding_extensions() {
+        let profile = validate_embed(
+            "body",
+            &json!({
+                "model":"openai/text-embedding-3-small", "dims":3,
+                "serving":{"prefer":"local"}
+            }),
+        )
+        .unwrap();
+        let declaration = profile.schema_declaration();
+        assert!(declaration.get("modality").is_none());
+        let restored = validate_embed("body", &declaration).unwrap();
+        assert!(!restored.has_extensions());
+        assert_eq!(restored.model, profile.model);
+        assert_eq!(restored.target, profile.target);
+        assert_eq!(restored.dims, profile.dims);
+        assert_eq!(restored.serving, profile.serving);
+    }
+
+    #[test]
+    fn cached_image_vectors_validate_dimensions_and_preserve_mixed_row_positions() {
+        let profile = validate_embed(
+            "image_url",
+            &json!({
+                "model":"openai/clip-vit-base-patch32", "dims":2,
+                "modality":"image", "serving":{"prefer":"local"}
+            }),
+        )
+        .unwrap();
+        let mut body = json!({"upsert_rows":[
+            {"id":"cached", "embed_image_url":[0.6,0.8]},
+            {"id":"fresh", "image_url":"https://example.test/photo.jpg", "embed_image_url":[1.,0.]}
+        ]});
+        let inputs = prepare_write_inputs(&mut body, &profile, EmbedStore::Native).unwrap();
+        assert_eq!(inputs.row_indices, vec![1]);
+        assert_eq!(inputs.values.len(), 1);
+        apply_write_vectors(
+            &mut body,
+            &profile,
+            &inputs.row_indices,
+            &[vec![0.8, 0.6]],
+            EmbedStore::Native,
+        )
+        .unwrap();
+        assert_eq!(body["upsert_rows"][0]["embed_image_url"], json!([0.6, 0.8]));
+        assert_eq!(body["upsert_rows"][1]["embed_image_url"], json!([0.8, 0.6]));
+        for vector in [
+            json!([]),
+            json!([1.]),
+            json!([1., 2., 3.]),
+            json!(["bad", 0.]),
+            json!([1e100, 0.]),
+            Value::Null,
+        ] {
+            let mut invalid = json!({"upsert_rows":[{"id":"bad", "embed_image_url":vector}]});
+            assert!(prepare_write_inputs(&mut invalid, &profile, EmbedStore::Native).is_err());
+        }
+        let text = validate_embed(
+            "text",
+            &json!({"model":"openai/text-embedding-3-small", "dims":2,"serving":{"prefer":"local"}}),
+        )
+        .unwrap();
+        assert!(prepare_write_inputs(
+            &mut json!({"upsert_rows":[{"id":"a", "embed_text":[1.,0.]}]}),
+            &text,
+            EmbedStore::Native
+        )
+        .is_err());
+    }
+
+    #[test]
     fn native_serving_is_consumed_but_tpuf_fields_remain() {
         let mut embed = json!({
             "model": "voyage/voyage-4-lite",
@@ -2317,14 +2650,18 @@ mod tests {
     }
 
     #[test]
-    fn serving_preference_accepts_local_and_lattice_alias() {
+    fn serving_preference_accepts_canonical_routes_and_aliases() {
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "native"})), "title").unwrap(),
             ServingPreference::Native
         );
         assert_eq!(
+            parse_serving_preference(Some(&json!({"prefer": "turbopuffer"})), "title").unwrap(),
+            ServingPreference::Turbopuffer
+        );
+        assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "autoscaler"})), "title").unwrap(),
-            ServingPreference::Autoscaler
+            ServingPreference::Turbopuffer
         );
         assert_eq!(
             parse_serving_preference(Some(&json!({"prefer": "local"})), "title").unwrap(),
@@ -2352,7 +2689,7 @@ mod tests {
     #[test]
     fn embedding_cache_includes_local_clip_variant() {
         let autoscaler = cache_key(
-            ServingPreference::Autoscaler,
+            ServingPreference::Turbopuffer,
             "openai/clip-vit-base-patch32",
             Some(512),
             EmbeddingModality::Image,

@@ -56,6 +56,7 @@ class HevlayerProtocol(Protocol):
     async def branch_namespace(self, namespace: str, body: TurbopufferBranchFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
     async def claim_documents(self, pipeline_id: str, body: ClaimDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> ClaimDocumentsResponse | LayerResponse[ClaimDocumentsResponse]: ...
     async def claim_udf_items(self, udf_id: str, body: UdfClaimRequest | dict[str, Any], *, with_perf: bool = False) -> UdfClaimResponse | LayerResponse[UdfClaimResponse]: ...
+    async def compare_udf_candidate(self, udf_id: str, *, namespace: str | None = None, max_rows: int | None = None, sample: int | None = None, with_perf: bool = False) -> UdfCandidateComparison | LayerResponse[UdfCandidateComparison]: ...
     async def complete_udf_items(self, udf_id: str, body: UdfCompleteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]: ...
     async def copy_namespace(self, namespace: str, body: TurbopufferCopyFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
     async def create_checkpoint(self, namespace: str, body: CreateCheckpointRequest | dict[str, Any], *, with_perf: bool = False) -> Checkpoint | LayerResponse[Checkpoint]: ...
@@ -63,11 +64,13 @@ class HevlayerProtocol(Protocol):
     async def create_scan(self, namespace: str, body: CreateScanRequest | dict[str, Any], *, with_perf: bool = False) -> ScanCountResponse | ScanJob | LayerResponse[ScanCountResponse | ScanJob]: ...
     async def create_snapshot(self, namespace: str, body: CreateSnapshotRequest | dict[str, Any], *, with_perf: bool = False) -> SnapshotJob | LayerResponse[SnapshotJob]: ...
     async def create_udf(self, body: CreateUdfRequest | dict[str, Any], *, with_perf: bool = False) -> Udf | LayerResponse[Udf]: ...
+    async def create_udf_candidate(self, udf_id: str, body: UdfCandidateRequest | dict[str, Any], *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]: ...
     async def delete_key(self, keyId: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def delete_namespace(self, namespace: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def delete_pipeline(self, pipeline_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def delete_scan(self, namespace: str, scan_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def delete_udf(self, udf_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
+    async def discard_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def discover_udf(self, udf_id: str, body: UdfDiscoverRequest | dict[str, Any], *, with_perf: bool = False) -> UdfDiscoverResponse | LayerResponse[UdfDiscoverResponse]: ...
     async def evaluate_turbopuffer_recall(self, namespace: str, body: TurbopufferRecallRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferRecallResponse | LayerResponse[TurbopufferRecallResponse]: ...
     async def explain_turbopuffer_query(self, namespace: str, body: TurbopufferQueryRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferExplainQueryResponse | LayerResponse[TurbopufferExplainQueryResponse]: ...
@@ -83,7 +86,7 @@ class HevlayerProtocol(Protocol):
     async def get_license(self, *, with_perf: bool = False) -> LicenseState | LayerResponse[LicenseState]: ...
     async def get_metric_catalog_entry(self, name: str, *, with_perf: bool = False) -> MetricCatalogEntry | LayerResponse[MetricCatalogEntry]: ...
     async def get_namespace_capabilities(self, namespace: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]: ...
-    async def get_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
+    async def get_namespace_metadata(self, namespace: str, *, field_stats: bool | None = None, field_stats_top: int | None = None, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
     async def get_namespace_snapshot(self, namespace: str, sha: str, *, with_perf: bool = False) -> SnapshotBody | LayerResponse[SnapshotBody]: ...
     async def get_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, *, with_perf: bool = False) -> GetChunksResponse | LayerResponse[GetChunksResponse]: ...
     async def get_pipeline_status(self, pipeline_id: str, *, with_perf: bool = False) -> PipelineStatus | LayerResponse[PipelineStatus]: ...
@@ -94,6 +97,7 @@ class HevlayerProtocol(Protocol):
     async def get_turbopuffer_namespace_schema(self, namespace: str, *, with_perf: bool = False) -> TurbopufferSchema | LayerResponse[TurbopufferSchema]: ...
     async def get_turbopuffer_v1_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
     async def get_udf(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]: ...
+    async def get_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]: ...
     async def get_udf_status(self, udf_id: str, *, with_perf: bool = False) -> UdfStatus | LayerResponse[UdfStatus]: ...
     async def get_vectorstore(self, name: str, *, with_perf: bool = False) -> VectorStore | LayerResponse[VectorStore]: ...
     async def get_vector_store_capabilities(self, name: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]: ...
@@ -120,10 +124,13 @@ class HevlayerProtocol(Protocol):
     async def list_vectorstores(self, *, with_perf: bool = False) -> VectorStoreList | LayerResponse[VectorStoreList]: ...
     async def list_warehouses(self, *, with_perf: bool = False) -> WarehouseList | LayerResponse[WarehouseList]: ...
     async def list_warm_jobs(self, namespace: str, *, with_perf: bool = False) -> WarmJobList | LayerResponse[WarmJobList]: ...
+    async def lookup_udf_siblings(self, udf_id: str, body: UdfLookupRequest | dict[str, Any], *, with_perf: bool = False) -> UdfLookupResponse | LayerResponse[UdfLookupResponse]: ...
     async def mint_key(self, body: MintKeyRequest | dict[str, Any], *, with_perf: bool = False) -> MintKeyResponse | LayerResponse[MintKeyResponse]: ...
     async def pause_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]: ...
+    async def promote_udf_candidate(self, udf_id: str, body: UdfCandidatePromoteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfCandidatePromoteResponse | LayerResponse[UdfCandidatePromoteResponse]: ...
     async def put_blob(self, namespace: str, body: bytes, *, warm: bool | None = None, with_perf: bool = False) -> BlobPutResponse | LayerResponse[BlobPutResponse]: ...
     async def put_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, body: PutChunksRequest | dict[str, Any], *, with_perf: bool = False) -> StageDocumentResponse | LayerResponse[StageDocumentResponse]: ...
+    async def put_pipeline_document_rows(self, pipeline_id: str, doc_id: str, body: PutPipelineRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
     async def put_pipeline_document_vectors(self, pipeline_id: str, doc_id: str, body: PutVectorsRequest | dict[str, Any], *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
     async def put_snapshot_policy(self, namespace: str, body: SnapshotPolicy | dict[str, Any], *, with_perf: bool = False) -> SnapshotPolicy | LayerResponse[SnapshotPolicy]: ...
     async def query(self, body: FederatedQueryRequest | dict[str, Any], *, with_perf: bool = False) -> FederatedQueryResponse | LayerResponse[FederatedQueryResponse]: ...
@@ -137,6 +144,7 @@ class HevlayerProtocol(Protocol):
     async def reset_failed_udf(self, udf_id: str, *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]: ...
     async def resume_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]: ...
     async def revoke_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]: ...
+    async def search_namespace(self, namespace: str, body: SearchRequest | dict[str, Any], *, with_perf: bool = False) -> SearchResponse | LayerResponse[SearchResponse]: ...
     async def set_documents_stage(self, pipeline_id: str, body: SetDocumentsStageRequest | dict[str, Any], *, with_perf: bool = False) -> DocumentsStageResponse | LayerResponse[DocumentsStageResponse]: ...
     async def update_turbopuffer_namespace_metadata(self, namespace: str, body: TurbopufferMetadataPatch | dict[str, Any], *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
     async def update_turbopuffer_namespace_schema(self, namespace: str, body: TurbopufferSchema | dict[str, Any], *, with_perf: bool = False) -> TurbopufferSchema | LayerResponse[TurbopufferSchema]: ...
@@ -232,6 +240,15 @@ class AsyncHevlayer:
         )
 
 
+    async def compare_udf_candidate(self, udf_id: str, *, namespace: str | None = None, max_rows: int | None = None, sample: int | None = None, with_perf: bool = False) -> UdfCandidateComparison | LayerResponse[UdfCandidateComparison]:
+        return await self._request_json(
+            "GET",
+            f"/v2/udfs/{udf_id}/candidate/compare",
+            params={"namespace": namespace, "max_rows": max_rows, "sample": sample}, result_type=UdfCandidateComparison,
+            with_perf=with_perf,
+        )
+
+
     async def complete_udf_items(self, udf_id: str, body: UdfCompleteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]:
         return await self._request_json(
             "POST",
@@ -295,6 +312,15 @@ class AsyncHevlayer:
         )
 
 
+    async def create_udf_candidate(self, udf_id: str, body: UdfCandidateRequest | dict[str, Any], *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/udfs/{udf_id}/candidate",
+            json=body, result_type=GetUdfResponse,
+            with_perf=with_perf,
+        )
+
+
     async def delete_key(self, keyId: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
@@ -335,6 +361,15 @@ class AsyncHevlayer:
         return await self._request_json(
             "DELETE",
             f"/v2/udfs/{udf_id}",
+            result_type=StatusResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def discard_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
+        return await self._request_json(
+            "DELETE",
+            f"/v2/udfs/{udf_id}/candidate",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -474,11 +509,11 @@ class AsyncHevlayer:
         )
 
 
-    async def get_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
+    async def get_namespace_metadata(self, namespace: str, *, field_stats: bool | None = None, field_stats_top: int | None = None, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
         return await self._request_json(
             "GET",
             f"/v2/namespaces/{namespace}/metadata",
-            result_type=NamespaceMetadata,
+            params={"field_stats": field_stats, "field_stats_top": field_stats_top}, result_type=NamespaceMetadata,
             with_perf=with_perf,
         )
 
@@ -568,6 +603,15 @@ class AsyncHevlayer:
         return await self._request_json(
             "GET",
             f"/v2/udfs/{udf_id}",
+            result_type=GetUdfResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def get_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]:
+        return await self._request_json(
+            "GET",
+            f"/v2/udfs/{udf_id}/candidate",
             result_type=GetUdfResponse,
             with_perf=with_perf,
         )
@@ -807,6 +851,15 @@ class AsyncHevlayer:
         )
 
 
+    async def lookup_udf_siblings(self, udf_id: str, body: UdfLookupRequest | dict[str, Any], *, with_perf: bool = False) -> UdfLookupResponse | LayerResponse[UdfLookupResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/udfs/{udf_id}/items/lookup",
+            json=body, result_type=UdfLookupResponse,
+            with_perf=with_perf,
+        )
+
+
     async def mint_key(self, body: MintKeyRequest | dict[str, Any], *, with_perf: bool = False) -> MintKeyResponse | LayerResponse[MintKeyResponse]:
         return await self._request_json(
             "POST",
@@ -825,6 +878,15 @@ class AsyncHevlayer:
         )
 
 
+    async def promote_udf_candidate(self, udf_id: str, body: UdfCandidatePromoteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfCandidatePromoteResponse | LayerResponse[UdfCandidatePromoteResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/udfs/{udf_id}/candidate/promote",
+            json=body, result_type=UdfCandidatePromoteResponse,
+            with_perf=with_perf,
+        )
+
+
     async def put_blob(self, namespace: str, body: bytes, *, warm: bool | None = None, with_perf: bool = False) -> BlobPutResponse | LayerResponse[BlobPutResponse]:
         return await self._request_json(
             "PUT",
@@ -839,6 +901,15 @@ class AsyncHevlayer:
             "PUT",
             f"/v2/pipelines/{pipeline_id}/documents/{doc_id}",
             json=body, result_type=StageDocumentResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def put_pipeline_document_rows(self, pipeline_id: str, doc_id: str, body: PutPipelineRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
+        return await self._request_json(
+            "PUT",
+            f"/v2/pipelines/{pipeline_id}/documents/{doc_id}/rows",
+            json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
 
@@ -956,6 +1027,15 @@ class AsyncHevlayer:
             "POST",
             f"/v2/keys/{keyId}/revoke",
             result_type=ApiKey,
+            with_perf=with_perf,
+        )
+
+
+    async def search_namespace(self, namespace: str, body: SearchRequest | dict[str, Any], *, with_perf: bool = False) -> SearchResponse | LayerResponse[SearchResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/namespaces/{namespace}/search",
+            json=body, result_type=SearchResponse,
             with_perf=with_perf,
         )
 

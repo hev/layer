@@ -263,9 +263,21 @@ pub async fn scatter_gather_query(
         .into_iter()
         .flatten()
         .collect();
-    rows.sort_by(compare_query_results);
+    if shard_count > 1 {
+        rows.sort_by(compare_query_results);
+    }
     rows.truncate(top_k as usize);
     Ok(rows)
+}
+
+// Preserve the wire type: numeric-looking string ids still sort lexically.
+fn compare_result_ids(a: &QueryResult, b: &QueryResult) -> Ordering {
+    if a.numeric_id && b.numeric_id {
+        if let (Ok(a), Ok(b)) = (a.id.parse::<u64>(), b.id.parse::<u64>()) {
+            return a.cmp(&b);
+        }
+    }
+    a.id.cmp(&b.id)
 }
 
 fn compare_query_results(a: &QueryResult, b: &QueryResult) -> Ordering {
@@ -273,16 +285,39 @@ fn compare_query_results(a: &QueryResult, b: &QueryResult) -> Ordering {
         (Some(a_dist), Some(b_dist)) => a_dist
             .partial_cmp(&b_dist)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| a.id.cmp(&b.id)),
+            .then_with(|| compare_result_ids(a, b)),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.id.cmp(&b.id),
+        (None, None) => compare_result_ids(a, b),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ann_merge_orders_distance_then_wire_typed_id() {
+        for (numeric_id, expected) in [
+            (true, vec!["first", "2", "9", "10"]),
+            (false, vec!["first", "10", "2", "9"]),
+        ] {
+            let mut rows: Vec<QueryResult> = ["10", "2", "9", "first"]
+                .into_iter()
+                .map(|id| QueryResult {
+                    id: id.into(),
+                    numeric_id: numeric_id && id != "first",
+                    dist: Some(if id == "first" { 0.1 } else { 0.5 }),
+                    attributes: Default::default(),
+                })
+                .collect();
+            rows.sort_by(compare_query_results);
+            assert_eq!(
+                rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn shard_hash_is_stable() {

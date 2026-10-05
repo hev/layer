@@ -37,6 +37,7 @@ console.log(response.data.rows);
 - `branchNamespace`
 - `claimDocuments`
 - `claimUdfItems`
+- `compareUdfCandidate`
 - `completeUdfItems`
 - `copyNamespace`
 - `createCheckpoint`
@@ -44,11 +45,13 @@ console.log(response.data.rows);
 - `createScan`
 - `createSnapshot`
 - `createUdf`
+- `createUdfCandidate`
 - `deleteKey`
 - `deleteNamespace`
 - `deletePipeline`
 - `deleteScan`
 - `deleteUdf`
+- `discardUdfCandidate`
 - `discoverUdf`
 - `evaluateTurbopufferRecall`
 - `explainTurbopufferQuery`
@@ -75,6 +78,7 @@ console.log(response.data.rows);
 - `getTurbopufferNamespaceSchema`
 - `getTurbopufferV1NamespaceMetadata`
 - `getUdf`
+- `getUdfCandidate`
 - `getUdfStatus`
 - `getVectorstore`
 - `getVectorStoreCapabilities`
@@ -101,10 +105,13 @@ console.log(response.data.rows);
 - `listVectorstores`
 - `listWarehouses`
 - `listWarmJobs`
+- `lookupUdfSiblings`
 - `mintKey`
 - `pauseUdf`
+- `promoteUdfCandidate`
 - `putBlob`
 - `putPipelineDocumentChunks`
+- `putPipelineDocumentRows`
 - `putPipelineDocumentVectors`
 - `putSnapshotPolicy`
 - `query`
@@ -118,6 +125,7 @@ console.log(response.data.rows);
 - `resetFailedUdf`
 - `resumeUdf`
 - `revokeKey`
+- `searchNamespace`
 - `setDocumentsStage`
 - `updateTurbopufferNamespaceMetadata`
 - `updateTurbopufferNamespaceSchema`

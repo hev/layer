@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,9 +16,7 @@ use crate::history::{
     TRACEPARENT_HEADER,
 };
 use crate::metrics::{DIRECT_PIPELINE_ID, STATUS_OK, STATUS_TPUF_ERROR};
-use crate::models::{
-    IncludeAttributes, QueryCursor, QueryRequest, QueryResult, SearchHistoryEntry,
-};
+use crate::models::{IncludeAttributes, QueryRequest, QueryResult, SearchHistoryEntry};
 use crate::shards::{active_shard_count, scatter_gather_query};
 
 use crate::AppState;
@@ -84,6 +81,21 @@ pub async fn query(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     Json(mut body): Json<Value>,
+) -> Result<Response, AppError> {
+    if let Some(spec) = crate::routes::collapse::extract(&mut body)? {
+        return crate::routes::collapse::run(state, namespace, uri, headers, body, spec).await;
+    }
+    query_ungrouped(state, namespace, uri, headers, body).await
+}
+
+/// The query path without `collapse`. Collapse reaches it with the widened
+/// `top_k` and groups what comes back.
+pub(crate) async fn query_ungrouped(
+    state: Arc<AppState>,
+    namespace: String,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    mut body: Value,
 ) -> Result<Response, AppError> {
     if state.turbopuffer().requires_native_wire(&namespace)
         && !matches!(
@@ -232,6 +244,22 @@ pub(crate) async fn query_prepared(
                     .to_string(),
             )
         })?;
+        if native_metadata_order(&body) {
+            let response = state
+                .turbopuffer()
+                .passthrough("POST", &path, query.as_deref(), Some(body))
+                .await
+                .map_err(|error| AppError::from_turbopuffer(error, "Turbopuffer query failed"))?;
+            // Preserve ranked-query errors: origin 4xx/body/content type stay
+            // intact, origin 5xx and transport errors remain gateway 502.
+            if !(200..300).contains(&response.status) {
+                return Err(AppError::from_turbopuffer(
+                    TurbopufferError::Response(response),
+                    "Turbopuffer query failed",
+                ));
+            }
+            return crate::routes::turbopuffer::passthrough_response(response);
+        }
         return crate::routes::turbopuffer::passthrough(
             state,
             "POST",
@@ -372,19 +400,14 @@ pub(crate) async fn run_query_leg(
     let warn_vector_dropped =
         include_attributes_requests_vector(request.include_attributes.as_ref());
 
-    let cursor = match request.cursor.as_deref() {
-        Some(_) if !config.allow_cursor => {
-            return Err(AppError::Validation(
-                "multi-query legs must not include cursor; pagination is single-query only"
-                    .to_string(),
-            ));
-        }
-        Some(s) => Some(QueryCursor::decode(s).map_err(AppError::Validation)?),
-        None => None,
-    };
-    let cursor_filter = cursor.as_ref().map(cursor_band_filter);
-
-    let base_filter = combine_optional(request.filters.as_ref(), cursor_filter.as_ref());
+    if request.cursor.is_some() {
+        return Err(AppError::Validation(if config.allow_cursor {
+            "query cursor pagination is unavailable: the origin cannot filter on $dist".to_string()
+        } else {
+            "multi-query legs must not include cursor; pagination is single-query only".to_string()
+        }));
+    }
+    let base_filter = request.filters.clone();
     let first_filter = compose_read_filter(
         base_filter.as_ref(),
         config.temporal_filter.as_ref(),
@@ -483,25 +506,16 @@ pub(crate) async fn run_query_leg(
     );
 
     let mut results = results;
-    results.sort_by(compare_query_results);
+    // The origin owns rank_by ordering, including ties. Shard fan-out merges
+    // its ANN results before returning here; there is no cache/origin row mix.
     let top_k = request.top_k as usize;
     if results.len() > top_k {
         results.truncate(top_k);
     }
 
-    let next_cursor = if config.allow_cursor && results.len() == top_k {
-        results
-            .last()
-            .and_then(|r| {
-                r.dist.map(|d| QueryCursor {
-                    dist: d,
-                    id: r.id.clone(),
-                })
-            })
-            .map(|c| c.encode())
-    } else {
-        None
-    };
+    // The old $dist/id band cannot be applied by Turbopuffer, even for ANN.
+    // Do not advertise a continuation that the origin cannot execute.
+    let next_cursor = None;
 
     Ok(QueryLegOutput {
         request,
@@ -678,11 +692,31 @@ fn centroid(vectors: &[Vec<f64>]) -> Result<Vec<f64>, AppError> {
     Ok(sum)
 }
 
+fn native_metadata_order(body: &Value) -> bool {
+    let Some(obj) = body.as_object() else {
+        return false;
+    };
+    // Metadata ordering is native wire, even with top_k. Routing it through
+    // QueryRequest drops the caller's consistency and can inject a watermark,
+    // while Count already passes through. A census must use the same contract.
+    obj.get("rank_by")
+        .and_then(Value::as_array)
+        .is_some_and(|rank| {
+            rank.len() == 2
+                && rank[0].is_string()
+                && matches!(rank[1].as_str(), Some("asc" | "desc"))
+        })
+        && !["as_of", "between", "cursor", "vector", "nearest_to_id"]
+            .iter()
+            .any(|field| obj.contains_key(*field))
+}
+
 fn should_passthrough_query(body: &Value) -> bool {
     let Some(obj) = body.as_object() else {
         return false;
     };
-    (obj.contains_key("rank_by") && !obj.contains_key("top_k"))
+    native_metadata_order(body)
+        || (obj.contains_key("rank_by") && !obj.contains_key("top_k"))
         || obj.contains_key("queries")
         || obj.contains_key("aggregate_by")
         || obj.contains_key("group_by")
@@ -765,24 +799,7 @@ fn search_history_query_summary(request: &QueryRequest) -> Value {
     })
 }
 
-/// Score-band filter for the next page. Strict `$dist > last_dist` with an
-/// `id > last_id` tiebreaker, so ties on dist at the boundary don't cause
-/// double-counting or dropped results.
-fn cursor_band_filter(cursor: &QueryCursor) -> Value {
-    json!([
-        "Or",
-        [
-            ["$dist", "Gt", cursor.dist],
-            [
-                "And",
-                [["$dist", "Eq", cursor.dist], ["id", "Gt", &cursor.id]]
-            ]
-        ]
-    ])
-}
-
-/// AND two optional filters into one. Used to fold the cursor band into the
-/// caller's filter without rebuilding the watermark composition.
+/// AND two optional filters into one.
 pub(crate) fn combine_optional(a: Option<&Value>, b: Option<&Value>) -> Option<Value> {
     match (a, b) {
         (Some(a), Some(b)) => Some(json!(["And", [a.clone(), b.clone()]])),
@@ -858,21 +875,6 @@ pub(crate) fn compose_read_filter(
     combined_filter(scoped.as_ref(), watermark)
 }
 
-/// Same ordering the scatter/gather path uses (`shards::compare_query_results`):
-/// dist ascending with `id` as a stable tiebreaker. Applied in the single-shot
-/// path so cursor pagination sees consistent ordering across shard counts.
-pub(crate) fn compare_query_results(a: &QueryResult, b: &QueryResult) -> Ordering {
-    match (a.dist, b.dist) {
-        (Some(ad), Some(bd)) => ad
-            .partial_cmp(&bd)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.id.cmp(&b.id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.id.cmp(&b.id),
-    }
-}
-
 /// Combine the caller's filter with the consistency watermark filter.
 ///
 /// Shape matches `scan_page`'s cursor combiner: a 2-element `And` whose second
@@ -890,6 +892,29 @@ pub(crate) fn combined_filter(user: Option<&Value>, watermark: Option<u64>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_order_passthrough_keeps_layer_temporal_requests_typed() {
+        for direction in ["asc", "desc"] {
+            let native = json!({"rank_by": ["id", direction], "top_k": 1000,
+                                "consistency": {"level": "strong"}});
+            assert!(should_passthrough_query(&native));
+            for (field, value) in [
+                ("as_of", json!(123)),
+                ("between", json!([1, 123])),
+                ("cursor", json!("old-cursor")),
+                ("vector", json!([1.0])),
+                ("nearest_to_id", json!(["a"])),
+            ] {
+                let mut layered = native.clone();
+                layered[field] = value;
+                assert!(!should_passthrough_query(&layered));
+            }
+        }
+        assert!(!should_passthrough_query(
+            &json!({"rank_by": ["vector", "ANN", [1.0]], "top_k": 10})
+        ));
+    }
 
     #[test]
     fn no_filter_no_watermark_yields_none() {
@@ -968,24 +993,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_band_is_strict_gt_with_id_tiebreak() {
-        let cursor = QueryCursor {
-            dist: 0.42,
-            id: "doc-123".to_string(),
-        };
-        assert_eq!(
-            cursor_band_filter(&cursor),
-            json!([
-                "Or",
-                [
-                    ["$dist", "Gt", 0.42],
-                    ["And", [["$dist", "Eq", 0.42], ["id", "Gt", "doc-123"]]]
-                ]
-            ])
-        );
-    }
-
-    #[test]
     fn combine_optional_ands_when_both_present() {
         let a = json!(["color", "Eq", "red"]);
         let b = json!(["$dist", "Gt", 0.5]);
@@ -1001,60 +1008,6 @@ mod tests {
         assert_eq!(combine_optional(Some(&a), None).unwrap(), a);
         assert_eq!(combine_optional(None, Some(&a)).unwrap(), a);
         assert!(combine_optional(None, None).is_none());
-    }
-
-    #[test]
-    fn cursor_round_trip_preserves_dist_and_id() {
-        let cursor = QueryCursor {
-            dist: 0.1234,
-            id: "doc-with/slashes+and=stuff".to_string(),
-        };
-        let encoded = cursor.encode();
-        let decoded = QueryCursor::decode(&encoded).unwrap();
-        assert_eq!(decoded, cursor);
-    }
-
-    #[test]
-    fn cursor_decode_rejects_garbage() {
-        assert!(QueryCursor::decode("not-base64!@#").is_err());
-        assert!(QueryCursor::decode("YQ").is_err()); // base64 of "a" → not valid JSON
-    }
-
-    #[test]
-    fn cursor_decode_rejects_missing_dist() {
-        // Well-formed base64 + JSON but `dist` is null → serde rejects it
-        // because the field is typed `f64`.
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-        use base64::Engine;
-        let encoded = B64.encode(b"{\"dist\": null, \"id\": \"x\"}");
-        assert!(QueryCursor::decode(&encoded).is_err());
-    }
-
-    #[test]
-    fn comparator_sorts_by_dist_then_id() {
-        let mut rows = [
-            QueryResult {
-                id: "b".into(),
-                numeric_id: false,
-                dist: Some(0.5),
-                attributes: Default::default(),
-            },
-            QueryResult {
-                id: "a".into(),
-                numeric_id: false,
-                dist: Some(0.5),
-                attributes: Default::default(),
-            },
-            QueryResult {
-                id: "c".into(),
-                numeric_id: false,
-                dist: Some(0.1),
-                attributes: Default::default(),
-            },
-        ];
-        rows.sort_by(compare_query_results);
-        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["c", "a", "b"]);
     }
 
     #[test]

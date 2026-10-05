@@ -22,7 +22,7 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
     match feature {
         NamespaceCrud | UpsertRows | UpsertColumns | DeleteIds | Fetch | Dense | DistanceMetric
         | Fts | Projection | ScalarFilters | NotFilters | ArrayFilters | OrderedScan
-        | PatchRows | PatchColumns | DeleteByFilter | ConditionalWrites => Coverage::supported(),
+        | PatchRows | PatchColumns | DeleteByFilter | ConditionalWrites | Collapse => Coverage::supported(),
         // Mirrors the phase-one gate in the gateway's run_hybrid_text.
         Hybrid => Coverage::approximate(HYBRID_TEXT_FUZZINESS_ZERO_ONLY),
         MultipleFields => Coverage::approximate(MULTIPLE_TEXT_FIELDS_ONE_VECTOR),
@@ -31,12 +31,15 @@ fn pgvector_coverage(feature: crate::capabilities::WireFeature) -> crate::capabi
             Coverage::unsupported_because(crate::capabilities::MULTI_QUERY_USE_HYBRID_TEXT)
         }
         Branch => Coverage::unsupported_because(crate::capabilities::NO_NATIVE_BRANCH),
+        Search => Coverage::approximate(
+            "BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).",
+        ),
         _ => Coverage::unsupported(),
     }
 }
 
 /// RFC 0118 step C: the gateway embeds for Postgres, which cannot.
-pub const GATEWAY_EMBED_ONE_ATTRIBUTE: &str = "Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding returns 422.";
+pub const GATEWAY_EMBED_ONE_ATTRIBUTE: &str = "Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding requires explicit turbopuffer serving (autoscaler alias).";
 
 /// HybridText on phase one: BM25 + dense legs with gateway RRF, nothing else.
 pub const HYBRID_TEXT_FUZZINESS_ZERO_ONLY: &str = "HybridText with fuzziness: 0 only (BM25 + dense legs, gateway RRF); auto/1/2 fuzziness and cursor/temporal_filter return 422";

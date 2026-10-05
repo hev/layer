@@ -14,6 +14,12 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export interface CompareUdfCandidateOptions extends RequestOptions {
+  namespace_?: string;
+  maxRows?: number;
+  sample?: number;
+}
+
 export interface FetchDocumentOptions extends RequestOptions {
   includeAttributes?: string[];
 }
@@ -25,6 +31,11 @@ export interface GetCostSnapshotOptions extends RequestOptions {
 export interface GetCostTimeseriesOptions extends RequestOptions {
   window?: Models.CostWindow;
   step?: Models.CostStep;
+}
+
+export interface GetNamespaceMetadataOptions extends RequestOptions {
+  fieldStats?: boolean;
+  fieldStatsTop?: number;
 }
 
 export interface GetScanResultsOptions extends RequestOptions {
@@ -285,6 +296,23 @@ export class Hevlayer {
   }
 
 
+  async compareUdfCandidate(udfId: string, opts?: CompareUdfCandidateOptions & { withPerf?: false }): Promise<Models.UdfCandidateComparison>;
+  async compareUdfCandidate(udfId: string, opts: CompareUdfCandidateOptions & { withPerf: true }): Promise<LayerResponse<Models.UdfCandidateComparison>>;
+  async compareUdfCandidate(udfId: string, opts: CompareUdfCandidateOptions = {}): Promise<Models.UdfCandidateComparison | LayerResponse<Models.UdfCandidateComparison>> {
+    return this.requestJson<Models.UdfCandidateComparison>({
+      method: "GET",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/candidate/compare",
+      params: [
+        { key: "namespace", value: opts.namespace_ },
+        { key: "max_rows", value: opts.maxRows },
+        { key: "sample", value: opts.sample }
+      ],
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.UdfCandidateComparison | LayerResponse<Models.UdfCandidateComparison>>;
+  }
+
+
   async completeUdfItems(udfId: string, body: Models.UdfCompleteRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.UdfItemsResponse>;
   async completeUdfItems(udfId: string, body: Models.UdfCompleteRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.UdfItemsResponse>>;
   async completeUdfItems(udfId: string, body: Models.UdfCompleteRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.UdfItemsResponse | LayerResponse<Models.UdfItemsResponse>> {
@@ -385,6 +413,20 @@ export class Hevlayer {
   }
 
 
+  async createUdfCandidate(udfId: string, body: Models.UdfCandidateRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.GetUdfResponse>;
+  async createUdfCandidate(udfId: string, body: Models.UdfCandidateRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.GetUdfResponse>>;
+  async createUdfCandidate(udfId: string, body: Models.UdfCandidateRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.GetUdfResponse | LayerResponse<Models.GetUdfResponse>> {
+    return this.requestJson<Models.GetUdfResponse>({
+      method: "POST",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/candidate",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.GetUdfResponse | LayerResponse<Models.GetUdfResponse>>;
+  }
+
+
   async deleteKey(keyId: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.StatusResponse>;
   async deleteKey(keyId: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.StatusResponse>>;
   async deleteKey(keyId: string, opts: RequestOptions = {}): Promise<Models.StatusResponse | LayerResponse<Models.StatusResponse>> {
@@ -443,6 +485,19 @@ export class Hevlayer {
     return this.requestJson<Models.StatusResponse>({
       method: "DELETE",
       path: "/v2/udfs/" + encodeURIComponent(String(udfId)),
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.StatusResponse | LayerResponse<Models.StatusResponse>>;
+  }
+
+
+  async discardUdfCandidate(udfId: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.StatusResponse>;
+  async discardUdfCandidate(udfId: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.StatusResponse>>;
+  async discardUdfCandidate(udfId: string, opts: RequestOptions = {}): Promise<Models.StatusResponse | LayerResponse<Models.StatusResponse>> {
+    return this.requestJson<Models.StatusResponse>({
+      method: "DELETE",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/candidate",
       params: undefined,
       withPerf: opts.withPerf === true,
       signal: opts.signal,
@@ -657,13 +712,16 @@ export class Hevlayer {
   }
 
 
-  async getNamespaceMetadata(namespace_: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.NamespaceMetadata>;
-  async getNamespaceMetadata(namespace_: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.NamespaceMetadata>>;
-  async getNamespaceMetadata(namespace_: string, opts: RequestOptions = {}): Promise<Models.NamespaceMetadata | LayerResponse<Models.NamespaceMetadata>> {
+  async getNamespaceMetadata(namespace_: string, opts?: GetNamespaceMetadataOptions & { withPerf?: false }): Promise<Models.NamespaceMetadata>;
+  async getNamespaceMetadata(namespace_: string, opts: GetNamespaceMetadataOptions & { withPerf: true }): Promise<LayerResponse<Models.NamespaceMetadata>>;
+  async getNamespaceMetadata(namespace_: string, opts: GetNamespaceMetadataOptions = {}): Promise<Models.NamespaceMetadata | LayerResponse<Models.NamespaceMetadata>> {
     return this.requestJson<Models.NamespaceMetadata>({
       method: "GET",
       path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/metadata",
-      params: undefined,
+      params: [
+        { key: "field_stats", value: opts.fieldStats },
+        { key: "field_stats_top", value: opts.fieldStatsTop }
+      ],
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.NamespaceMetadata | LayerResponse<Models.NamespaceMetadata>>;
@@ -796,6 +854,19 @@ export class Hevlayer {
     return this.requestJson<Models.GetUdfResponse>({
       method: "GET",
       path: "/v2/udfs/" + encodeURIComponent(String(udfId)),
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.GetUdfResponse | LayerResponse<Models.GetUdfResponse>>;
+  }
+
+
+  async getUdfCandidate(udfId: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.GetUdfResponse>;
+  async getUdfCandidate(udfId: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.GetUdfResponse>>;
+  async getUdfCandidate(udfId: string, opts: RequestOptions = {}): Promise<Models.GetUdfResponse | LayerResponse<Models.GetUdfResponse>> {
+    return this.requestJson<Models.GetUdfResponse>({
+      method: "GET",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/candidate",
       params: undefined,
       withPerf: opts.withPerf === true,
       signal: opts.signal,
@@ -1189,6 +1260,20 @@ export class Hevlayer {
   }
 
 
+  async lookupUdfSiblings(udfId: string, body: Models.UdfLookupRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.UdfLookupResponse>;
+  async lookupUdfSiblings(udfId: string, body: Models.UdfLookupRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.UdfLookupResponse>>;
+  async lookupUdfSiblings(udfId: string, body: Models.UdfLookupRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.UdfLookupResponse | LayerResponse<Models.UdfLookupResponse>> {
+    return this.requestJson<Models.UdfLookupResponse>({
+      method: "POST",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/items/lookup",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.UdfLookupResponse | LayerResponse<Models.UdfLookupResponse>>;
+  }
+
+
   async mintKey(body: Models.MintKeyRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.MintKeyResponse>;
   async mintKey(body: Models.MintKeyRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.MintKeyResponse>>;
   async mintKey(body: Models.MintKeyRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.MintKeyResponse | LayerResponse<Models.MintKeyResponse>> {
@@ -1213,6 +1298,20 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.Udf | LayerResponse<Models.Udf>>;
+  }
+
+
+  async promoteUdfCandidate(udfId: string, body: Models.UdfCandidatePromoteRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.UdfCandidatePromoteResponse>;
+  async promoteUdfCandidate(udfId: string, body: Models.UdfCandidatePromoteRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.UdfCandidatePromoteResponse>>;
+  async promoteUdfCandidate(udfId: string, body: Models.UdfCandidatePromoteRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.UdfCandidatePromoteResponse | LayerResponse<Models.UdfCandidatePromoteResponse>> {
+    return this.requestJson<Models.UdfCandidatePromoteResponse>({
+      method: "POST",
+      path: "/v2/udfs/" + encodeURIComponent(String(udfId)) + "/candidate/promote",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.UdfCandidatePromoteResponse | LayerResponse<Models.UdfCandidatePromoteResponse>>;
   }
 
 
@@ -1244,6 +1343,20 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.StageDocumentResponse | LayerResponse<Models.StageDocumentResponse>>;
+  }
+
+
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.TurbopufferWriteResponse>;
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.TurbopufferWriteResponse>>;
+  async putPipelineDocumentRows(pipelineId: string, docId: string, body: Models.PutPipelineRowsRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>> {
+    return this.requestJson<Models.TurbopufferWriteResponse>({
+      method: "PUT",
+      path: "/v2/pipelines/" + encodeURIComponent(String(pipelineId)) + "/documents/" + encodeURIComponent(String(docId)) + "/rows",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>>;
   }
 
 
@@ -1440,6 +1553,20 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.ApiKey | LayerResponse<Models.ApiKey>>;
+  }
+
+
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.SearchResponse>;
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.SearchResponse>>;
+  async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.SearchResponse | LayerResponse<Models.SearchResponse>> {
+    return this.requestJson<Models.SearchResponse>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/search",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.SearchResponse | LayerResponse<Models.SearchResponse>>;
   }
 
 

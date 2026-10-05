@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::auth::CallerGrant;
 use crate::clients::turbopuffer::{
-    PatchDoc, TurbopufferPassthroughResponse, UpsertDoc, UPSERTED_AT_ATTR,
+    PatchDoc, TurbopufferPassthroughResponse, UpsertDoc, UPSERTED_AT_ATTR, WRITE_REVISION_ATTR,
 };
 use crate::consistency::now_ms;
 use crate::error::AppError;
@@ -87,6 +87,31 @@ struct AffectedIds {
     deleted: HashSet<String>,
 }
 
+fn named_write_ids(body: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in ["upsert_rows", "patch_rows"] {
+        if let Some(rows) = body.get(key).and_then(Value::as_array) {
+            ids.extend(
+                rows.iter()
+                    .filter_map(|row| row.get("id").and_then(Value::as_str))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    for key in ["upsert_columns", "patch_columns"] {
+        if let Some(values) = body
+            .get(key)
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_array)
+        {
+            ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// POST /v2/namespaces/{namespace}
 ///
 /// Native Turbopuffer write bodies are the only public write surface. The
@@ -97,7 +122,20 @@ pub async fn upsert_or_delete(
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
     grant: Option<Extension<CallerGrant>>,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
+) -> Result<Response, AppError> {
+    write_namespace(state, namespace, uri, grant, body, false).await
+}
+
+/// Pipeline rows are already staged by the gateway and may carry parent metadata.
+/// Only internal callers can enable this; the public route always passes false.
+pub(crate) async fn write_namespace(
+    state: Arc<AppState>,
+    namespace: String,
+    uri: axum::http::Uri,
+    grant: Option<Extension<CallerGrant>>,
+    mut body: Value,
+    staged_rows: bool,
 ) -> Result<Response, AppError> {
     // Branch and copy bodies are classified before anything can rewrite
     // them, and forwarded byte-for-byte on their own path (RFC 0124).
@@ -112,149 +150,281 @@ pub async fn upsert_or_delete(
         )
         .await;
     }
-    if state.turbopuffer().requires_native_wire(&namespace) {
-        // RFC 0118: the gateway serves schema `embed` for a store that cannot
-        // embed. Vectors are computed before the store's transaction, so a
-        // provider failure writes nothing; the store receives plain vectors.
+    let source_ids = named_write_ids(&body);
+    let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
+        Some(
+            trigger
+                .prepare_write(Arc::clone(&state), &namespace, &source_ids)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let work = crate::run_guarded_write(_function_guard.as_deref(), async {
+        #[cfg(feature = "pro")]
+        let page_patch = staged_rows && body.get("patch_rows").is_some();
+        #[cfg(not(feature = "pro"))]
+        let page_patch = false;
+        #[cfg(feature = "pro")]
+        if page_patch
+            && !crate::routes::pipeline::expand_page_patch(&state, &namespace, &mut body).await?
+        {
+            return Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"rows_affected":0,"rows_patched":0})),
+            )
+                .into_response());
+        }
+
+        if state.turbopuffer().requires_native_wire(&namespace) {
+            // RFC 0118: the gateway serves schema `embed` for a store that cannot
+            // embed. Vectors are computed before the store's transaction, so a
+            // provider failure writes nothing; the store receives plain vectors.
+            let embed = crate::routes::embed_wire::prepare_write(
+                state.as_ref(),
+                &namespace,
+                &mut body,
+                crate::routes::embed_wire::EmbedStore::NativeWire,
+            )
+            .await?;
+            let mut ids = Vec::new();
+            for key in ["upsert_rows", "patch_rows", "deletes"] {
+                if let Some(rows) = body.get(key).and_then(Value::as_array) {
+                    ids.extend(
+                        rows.iter()
+                            .filter_map(|row| {
+                                if key == "deletes" {
+                                    Some(row)
+                                } else {
+                                    row.get("id")
+                                }
+                            })
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+            }
+            for key in ["upsert_columns", "patch_columns"] {
+                if let Some(values) = body
+                    .get(key)
+                    .and_then(|c| c.get("id"))
+                    .and_then(Value::as_array)
+                {
+                    ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+                }
+            }
+            // A filtered write touches rows the gateway cannot name.
+            let filtered = ["delete_by_filter", "patch_by_filter"]
+                .iter()
+                .any(|key| body.get(*key).is_some_and(|v| !v.is_null()));
+            let response = crate::routes::turbopuffer::passthrough(
+                Arc::clone(&state),
+                "POST",
+                uri.path(),
+                uri.query(),
+                Some(body),
+            )
+            .await?;
+            if response.status().is_success() {
+                crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
+                if state.aerospike_runtime.generation() > 0 {
+                    if filtered {
+                        if let Err(e) = state.aerospike.delete_set(&namespace).await {
+                            warn!(namespace = %namespace, error = %e, "Aerospike namespace cache purge failed after filtered write (best-effort)");
+                        }
+                    } else {
+                        delete_cache_ids(&state, &namespace, &ids).await;
+                    }
+                }
+                state.namespace_list_cache.clear();
+                if let Some(trigger) = state.write_trigger.as_ref() {
+                    let rows = source_ids
+                        .iter()
+                        .map(|id| HashMap::from([("id".into(), Value::String(id.clone()))]))
+                        .collect();
+                    trigger
+                        .enqueue_write_rows(Arc::clone(&state), &namespace, rows, true)
+                        .await?;
+                }
+            }
+            return crate::routes::query::merge_embedding_performance(response, &embed.performance)
+                .await;
+        }
+        crate::routes::collapse::capture_document_schema(state.as_ref(), &namespace, &mut body)
+            .await?;
+        let search_store = state.namespace_uses_search_store(&namespace);
         let embed = crate::routes::embed_wire::prepare_write(
             state.as_ref(),
             &namespace,
             &mut body,
-            crate::routes::embed_wire::EmbedStore::NativeWire,
+            crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
         )
         .await?;
-        let mut ids = Vec::new();
-        for key in ["upsert_rows", "patch_rows", "deletes"] {
-            if let Some(rows) = body.get(key).and_then(Value::as_array) {
-                ids.extend(
-                    rows.iter()
-                        .filter_map(|row| {
-                            if key == "deletes" {
-                                Some(row)
-                            } else {
-                                row.get("id")
-                            }
-                        })
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned),
-                );
-            }
-        }
-        for key in ["upsert_columns", "patch_columns"] {
-            if let Some(values) = body
-                .get(key)
-                .and_then(|c| c.get("id"))
-                .and_then(Value::as_array)
-            {
-                ids.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
-            }
-        }
-        // A filtered write touches rows the gateway cannot name.
-        let filtered = ["delete_by_filter", "patch_by_filter"]
-            .iter()
-            .any(|key| body.get(*key).is_some_and(|v| !v.is_null()));
-        let response = crate::routes::turbopuffer::passthrough(
-            Arc::clone(&state),
-            "POST",
-            uri.path(),
-            uri.query(),
-            Some(body),
-        )
-        .await?;
-        if response.status().is_success() {
-            crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
-            if state.aerospike_runtime.generation() > 0 {
-                if filtered {
-                    if let Err(e) = state.aerospike.delete_set(&namespace).await {
-                        warn!(namespace = %namespace, error = %e, "Aerospike namespace cache purge failed after filtered write (best-effort)");
+        if crate::routes::embed_wire::write_needs_distance_metric(
+            &body,
+            embed.requires_distance_check,
+        ) {
+            let has_existing_embed_schema =
+                match state.turbopuffer().head_namespace(&namespace).await {
+                    Ok(metadata) => {
+                        crate::routes::embed_wire::metadata_has_embed_schema(&metadata.raw)
                     }
-                } else {
-                    delete_cache_ids(&state, &namespace, &ids).await;
-                }
-            }
-            state.namespace_list_cache.clear();
-        }
-        return crate::routes::query::merge_embedding_performance(response, &embed.performance)
-            .await;
-    }
-    let search_store = state.namespace_uses_search_store(&namespace);
-    let embed = crate::routes::embed_wire::prepare_write(
-        state.as_ref(),
-        &namespace,
-        &mut body,
-        crate::routes::embed_wire::EmbedStore::for_namespace(&state, &namespace),
-    )
-    .await?;
-    if crate::routes::embed_wire::write_needs_distance_metric(&body, embed.requires_distance_check)
-    {
-        let has_existing_embed_schema = match state.turbopuffer().head_namespace(&namespace).await {
-            Ok(metadata) => crate::routes::embed_wire::metadata_has_embed_schema(&metadata.raw),
-            Err(error) if error.is_not_found() => false,
-            Err(error) => return Err(AppError::from_turbopuffer(error, "turbopuffer metadata")),
-        };
-        if !has_existing_embed_schema {
-            return Err(AppError::Validation(
+                    Err(error) if error.is_not_found() => false,
+                    Err(error) => {
+                        return Err(AppError::from_turbopuffer(error, "turbopuffer metadata"))
+                    }
+                };
+            if !has_existing_embed_schema {
+                return Err(AppError::Validation(
                 "`distance_metric` is required on the first write to a namespace with an `embed` schema attribute".to_string(),
             ));
+            }
         }
-    }
-    let object_schema_attributes = object_schema_attributes(&body);
-    if !object_schema_attributes.is_empty() && search_store {
-        return Err(unsupported_object_schema_error(
-            "search",
-            &object_schema_attributes,
-        ));
-    }
-    let effective_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
-        .await
-        .map_err(|e| AppError::Upstream(format!("namespace marker read failed: {e}")))?
-        .unwrap_or(state.shard_count);
-    let mut plan = native_write_plan(
-        &mut body,
-        effective_shard_count,
-        embed.generated_chunk_attributes,
-    )?;
-    if !plan.is_managed() {
-        let response = crate::routes::turbopuffer::passthrough(
-            Arc::clone(&state),
-            "POST",
-            uri.path(),
-            uri.query(),
-            Some(body),
-        )
-        .await?;
-        if response.status().is_success() {
-            crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
+        let object_schema_attributes = object_schema_attributes(&body);
+        if !object_schema_attributes.is_empty() && search_store {
+            return Err(unsupported_object_schema_error(
+                "search",
+                &object_schema_attributes,
+            ));
         }
-        return Ok(response);
-    }
+        let effective_shard_count = read_namespace_marker(state.turbopuffer(), &namespace)
+            .await
+            .map_err(|e| AppError::from_turbopuffer(e, "namespace marker read failed"))?
+            .unwrap_or(state.shard_count);
+        let mut plan = if page_patch {
+            native_write_plan_with_trusted_attrs(&mut body, effective_shard_count, true, true)?
+        } else {
+            native_write_plan(
+                &mut body,
+                effective_shard_count,
+                embed.generated_chunk_attributes || staged_rows,
+            )?
+        };
+        if !plan.is_managed() {
+            let response = crate::routes::turbopuffer::passthrough(
+                Arc::clone(&state),
+                "POST",
+                uri.path(),
+                uri.query(),
+                Some(body),
+            )
+            .await?;
+            if response.status().is_success() {
+                crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
+            }
+            return Ok(response);
+        }
 
-    let total_start = Instant::now();
-    let mut tpuf_seconds = 0.0;
-    let metric_batch_size = plan.metric_batch_size();
-    state.observe_cache_demand(&namespace);
+        let total_start = Instant::now();
+        let mut tpuf_seconds = 0.0;
+        let metric_batch_size = plan.metric_batch_size();
+        state.observe_cache_demand(&namespace);
 
-    if plan.response_driven() {
-        force_return_affected_ids(&mut body);
-    } else {
-        apply_prewrite_cache(&state, &namespace, &plan).await;
-    }
+        // Field stats need the old values of the rows this write replaces, and the
+        // document cache is about to be overwritten. Cache only: no store query.
+        #[cfg(feature = "pro")]
+        let field_stats_tracked = crate::field_stats::tracked_fields(&state, &namespace);
+        #[cfg(feature = "pro")]
+        let field_stats_pre = {
+            let ids: Vec<String> = plan
+                .upserts
+                .iter()
+                .map(|u| u.id.clone())
+                .chain(plan.patches.iter().map(|p| p.id.clone()))
+                .chain(plan.deletes.iter().cloned())
+                .collect();
+            crate::field_stats::capture_pre_images(&state, &namespace, &field_stats_tracked, &ids)
+                .await
+        };
+        #[cfg(feature = "pro")]
+        let mut field_stats_filter_removed = 0u64;
 
-    let tpuf_start = Instant::now();
-    let mut upstream = match state
-        .turbopuffer()
-        .passthrough("POST", uri.path(), uri.query(), Some(body))
-        .await
-    {
-        Ok(response) => response,
-        Err(e)
-            if is_unsupported_by_store(&e)
-                && (!plan.response_driven() || plan.portable_without_affected_ids()) =>
+        if plan.response_driven() {
+            force_return_affected_ids(&mut body);
+        } else {
+            apply_prewrite_cache(&state, &namespace, &plan).await;
+        }
+
+        let tpuf_start = Instant::now();
+        let mut upstream = match state
+            .turbopuffer()
+            .passthrough("POST", uri.path(), uri.query(), Some(body))
+            .await
         {
-            match portable_write(&state, &namespace, &plan).await {
+            Ok(response) => response,
+            Err(e)
+                if is_unsupported_by_store(&e)
+                    && (!plan.response_driven() || plan.portable_without_affected_ids()) =>
+            {
+                match portable_write(&state, &namespace, &plan).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
+                        observe_write_metric(
+                            &state,
+                            &namespace,
+                            STATUS_TPUF_ERROR,
+                            total_start.elapsed().as_secs_f64(),
+                            tpuf_seconds,
+                            metric_batch_size,
+                        );
+                        if is_unsupported_by_store(&e) {
+                            return Err(AppError::from_store_support_error(
+                                e,
+                                Some("search".to_string()),
+                                Some("writeNamespace".to_string()),
+                            ));
+                        }
+                        return Err(AppError::Upstream(format!("VectorStore write failed: {e}")));
+                    }
+                }
+            }
+            Err(e) => {
+                tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
+                observe_write_metric(
+                    &state,
+                    &namespace,
+                    STATUS_TPUF_ERROR,
+                    total_start.elapsed().as_secs_f64(),
+                    tpuf_seconds,
+                    metric_batch_size,
+                );
+                return Err(AppError::Upstream(format!(
+                    "Turbopuffer write failed: {}",
+                    e
+                )));
+            }
+        };
+        tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
+
+        let mut status = StatusCode::from_u16(upstream.status)
+            .map_err(|e| AppError::Upstream(format!("invalid Turbopuffer status: {}", e)))?;
+        if !status.is_success()
+            && !object_schema_attributes.is_empty()
+            && upstream_rejected_object_schema(&upstream)
+        {
+            observe_write_metric(
+                &state,
+                &namespace,
+                STATUS_TPUF_ERROR,
+                total_start.elapsed().as_secs_f64(),
+                tpuf_seconds,
+                metric_batch_size,
+            );
+            return Err(unsupported_object_schema_error(
+                "turbopuffer",
+                &object_schema_attributes,
+            ));
+        }
+        if !status.is_success()
+            && (!plan.response_driven() || plan.portable_without_affected_ids())
+            && String::from_utf8_lossy(&upstream.body).contains("UnsupportedByStore")
+        {
+            let portable_start = Instant::now();
+            upstream = match portable_write(&state, &namespace, &plan).await {
                 Ok(response) => response,
                 Err(e) => {
-                    tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
+                    tpuf_seconds += portable_start.elapsed().as_secs_f64();
                     observe_write_metric(
                         &state,
                         &namespace,
@@ -272,10 +442,12 @@ pub async fn upsert_or_delete(
                     }
                     return Err(AppError::Upstream(format!("VectorStore write failed: {e}")));
                 }
-            }
+            };
+            tpuf_seconds += portable_start.elapsed().as_secs_f64();
+            status = StatusCode::from_u16(upstream.status)
+                .map_err(|e| AppError::Upstream(format!("invalid VectorStore status: {}", e)))?;
         }
-        Err(e) => {
-            tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
+        if !status.is_success() {
             observe_write_metric(
                 &state,
                 &namespace,
@@ -284,96 +456,82 @@ pub async fn upsert_or_delete(
                 tpuf_seconds,
                 metric_batch_size,
             );
-            return Err(AppError::Upstream(format!(
-                "Turbopuffer write failed: {}",
-                e
-            )));
+            return passthrough_response(upstream);
         }
-    };
-    tpuf_seconds += tpuf_start.elapsed().as_secs_f64();
 
-    let mut status = StatusCode::from_u16(upstream.status)
-        .map_err(|e| AppError::Upstream(format!("invalid Turbopuffer status: {}", e)))?;
-    if !status.is_success()
-        && !object_schema_attributes.is_empty()
-        && upstream_rejected_object_schema(&upstream)
-    {
-        observe_write_metric(
-            &state,
-            &namespace,
-            STATUS_TPUF_ERROR,
-            total_start.elapsed().as_secs_f64(),
-            tpuf_seconds,
-            metric_batch_size,
+        crate::routes::embed_wire::merge_response_performance(
+            &mut upstream.body,
+            &embed.performance,
         );
-        return Err(unsupported_object_schema_error(
-            "turbopuffer",
-            &object_schema_attributes,
-        ));
-    }
-    if !status.is_success()
-        && (!plan.response_driven() || plan.portable_without_affected_ids())
-        && String::from_utf8_lossy(&upstream.body).contains("UnsupportedByStore")
-    {
-        let portable_start = Instant::now();
-        upstream = match portable_write(&state, &namespace, &plan).await {
-            Ok(response) => response,
-            Err(e) => {
-                tpuf_seconds += portable_start.elapsed().as_secs_f64();
-                observe_write_metric(
-                    &state,
-                    &namespace,
-                    STATUS_TPUF_ERROR,
-                    total_start.elapsed().as_secs_f64(),
-                    tpuf_seconds,
-                    metric_batch_size,
-                );
-                if is_unsupported_by_store(&e) {
-                    return Err(AppError::from_store_support_error(
-                        e,
-                        Some("search".to_string()),
-                        Some("writeNamespace".to_string()),
-                    ));
-                }
-                return Err(AppError::Upstream(format!("VectorStore write failed: {e}")));
+        crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
+
+        if plan.response_driven() && !plan.portable_without_affected_ids() {
+            let affected = affected_ids_from_response(&upstream.body);
+            apply_response_driven_effects(&state, &namespace, &mut plan, &affected).await;
+            #[cfg(feature = "pro")]
+            if plan.has_filter_delete {
+                field_stats_filter_removed =
+                    (affected.deleted.len() as u64).saturating_sub(plan.deletes.len() as u64);
             }
-        };
-        tpuf_seconds += portable_start.elapsed().as_secs_f64();
-        status = StatusCode::from_u16(upstream.status)
-            .map_err(|e| AppError::Upstream(format!("invalid VectorStore status: {}", e)))?;
-    }
-    if !status.is_success() {
+        }
+
+        #[cfg(feature = "pro")]
+        crate::field_stats::apply_write(
+            &state,
+            &namespace,
+            &field_stats_tracked,
+            &crate::field_stats::WriteDelta {
+                upserts: plan
+                    .upserts
+                    .iter()
+                    .map(|u| (u.id.as_str(), &u.attributes))
+                    .collect(),
+                patches: plan
+                    .patches
+                    .iter()
+                    .map(|p| (p.id.as_str(), &p.attributes))
+                    .collect(),
+                deletes: plan.deletes.iter().map(String::as_str).collect(),
+                opaque: plan.has_filter_delete || plan.has_filter_patch,
+                opaque_rows_removed: field_stats_filter_removed,
+            },
+            &field_stats_pre,
+        )
+        .await;
+
+        state.consistency.register_due(&namespace);
+        enqueue_write_udfs(Arc::clone(&state), &namespace, &plan).await?;
         observe_write_metric(
             &state,
             &namespace,
-            STATUS_TPUF_ERROR,
+            STATUS_OK,
             total_start.elapsed().as_secs_f64(),
             tpuf_seconds,
             metric_batch_size,
         );
-        return passthrough_response(upstream);
+
+        if page_patch {
+            let mut response: Value = serde_json::from_slice(&upstream.body)
+                .map_err(|_| AppError::Upstream("invalid page replay write response".into()))?;
+            let count = response
+                .get("rows_upserted")
+                .cloned()
+                .unwrap_or(Value::from(0));
+            response.as_object_mut().unwrap().remove("rows_upserted");
+            response["rows_patched"] = count;
+            upstream.body = serde_json::to_vec(&response)
+                .map_err(|_| AppError::Upstream("page replay response encoding failed".into()))?;
+        }
+        passthrough_response(upstream)
+    });
+    #[cfg(feature = "pro")]
+    {
+        crate::routes::udf::budget_source_write(&state, &namespace, &source_ids, work).await?
     }
-
-    crate::routes::embed_wire::merge_response_performance(&mut upstream.body, &embed.performance);
-    crate::routes::embed_wire::commit_profiles(&state, &namespace, &embed).await?;
-
-    if plan.response_driven() && !plan.portable_without_affected_ids() {
-        let affected = affected_ids_from_response(&upstream.body);
-        apply_response_driven_effects(&state, &namespace, &mut plan, &affected).await;
+    #[cfg(not(feature = "pro"))]
+    {
+        work.await
     }
-
-    state.consistency.register_due(&namespace);
-    enqueue_write_udfs(Arc::clone(&state), &namespace, &plan).await;
-    observe_write_metric(
-        &state,
-        &namespace,
-        STATUS_OK,
-        total_start.elapsed().as_secs_f64(),
-        tpuf_seconds,
-        metric_batch_size,
-    );
-
-    passthrough_response(upstream)
 }
 
 fn object_schema_attributes(body: &Value) -> Vec<String> {
@@ -519,6 +677,15 @@ fn native_write_plan(
     shard_count: u64,
     allow_chunk_attributes: bool,
 ) -> Result<NativeWritePlan, AppError> {
+    native_write_plan_with_trusted_attrs(body, shard_count, allow_chunk_attributes, false)
+}
+
+fn native_write_plan_with_trusted_attrs(
+    body: &mut Value,
+    shard_count: u64,
+    allow_chunk_attributes: bool,
+    trusted_attrs: bool,
+) -> Result<NativeWritePlan, AppError> {
     let Some(obj) = body.as_object_mut() else {
         return Ok(NativeWritePlan::default());
     };
@@ -543,6 +710,7 @@ fn native_write_plan(
             &stamp_value,
             shard_count,
             allow_chunk_attributes,
+            trusted_attrs,
             &mut plan,
         )?;
     }
@@ -590,6 +758,7 @@ fn enrich_upsert_rows(
     stamp_value: &Value,
     shard_count: u64,
     allow_chunk_attributes: bool,
+    trusted_attrs: bool,
     plan: &mut NativeWritePlan,
 ) -> Result<(), AppError> {
     let rows = rows.as_array_mut().ok_or_else(|| {
@@ -601,11 +770,12 @@ fn enrich_upsert_rows(
         })?;
         reject_removed_blob_write(row)?;
         reject_reserved_attribute_names(row.keys().filter(|name| {
-            !allow_chunk_attributes
-                || !matches!(
-                    name.as_str(),
-                    "_hevlayer_parent_id" | "_hevlayer_chunk_index"
-                )
+            !trusted_attrs
+                && (!allow_chunk_attributes
+                    || !matches!(
+                        name.as_str(),
+                        "_hevlayer_parent_id" | "_hevlayer_chunk_index"
+                    ))
         }))?;
         let id = row_id(row, "upsert_rows")?;
         stamp_row(row, &id, stamp_value, shard_count);
@@ -666,6 +836,14 @@ fn enrich_upsert_columns(
         Value::Array(vec![stamp_value.clone(); ids.len()]),
     );
     columns.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::Array(
+            ids.iter()
+                .map(|_| Value::String(uuid::Uuid::new_v4().to_string()))
+                .collect(),
+        ),
+    );
+    columns.insert(
         SHARD_ATTR.to_string(),
         Value::Array(
             ids.iter()
@@ -712,6 +890,14 @@ fn enrich_patch_columns(
         Value::Array(vec![stamp_value.clone(); ids.len()]),
     );
     columns.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::Array(
+            ids.iter()
+                .map(|_| Value::String(uuid::Uuid::new_v4().to_string()))
+                .collect(),
+        ),
+    );
+    columns.insert(
         SHARD_ATTR.to_string(),
         Value::Array(
             ids.iter()
@@ -748,11 +934,19 @@ fn enrich_patch_by_filter(
     }
     reject_reserved_attribute_names(patch.keys())?;
     patch.insert(UPSERTED_AT_ATTR.to_string(), stamp_value.clone());
+    patch.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
     Ok(Some(row_attributes(patch)))
 }
 
 fn stamp_row(row: &mut Map<String, Value>, id: &str, stamp_value: &Value, shard_count: u64) {
     row.insert(UPSERTED_AT_ATTR.to_string(), stamp_value.clone());
+    row.insert(
+        WRITE_REVISION_ATTR.to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
     row.insert(
         SHARD_ATTR.to_string(),
         Value::from(shard_for_id(id, shard_count)),
@@ -1055,52 +1249,32 @@ async fn delete_cache_ids(state: &Arc<AppState>, namespace: &str, ids: &[String]
     }
 }
 
-async fn enqueue_write_udfs(state: Arc<AppState>, namespace: &str, plan: &NativeWritePlan) {
-    if !plan.upserts.is_empty() {
-        let rows: Vec<HashMap<String, Value>> = plan
-            .upserts
-            .iter()
-            .map(|doc| {
-                let mut row = doc.attributes.clone();
-                row.insert("id".to_string(), Value::String(doc.id.clone()));
-                if let Some(vector) = &doc.vector {
-                    row.insert(
-                        "vector".to_string(),
-                        serde_json::to_value(vector).unwrap_or(Value::Null),
-                    );
-                }
-                if let Some(vectors) = &doc.vectors {
-                    row.insert(
-                        "vectors".to_string(),
-                        serde_json::to_value(vectors).unwrap_or(Value::Null),
-                    );
-                }
-                row
-            })
-            .collect();
-        if let Some(trigger) = state.write_trigger.clone() {
-            trigger
-                .enqueue_write_rows(Arc::clone(&state), namespace, rows, false)
-                .await;
-        }
-    }
-
-    if !plan.patches.is_empty() {
-        let rows: Vec<HashMap<String, Value>> = plan
-            .patches
-            .iter()
-            .map(|doc| {
-                let mut row = doc.attributes.clone();
-                row.insert("id".to_string(), Value::String(doc.id.clone()));
-                row
-            })
-            .collect();
-        if let Some(trigger) = state.write_trigger.clone() {
+async fn enqueue_write_udfs(
+    state: Arc<AppState>,
+    namespace: &str,
+    plan: &NativeWritePlan,
+) -> Result<(), AppError> {
+    let mut ids: Vec<_> = plan
+        .upserts
+        .iter()
+        .map(|doc| doc.id.clone())
+        .chain(plan.patches.iter().map(|doc| doc.id.clone()))
+        .chain(plan.deletes.iter().cloned())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if let Some(trigger) = state.write_trigger.clone() {
+        if !ids.is_empty() {
+            let rows = ids
+                .into_iter()
+                .map(|id| HashMap::from([("id".into(), Value::String(id))]))
+                .collect();
             trigger
                 .enqueue_write_rows(state, namespace, rows, true)
-                .await;
+                .await?;
         }
     }
+    Ok(())
 }
 
 fn affected_ids_from_response(body: &[u8]) -> AffectedIds {

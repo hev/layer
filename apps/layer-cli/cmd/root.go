@@ -28,6 +28,9 @@ Usage:
 
 Commands:
   ask <command>              Query the Layer docs digest
+  query|search|read NS -f JSON  Retrieve rows (JSON receipt)
+  capabilities NS           Report store capabilities and namespace schema
+  scan create|get|results   Exhaustive scan jobs and paged results
   browse                    Open the operations TUI
   env add|use|ls|show|rm    Manage named environments
   init NAMESPACE --shards N  Initialize namespace sharding
@@ -181,6 +184,7 @@ func (app App) newRootCommand() *cobra.Command {
 		return cliError{message: err.Error(), code: ExitUsage}
 	})
 
+	addRetrievalCommands(root, app, flags)
 	root.AddCommand(newAskCommand(app, flags))
 	root.AddCommand(newBrowseCommand(app, flags))
 	root.AddCommand(newEnvCommand(app, flags))
