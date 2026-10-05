@@ -10,7 +10,9 @@
               "name": "pov-bcc-pages",
               "toolName": "documents",
               "description": "BCC documents",
-              "collapse": {"by": "document"},
+              "collapse": {
+                "by": "document"
+              },
               "filters": [
                 "job",
                 "doc_type",
@@ -21,6 +23,23 @@
                 "region"
               ],
               "link": "webUrl"
+            },
+            {
+              "name": "pov-bcc-story-pages",
+              "toolName": "story_documents",
+              "description": "Story Renovations documents, full pages (PDF)",
+              "collapse": {
+                "by": "document"
+              },
+              "filters": [
+                "company",
+                "job",
+                "division",
+                "region",
+                "doc_type"
+              ],
+              "link": "webUrl",
+              "pageLink": true
             },
             {
               "name": "pov-bcc-photos",

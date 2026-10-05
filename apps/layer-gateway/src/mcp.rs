@@ -53,6 +53,9 @@ pub struct McpNamespace {
     pub description: Option<String>,
     pub filters: Option<Vec<String>>,
     pub link: Option<String>,
+    /// Also show each page row's `page` as a PDF page-anchored copy of `link`.
+    #[serde(default)]
+    pub page_link: bool,
     /// Gateway collapse configuration; search returns only each group's best row.
     pub collapse: Option<Value>,
 }
@@ -594,7 +597,7 @@ impl McpHandler {
         if search && ns.collapse.is_some() {
             body = compact_groups(body)?;
         }
-        let text = render(&body, ns.link.as_deref());
+        let text = render(&body, ns.link.as_deref(), ns.page_link);
         let mut result = CallToolResult::structured(body);
         result.content = vec![ContentBlock::text(text)];
         Ok(result)
@@ -875,7 +878,7 @@ fn compact_groups(body: Value) -> Result<Value, AppError> {
     Ok(json!({"groups":compact,"collapse":body["collapse"]}))
 }
 
-fn render(body: &Value, link: Option<&str>) -> String {
+fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
     let rows = body.get("rows").and_then(Value::as_array);
     let hits: Vec<&Value> = if let Some(groups) = body
         .get("groups")
@@ -906,6 +909,10 @@ fn render(body: &Value, link: Option<&str>) -> String {
             .and_then(Value::as_str)
         {
             text.push_str(&format!(" — {url}"));
+            let page = attrs.get("page").and_then(Value::as_u64);
+            if let (true, Some(page), false) = (page_link, page, url.contains('#')) {
+                text.push_str(&format!(" (page {page}: {url}#page={page})"));
+            }
         }
     }
     text
@@ -922,6 +929,7 @@ mod tests {
             description: None,
             filters: None,
             link: None,
+            page_link: false,
             collapse: None,
         }
     }
@@ -938,14 +946,15 @@ mod tests {
         assert!(body.get("rows").is_none());
         assert!(body["groups"][0].get("rows").is_none());
         assert_eq!(body["collapse"]["read"], 20);
-        assert!(render(&body, Some("url")).contains("https://example.com/a"));
+        assert!(render(&body, Some("url"), false).contains("https://example.com/a"));
         assert!(compact_groups(json!({"rows":[]})).is_err());
         assert!(compact_groups(json!({"groups":[{"rows":[]}]})).is_err());
         assert_eq!(
             render(
                 &compact_groups(json!({"groups":[],"collapse":{"read":0,"exhausted":true}}))
                     .unwrap(),
-                None
+                None,
+                false
             ),
             "0 record(s)"
         );
@@ -955,7 +964,7 @@ mod tests {
     fn get_record_with_groups_attribute_keeps_its_excerpt_and_link() {
         let record =
             json!({"id":"p1","text":"record excerpt","url":"https://example.com/p1", "groups":[]});
-        let rendered = render(&record, Some("url"));
+        let rendered = render(&record, Some("url"), false);
         assert!(rendered.starts_with("1 record(s)"));
         assert!(rendered.contains("record excerpt"));
         assert!(rendered.contains("https://example.com/p1"));
@@ -983,6 +992,63 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("distinct groups"));
+    }
+
+    #[test]
+    fn page_link_adds_page_anchored_source_link() {
+        let hit = json!({"id":"d#p4","attributes":{"text":"x","page":4,"webUrl":"https://example.com/doc.pdf"}});
+        let body = json!({"rows":[hit]});
+        let on = render(&body, Some("webUrl"), true);
+        assert!(on.contains(
+            " — https://example.com/doc.pdf (page 4: https://example.com/doc.pdf#page=4)"
+        ));
+        assert_eq!(
+            render(&body, Some("webUrl"), false),
+            "1 record(s)\n\"d#p4\": x — https://example.com/doc.pdf"
+        );
+        let anchored =
+            json!({"rows":[{"id":"a","attributes":{"page":2,"webUrl":"https://e.com/a#x"}}]});
+        assert!(!render(&anchored, Some("webUrl"), true).contains("page 2"));
+        assert!(!render(
+            &json!({"rows":[{"id":"b","attributes":{"webUrl":"https://e.com/b"}}]}),
+            Some("webUrl"),
+            true
+        )
+        .contains("page"));
+    }
+
+    #[test]
+    fn story_seed_and_native_voyage_profile_search_contract() {
+        let registry = registry_from_json(Some(&json!({"bcc":{"namespaces":[{
+            "name":"pov-bcc-story-pages","toolName":"story_documents","link":"webUrl","pageLink":true,
+            "collapse":{"by":"document"},
+            "filters":["company","job","division","region","doc_type"]}]}}).to_string())).unwrap();
+        let spec = &registry.servers["bcc"].namespaces[0];
+        assert!(spec.page_link);
+        let metadata = json!({"schema":{
+            "text":{"type":"string","full_text_search":true,"fuzzy":true,"filterable":false,
+                    "embed":{"model":"voyage/voyage-4","dims":1024}},
+            "company":{"type":"string"},"job":{"type":"string"},"division":{"type":"string"},
+            "region":{"type":"string"},"doc_type":{"type":"string"},
+            "webUrl":{"type":"string","filterable":false}}});
+        let schema = NamespaceSchema::from_metadata(spec, &metadata).unwrap();
+        assert_eq!(schema.search_kind().unwrap(), "Auto");
+        assert_eq!(
+            schema.rank_by("q").unwrap(),
+            json!(["text","Auto","q",{"vector":["Embed","q",{"field":"text"}]}])
+        );
+        let filters = schema
+            .filters(Some(json!({"company":"story","job":"J1","division":"05","region":"r","doc_type":"permit"})))
+            .unwrap();
+        assert!(filters.is_some());
+        assert!(schema.filters(Some(json!({"folder_1":"x"}))).is_err());
+        // a missing configured filter must fail loudly, not be dropped
+        let mut missing = metadata.clone();
+        missing["schema"]
+            .as_object_mut()
+            .unwrap()
+            .remove("division");
+        assert!(NamespaceSchema::from_metadata(spec, &missing).is_err());
     }
 
     #[test]
