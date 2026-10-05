@@ -1,0 +1,20 @@
+name: Native Worker admission canary
+on:
+  pull_request:
+    paths: ['.github/workflows/native-admission-canary.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  canary:
+    name: Native Worker admission canary
+    runs-on: [self-hosted, Linux, ARM64, default]
+    timeout-minutes: 3
+    steps:
+      - name: Verify registered CE runner and keep native lease observable
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = mini-layer-ce-linux-1
+          test -S /runner/.lab-worker-fence.sock
+          echo "Genuine assigned canary reached steps after native admission"
+          sleep 30
