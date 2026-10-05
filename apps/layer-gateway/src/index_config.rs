@@ -46,6 +46,14 @@ pub struct IndexConfig {
     pub blob_reference_attributes: HashMap<String, Vec<String>>,
     pub namespace_store_refs: HashMap<String, String>,
     pub embedding_profiles: HashMap<String, EmbeddingProfile>,
+    pub display: HashMap<String, IndexDisplay>,
+}
+
+/// Presentation metadata from `Index.spec.metadata.{title,description}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexDisplay {
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +99,7 @@ impl IndexConfigSource for StaticIndexConfigSource {
             blob_reference_attributes: HashMap::new(),
             namespace_store_refs: HashMap::new(),
             embedding_profiles: HashMap::new(),
+            display: HashMap::new(),
         })
     }
 }
@@ -125,6 +134,7 @@ pub async fn refresh_index_config_once(
     state.replace_blob_reference_attributes(config.blob_reference_attributes);
     state.replace_namespace_store_refs(config.namespace_store_refs);
     state.replace_embedding_profiles(config.embedding_profiles);
+    state.replace_index_display(config.display);
     if let Err(error) = crate::snapshot_policy::apply_persisted_snapshot_policies(state).await {
         warn!(
             error = %error,

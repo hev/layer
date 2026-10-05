@@ -542,6 +542,7 @@ async fn fetch_one(
     let cache_state = build_cache_state(&state, &namespace).await;
     let shadow = namespace.ends_with("-shadow");
 
+    let display = state.index_display_for(&namespace).unwrap_or_default();
     let metadata_started_ms = now_ms();
     let meta = state.turbopuffer().head_namespace(&namespace).await;
     if meta.is_err() {
@@ -559,6 +560,8 @@ async fn fetch_one(
                 idx,
                 NamespaceListEntry {
                     name: namespace,
+                    title: display.title,
+                    description: display.description,
                     row_count: Some(projected.row_count),
                     size_bytes: projected.size_bytes,
                     stable_as_of_ms,
@@ -577,6 +580,8 @@ async fn fetch_one(
             idx,
             NamespaceListEntry {
                 name: namespace,
+                title: display.title,
+                description: display.description,
                 row_count: None,
                 size_bytes: None,
                 stable_as_of_ms: None,

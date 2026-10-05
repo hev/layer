@@ -409,6 +409,12 @@ pub struct NamespaceList {
 #[derive(Debug, Clone, Serialize)]
 pub struct NamespaceListEntry {
     pub name: String,
+    /// `Index.spec.metadata.title`; clients fall back to `name` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `Index.spec.metadata.description`; omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -853,6 +853,8 @@ type NamespaceList struct {
 
 type NamespaceListEntry struct {
 	Name string `json:"name"`
+	Title string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
 	RowCount int64 `json:"row_count,omitempty"`
 	SizeBytes int64 `json:"size_bytes,omitempty"`
 	StableAsOfMs int64 `json:"stable_as_of_ms,omitempty"`
@@ -913,6 +915,8 @@ type FieldStat struct {
 }
 
 type NamespaceMetadataLayer struct {
+	Title string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
 	FieldStats NamespaceFieldStats `json:"field_stats,omitempty"`
 	StableAsOf int64 `json:"stable_as_of,omitempty"`
 	IsStable bool `json:"is_stable,omitempty"`

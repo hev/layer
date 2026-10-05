@@ -376,6 +376,7 @@ pub async fn run_with_options(options: ServerOptions) {
         managed_platform_enabled: false,
         namespace_store_refs,
         embedding_profiles: Arc::new(RwLock::new(HashMap::new())),
+        index_display: Arc::new(RwLock::new(HashMap::new())),
         last_snapshot_at: Arc::new(DashMap::new()),
         snapshot_inflight: Arc::new(DashMap::new()),
         inbound_auth: resolved_stores.inbound_auth.clone(),

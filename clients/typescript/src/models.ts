@@ -976,6 +976,8 @@ export interface NamespaceList {
 export interface NamespaceListEntry {
   [key: string]: unknown;
   name: string;
+  title?: string;
+  description?: string;
   row_count?: number | null;
   size_bytes?: number | null;
   stable_as_of_ms?: number | null;
@@ -1043,6 +1045,8 @@ export interface FieldStat {
 
 export interface NamespaceMetadataLayer {
   [key: string]: unknown;
+  title?: string;
+  description?: string;
   field_stats?: NamespaceFieldStats;
   stable_as_of?: number | null;
   is_stable?: boolean;

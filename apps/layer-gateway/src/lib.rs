@@ -54,7 +54,7 @@ use clients::aerospike::{AerospikeClient, AerospikeRuntime};
 use clients::s3::S3Client;
 use clients::turbopuffer::TurbopufferClient;
 use consistency::ConsistencyWatcher;
-use index_config::{EmbeddingProfile, Retention};
+use index_config::{EmbeddingProfile, IndexDisplay, Retention};
 use index_gc::IndexDeleter;
 use metrics::LayerMetrics;
 use pipeline::PipelineStore;
@@ -174,6 +174,8 @@ pub struct AppState {
     /// Per-namespace embedding profile loaded from `Index.spec.embedding`
     /// plus `Index.spec.backend.distanceMetric`.
     pub embedding_profiles: Arc<RwLock<HashMap<String, EmbeddingProfile>>>,
+    /// Per-namespace title and description loaded from `Index.spec.metadata`.
+    pub index_display: Arc<RwLock<HashMap<String, IndexDisplay>>>,
     /// Wall-clock (epoch ms) of the last snapshot attempt per namespace.
     /// Bumped on both successful writes and dedup'd skips so a steady-state
     /// namespace doesn't re-scan every poll.
@@ -470,6 +472,24 @@ impl AppState {
             namespace,
         )
         .cloned()
+    }
+
+    pub fn index_display_for(&self, namespace: &str) -> Option<IndexDisplay> {
+        vectorstore_core::namespace_pattern::resolve(
+            &self
+                .index_display
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            namespace,
+        )
+        .cloned()
+    }
+
+    pub fn replace_index_display(&self, index_display: HashMap<String, IndexDisplay>) {
+        *self
+            .index_display
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = index_display;
     }
 
     pub fn replace_embedding_profiles(

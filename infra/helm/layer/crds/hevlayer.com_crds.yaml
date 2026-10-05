@@ -1381,6 +1381,10 @@ spec:
                       type: string
                     default: {}
                     type: object
+                  description:
+                    description: One-line summary of what the Index holds, shown beside the title.
+                    nullable: true
+                    type: string
                   labels:
                     additionalProperties:
                       type: string
@@ -1390,6 +1394,10 @@ spec:
                     items:
                       type: string
                     type: array
+                  title:
+                    description: Human-readable name clients show instead of the namespace name.
+                    nullable: true
+                    type: string
                 type: object
               scan:
                 nullable: true

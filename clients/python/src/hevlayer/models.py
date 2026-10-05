@@ -864,6 +864,8 @@ class NamespaceList(BaseModel):
 class NamespaceListEntry(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     name: str
+    title: str | None = None
+    description: str | None = None
     row_count: int | None = None
     size_bytes: int | None = None
     stable_as_of_ms: int | None = None
@@ -924,6 +926,8 @@ class FieldStat(BaseModel):
 
 class NamespaceMetadataLayer(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    title: str | None = None
+    description: str | None = None
     field_stats: NamespaceFieldStats | None = None
     stable_as_of: int | None = None
     is_stable: bool | None = None

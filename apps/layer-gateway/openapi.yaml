@@ -3294,6 +3294,18 @@ components:
         name:
           type: string
           description: Namespace identifier as reported by Turbopuffer.
+        title:
+          type: string
+          description: 'Human-readable name from the namespace''s Index `spec.metadata.title`.
+            Omitted when unset; fall back to `name`.
+
+            '
+        description:
+          type: string
+          description: 'One-line summary from the namespace''s Index `spec.metadata.description`.
+            Omitted when unset.
+
+            '
         row_count:
           type:
           - integer
@@ -3573,6 +3585,19 @@ components:
       type: object
       description: Gateway-computed namespace freshness and readiness signals.
       properties:
+        title:
+          type: string
+          description: 'Human-readable name from the namespace''s Index `spec.metadata.title`.
+            Omitted when the Index does not set one; clients fall back to the namespace
+            name.
+
+            '
+        description:
+          type: string
+          description: 'One-line summary from the namespace''s Index `spec.metadata.description`.
+            Omitted when unset.
+
+            '
         field_stats:
           "$ref": "#/components/schemas/NamespaceFieldStats"
         stable_as_of:

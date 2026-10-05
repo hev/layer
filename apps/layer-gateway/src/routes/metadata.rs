@@ -35,6 +35,8 @@ use crate::AppState;
 ///     count capture.
 ///   * `index_lag_rows` — `approx_row_count - snapshot.row_count`, clamped at
 ///     zero. `null` when `indexed` is `null`.
+///   * `title`, `description` — presentation text from the namespace's Index
+///     `spec.metadata`. Each key is omitted when the Index does not set it.
 pub async fn get_namespace_metadata(
     State(state): State<Arc<AppState>>,
     Path(namespace): Path<String>,
@@ -141,6 +143,14 @@ pub async fn get_namespace_metadata(
     #[cfg(feature = "pro")]
     if let Some(stats) = field_stats {
         layer["field_stats"] = stats;
+    }
+    if let Some(display) = state.index_display_for(&namespace) {
+        if let Some(title) = display.title {
+            layer["title"] = Value::String(title);
+        }
+        if let Some(description) = display.description {
+            layer["description"] = Value::String(description);
+        }
     }
     body.insert("layer".into(), layer);
 
