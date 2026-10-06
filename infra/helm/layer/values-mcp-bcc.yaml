@@ -58,13 +58,28 @@
             {
               "name": "ki-invoices",
               "toolName": "ki_invoices",
-              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document.",
+              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages.",
               "filters": [
                 "job_number",
                 "vendor",
                 "status",
                 "has_document",
                 "job_id"
+              ]
+            },
+            {
+              "name": "ki-invoice-pages",
+              "toolName": "ki_invoice_pages",
+              "description": "KI AP invoice PDFs, full pages of text. Each hit carries the invoice's invoice_id, job, vendor and status. Pass invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch the PDF; ki_invoices has the amount and status.",
+              "collapse": {
+                "by": "document"
+              },
+              "filters": [
+                "job_number",
+                "vendor",
+                "status",
+                "job_id",
+                "invoice_number"
               ]
             }
           ],
