@@ -2654,6 +2654,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
         self.capabilities()
             .require(crate::capabilities::WireFeature::NamespaceCrud)?;
         let url = format!("{}/v2/namespaces/{}/metadata", self.base_url, namespace);
+        // Metadata is a billed physical read too. Retain inherited Function
+        // and expense permits before dispatch, including identity hydration.
+        reserve_provider_query(namespace, 1).await?;
         let resp = self
             .authorize(self.client.get(&url))?
             .send()
@@ -4464,6 +4467,59 @@ mod metadata_parse_tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn metadata_http_dispatch_obeys_nested_permits_and_scope_restoration() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = HttpTurbopufferClient::new("fixture", &format!("http://{addr}"));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outer_calls = calls.clone();
+        let outer: QueryPermit = Arc::new(move |namespace, count| {
+            outer_calls
+                .lock()
+                .unwrap()
+                .push(("function", namespace, count));
+            Box::pin(async { Ok(()) })
+        });
+        let inner_calls = calls.clone();
+        let inner: QueryPermit = Arc::new(move |namespace, count| {
+            inner_calls
+                .lock()
+                .unwrap()
+                .push(("expense", namespace, count));
+            Box::pin(async { Err(TurbopufferError::QueryBudgetExhausted) })
+        });
+        scope_query_permit(outer, async {
+            let denied = scope_query_permit(inner, client.head_namespace("demo")).await;
+            assert!(matches!(denied, Err(TurbopufferError::QueryBudgetExhausted)));
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept())
+                .await.is_err(), "denied metadata must not dispatch");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v2/namespaces/demo/metadata "));
+                let body = r#"{"billing":{"billable_bytes_queried":123},"approx_row_count":0}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+            });
+            let billing = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = billing.clone();
+            scope_read_billing(Arc::new(move |namespace, value| {
+                seen.lock().unwrap().push((namespace.to_owned(), value.clone()));
+            }), client.head_namespace("demo")).await.unwrap();
+            server.await.unwrap();
+            assert_eq!(*billing.lock().unwrap(), vec![("demo".into(), json!({"billable_bytes_queried":123}))]);
+        }).await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ("function", "demo".into(), 1),
+                ("expense", "demo".into(), 1),
+                ("function", "demo".into(), 1),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn nested_query_permits_retain_function_admission_and_fail_closed() {
