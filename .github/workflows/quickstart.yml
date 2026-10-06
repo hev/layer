@@ -3,9 +3,13 @@ on: [push, pull_request, workflow_dispatch]
 jobs:
   query:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     services:
       postgres:
-        image: paradedb/paradedb:0.18.0@sha256:fe7c2638af33e6c3b3821bc8c7fab18629e5f43eb6ea3ad86a2966aca855dbb2
+        image: paradedb/paradedb:0.26.0@sha256:52fc9c95fdfd462201168d1d82334ed61f85cbd921957cab083ec39800a217ac
         env:
           POSTGRES_USER: layer
           POSTGRES_PASSWORD: local-layer
@@ -16,30 +20,40 @@ jobs:
           --health-cmd "pg_isready -U layer -d layer"
           --health-interval 2s --health-timeout 3s --health-retries 30
     steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Build this tree's CE gateway
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+          cargo build -p hevlayer-gateway --bin hevlayer-gateway --no-default-features --features pgvector
       - name: Start gateway
         env:
           PG_PORT: ${{ job.services.postgres.ports['5432'] }}
         run: |
-          docker run -d --name gateway --network host \
-            -e "PGVECTOR_URL=postgresql://layer:local-layer@127.0.0.1:$PG_PORT/layer" \
-            -e TURBOPUFFER_API_KEY= -e LAYER_TELEMETRY=off \
-            -e AWS_EC2_METADATA_DISABLED=true \
-            hevlayer/layer-gateway:edge
+          PGVECTOR_URL="postgresql://layer:local-layer@127.0.0.1:$PG_PORT/layer" \
+            TURBOPUFFER_API_KEY= LAYER_TELEMETRY=off AWS_EC2_METADATA_DISABLED=true \
+            target/debug/hevlayer-gateway > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 60); do
             if curl --fail --silent http://localhost:8080/health; then exit 0; fi
             sleep 2
           done
-          docker logs gateway
+          cat "$RUNNER_TEMP/gateway.log"
           exit 1
-      - name: Write and query
+      - name: Write and query vector and BM25
         run: |
           curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products \
             -H 'Content-Type: application/json' \
-            -d '{"distance_metric":"cosine_distance","upsert_rows":[{"id":"earbuds","vector":[1,0,0]}]}'
-          curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products/query \
-            -H 'Content-Type: application/json' \
-            -d '{"rank_by":["vector","ANN",[1,0,0]],"top_k":1}' | \
-            python3 -c 'import json,sys; assert json.load(sys.stdin)["rows"][0]["id"] == "earbuds"'
+            -d '{"distance_metric":"cosine_distance","schema":{"text":{"type":"string","full_text_search":true}},"upsert_rows":[{"id":"earbuds","text":"wireless earbuds","vector":[1,0,0]}]}'
+          for ranking in '["vector","ANN",[1,0,0]]' '["text","BM25","wireless"]'; do
+            curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products/query \
+              -H 'Content-Type: application/json' \
+              -d "{\"rank_by\":$ranking,\"top_k\":1}" | \
+              python3 -c 'import json,sys; assert json.load(sys.stdin)["rows"][0]["id"] == "earbuds"'
+          done
       - name: Stop gateway
         if: always()
-        run: docker rm -f gateway
+        run: |
+          cat "$RUNNER_TEMP/gateway.log" || true
+          if [ -f "$RUNNER_TEMP/gateway.pid" ]; then kill "$(cat "$RUNNER_TEMP/gateway.pid")" || true; fi

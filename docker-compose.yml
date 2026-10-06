@@ -5,16 +5,16 @@ name: hevlayer-ce
 
 services:
   postgres:
-    # Unmodified ParadeDB Community server (pg_search 0.18.0 + vector 0.8.0).
-    # Source/notices: https://github.com/paradedb/paradedb/tree/v0.18.0
-    image: paradedb/paradedb:0.18.0@sha256:fe7c2638af33e6c3b3821bc8c7fab18629e5f43eb6ea3ad86a2966aca855dbb2
+    # Unmodified ParadeDB Community server (pg_search 0.26.0 + vector 0.8.6).
+    # Source/notices: https://github.com/paradedb/paradedb/tree/v0.26.0
+    image: paradedb/paradedb:0.26.0@sha256:52fc9c95fdfd462201168d1d82334ed61f85cbd921957cab083ec39800a217ac
     restart: unless-stopped
     environment:
       POSTGRES_USER: layer
       POSTGRES_PASSWORD: local-layer
       POSTGRES_DB: layer
     volumes:
-      - postgres:/var/lib/postgresql/data
+      - postgres18:/var/lib/postgresql
     healthcheck:
       test: [CMD-SHELL, "pg_isready -U layer -d layer"]
       interval: 2s
@@ -93,4 +93,4 @@ networks:
     internal: true
 
 volumes:
-  postgres:
+  postgres18:

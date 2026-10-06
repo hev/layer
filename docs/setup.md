@@ -1,5 +1,9 @@
 # Install and configure Community Edition
 
+> Existing PostgreSQL 17 volumes require the backup and restore migration
+> below before using the PostgreSQL 18 bundle.
+
+
 For local development, follow the [CE quickstart](https://hevlayer.com/docs/ce/quickstart):
 `docker compose up` starts the gateway and Postgres without an account or key.
 
@@ -11,8 +15,8 @@ an existing Turbopuffer account. Python and TypeScript clients use
 `http://localhost:8080` as their base URL, as shown in the quickstart.
 
 For GitHub Actions, a Postgres service container provides the database.
-Start the CE image after the service is healthy, then run the same HTTP or
-SDK requests. This example uses an ephemeral database port so concurrent
+Start the CE image after the service is healthy, then run HTTP or SDK
+requests. This example uses an ephemeral database port so concurrent
 jobs do not contend for port 5432:
 
 ```yaml
@@ -23,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: paradedb/paradedb:0.18.0@sha256:fe7c2638af33e6c3b3821bc8c7fab18629e5f43eb6ea3ad86a2966aca855dbb2
+        image: paradedb/paradedb:0.26.0@sha256:52fc9c95fdfd462201168d1d82334ed61f85cbd921957cab083ec39800a217ac
         env:
           POSTGRES_USER: layer
           POSTGRES_PASSWORD: local-layer
@@ -219,7 +223,7 @@ applying it with `kubectl`.
 | `spec.default` | Selects this store for namespaces without an explicit store reference. |
 | `spec.inboundAuth` | Gateway client authentication, independent of SQL authentication. |
 
-The target database must have `vector` **0.8.0** and `pg_search` **0.18.0**
+The target database must have `vector` **0.8.6** and `pg_search` **0.26.0**
 installed. The gateway checks both extension versions at startup and fails
 initialization if either does not match. The database role must be able to
 create the `layer_pgvector` schema and its tables and indexes, and read, write,
@@ -301,3 +305,87 @@ spec:
 `read` covers GET/HEAD routes and read-shaped POST routes such as query,
 batch fetch, scans, and metrics proxy queries. `write` covers namespace
 writes. `admin` also satisfies `read` and `write`.
+
+### Upgrade an existing CE Postgres volume
+
+Back up before changing the database image. The old ParadeDB 0.18 bundle uses
+PostgreSQL 17; the 0.26 bundle uses PostgreSQL 18 and stores PGDATA under
+`/var/lib/postgresql/18/docker`. PostgreSQL cannot open a 17 data directory
+with an 18 server. This bundle mounts a **new** `postgres18` volume at
+`/var/lib/postgresql`, preserving the old `postgres` volume. Starting the new
+bundle without restoring it gives an empty database.
+
+Use a maintenance window: stop gateway writes, keep the old database running,
+and make a logical archive with the old image's `pg_dump`. These commands are
+for the default CE Compose project and dedicated Layer database; use the same
+project name and credentials as the existing installation. Back up any other
+schemas separately. Preserve the old Compose file and gateway/database image
+digests for rollback. Do not run `docker compose down -v`.
+
+```sh
+# Run BEFORE replacing the old Compose file.
+docker compose stop gateway
+mkdir -m 700 -p backups
+# Archive includes registry, documents, schemas and all index definitions.
+docker compose exec -T postgres pg_dump -U layer -d layer \
+  --format=custom --schema=layer_pgvector > backups/layer-pg17.dump
+# Save roles if you customized the database role. Protect this credential file.
+docker compose exec -T postgres pg_dumpall -U layer --globals-only \
+  > backups/pg17-globals.sql
+# Check the archive is readable; rehearse restoration on an isolated copy too.
+docker compose exec -T postgres pg_restore --list < backups/layer-pg17.dump
+# Preserve the old volume. Then install the new Compose file.
+docker compose down
+```
+
+Start only the new database, verify its extensions, and restore the archive.
+For the default bundle, `vector` and `pg_search` are already installed by the
+image. For an external database, install the exact versions required above
+before restoring. Restore with the dedicated owning role; recreate customized
+roles deliberately from the globals backup rather than blindly applying it.
+
+```sh
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -X -U layer -d layer -v ON_ERROR_STOP=1 \
+  -c "SELECT version(); SELECT extname,extversion FROM pg_extension WHERE extname IN ('vector','pg_search');"
+docker compose exec -T postgres pg_restore -U layer -d layer \
+  --exit-on-error --no-owner --no-acl < backups/layer-pg17.dump
+docker compose exec -T postgres psql -X -U layer -d layer -v ON_ERROR_STOP=1 \
+  -c 'ANALYZE; SELECT count(*) FROM layer_pgvector.namespaces;'
+docker compose up -d --wait gateway
+curl --fail http://localhost:8080/health
+```
+
+`pg_restore` creates new BM25 and HNSW indexes from their definitions: it does
+not reuse the old index files. Check namespace/document counts against the old
+database, then run representative BM25 and vector queries through the gateway
+before reopening writes. Keep `LAYER_VECTORSTORE_NAMESPACE` and the
+VectorStore name unchanged so the namespace scope still maps to the same tables.
+A successful startup alone does not prove that the data was restored.
+
+If upgrading extensions **within the same PostgreSQL major version**, follow
+ParadeDB's extension upgrade instructions, back up first, and rebuild the BM25
+indexes after the extension update. Existing indexes need a rebuild to gain
+the new postings/fieldnorm layout. The following uses catalog names and safe
+identifier quoting; it touches only Layer's BM25 indexes. Run it while the
+gateway is stopped, allow enough disk for index rebuilds, and plan for blocking
+locks. Do not assume `REINDEX CONCURRENTLY` is supported.
+
+```sh
+docker compose exec -T postgres psql -X -U layer -d layer -v ON_ERROR_STOP=1 <<'SQL'
+SELECT format('REINDEX INDEX %I.%I;', n.nspname, c.relname)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_am am ON am.oid = c.relam
+WHERE n.nspname = 'layer_pgvector' AND c.relkind = 'i' AND am.amname = 'bm25'
+\gexec
+ANALYZE;
+SQL
+```
+
+For rollback, stop the gateway and new database, restore the saved old Compose
+file and old gateway image, and attach the untouched PostgreSQL 17 volume.
+Never attach the new PostgreSQL 18 volume to the old image. Writes accepted
+after cutover will not be present in the old volume; keep writes paused until
+validation finishes, or reconcile them before rollback. Do not remove either
+volume until backup restoration and application queries have been verified.

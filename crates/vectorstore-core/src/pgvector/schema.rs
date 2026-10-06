@@ -384,9 +384,11 @@ impl Schema {
                     .map(|f| (f.column(), json!({"tokenizer":{"type":"default"}})))
                     .collect(),
             );
+            // pg_search 0.26 derives its key from the first indexed column;
+            // key_field is deprecated and ignored. Keep rid first for scoring.
             // The only interpolated strings are hash identifiers and a JSON
             // document made exclusively from those identifiers and constants.
-            sqlx::query(&format!("CREATE INDEX \"{index}\" ON layer_pgvector.\"{table}\" USING bm25 (rid,{columns}) WITH (key_field='rid',text_fields='{options}')"))
+            sqlx::query(&format!("CREATE INDEX \"{index}\" ON layer_pgvector.\"{table}\" USING bm25 (rid,{columns}) WITH (text_fields='{options}')"))
                 .execute(&mut **tx).await.map_err(db)?;
         }
         Ok(())

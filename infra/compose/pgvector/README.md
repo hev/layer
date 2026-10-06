@@ -38,10 +38,10 @@ scratch namespaces in a `finally` block, and verify cleanup. CI uses a Docker
 artifact from the existing gateway mirror job for PRs, and pulls the published
 `edge` image for main and manual runs. Compose never builds the gateway.
 
-ParadeDB is pinned to the `0.18.0` multi-architecture digest in the shared
-Compose file. The gateway requires `vector 0.8.0` and `pg_search 0.18.0`.
+ParadeDB is pinned to the `0.26.0` multi-architecture digest in the shared
+Compose file. The gateway requires `vector 0.8.6` and `pg_search 0.26.0`.
 The unmodified server runs separately from the BSL gateway; its AGPL license
-and source are at [ParadeDB v0.18.0](https://github.com/paradedb/paradedb/tree/v0.18.0).
+and source are at [ParadeDB v0.26.0](https://github.com/paradedb/paradedb/tree/v0.26.0).
 
 ## Phase-one behavior
 
@@ -73,3 +73,24 @@ The required write-response billing object is empty.
 This bundle is the standalone phase-one gate. Kubernetes operator discovery,
 production enablement and the SciFact ranking gate
 are separate work. Do not point this backend at the indexing-queue database.
+
+## Upgrading the database
+
+The prepared 0.26 bundle uses PostgreSQL 18, `vector 0.8.6`, and a new
+`postgres18` volume mounted at `/var/lib/postgresql`. The 0.18 bundle's volume
+is PostgreSQL 17 and cannot be reused in place. Follow the backup, logical
+restore, BM25 rebuild, and rollback commands in
+[CE setup](../../../public/ce/docs/setup.md#upgrade-an-existing-ce-postgres-volume).
+Do not use `down -v` on an installation you intend to upgrade.
+
+Rehearse those commands against disposable, uniquely named databases without
+published ports (the script removes only containers and volumes it creates):
+
+```sh
+python3 scripts/test-paradedb-upgrade.py
+```
+
+The image is pinned to the published 0.26.0 GA multi-architecture digest.
+The gateway checks exact extension versions. Acceptance requires the named
+`Pgvector phase one` and `CE quickstart` workflows, live gateway/store tests,
+and this migration rehearsal on that exact GA image.

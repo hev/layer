@@ -16,8 +16,8 @@ use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, QueryBuilder, Row, Transac
 use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, TurbopufferError>;
-pub const PG_SEARCH_VERSION: &str = "0.18.0";
-pub const VECTOR_VERSION: &str = "0.8.0";
+pub const PG_SEARCH_VERSION: &str = "0.26.0";
+pub const VECTOR_VERSION: &str = "0.8.6";
 
 pub struct PgvectorClient {
     pool: PgPool,
