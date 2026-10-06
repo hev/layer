@@ -100,13 +100,14 @@ fn generic_tools() -> Vec<Tool> {
         "namespace":{"type":"string","minLength":1},
         "query":{"type":"string","minLength":1},
         "filters":{"type":"object","description":"Use the chosen namespace's typed filters from list_namespaces. Strings/booleans take exact values; numbers take min/max; dates take after/before."},
-        "limit":{"type":"integer","minimum":1,"maximum":50,"default":10}
+        "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
+        "cursor":{"type":"string","minLength":1,"description":"The next_cursor from the previous page of the same query. Omit for the first page."}
     },"required":["namespace","query"],"additionalProperties":false});
     let get = json!({"type":"object","properties":{
         "namespace":{"type":"string","minLength":1},
         "id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]}
     },"required":["namespace","id"],"additionalProperties":false});
-    [("search", "Search one readable namespace. Call list_namespaces for namespace names and filter types.", search),
+    [("search", "Search one readable namespace. Call list_namespaces for namespace names and filter types. Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.", search),
      ("get", "Fetch one record by id from a readable namespace. Call list_namespaces for namespace names.", get)]
         .into_iter().map(|(name, description, schema)| Tool::new(name, description, schema.as_object().unwrap().clone())
             .with_annotations(ToolAnnotations::new().read_only(true))).collect()
@@ -365,11 +366,131 @@ impl ServerHandler for McpHandler {
             .await
         {
             Ok(result) => Ok(result.into()),
-            Err(error) => {
-                Ok(CallToolResult::error(vec![ContentBlock::text(error.to_string())]).into())
-            }
+            Err(failure) => Ok(failure.into_result().into()),
         }
     }
+}
+
+/// A tool failure the model can act on: a stable `code`, a message and the
+/// details that name the fix (the accepted arguments, a near miss).
+enum ToolFailure {
+    App(AppError),
+    Typed {
+        code: &'static str,
+        message: String,
+        details: Value,
+    },
+}
+
+impl From<AppError> for ToolFailure {
+    fn from(error: AppError) -> Self {
+        Self::App(error)
+    }
+}
+
+impl ToolFailure {
+    fn typed(code: &'static str, message: impl Into<String>, details: Value) -> Self {
+        Self::Typed {
+            code,
+            message: message.into(),
+            details,
+        }
+    }
+
+    fn into_result(self) -> CallToolResult {
+        let (code, message, details) = match self {
+            Self::Typed {
+                code,
+                message,
+                details,
+            } => (code, message, details),
+            Self::App(AppError::Validation(message)) => ("invalid_argument", message, json!({})),
+            Self::App(other) => ("tool_failed", other.to_string(), json!({})),
+        };
+        let mut error = json!({"code":code,"message":message});
+        if let (Some(error), Some(details)) = (error.as_object_mut(), details.as_object()) {
+            error.extend(details.clone());
+        }
+        let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
+            "{code}: {}",
+            error["message"].as_str().unwrap_or_default()
+        ))]);
+        result.structured_content = Some(json!({"error":error}));
+        result
+    }
+}
+
+/// Reject argument names the tool does not take, naming the nearest accepted one.
+fn check_arguments(
+    tool: &str,
+    arguments: &Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), ToolFailure> {
+    let unknown: Vec<&String> = arguments
+        .keys()
+        .filter(|name| !allowed.contains(&name.as_str()))
+        .collect();
+    let Some(first) = unknown.first() else {
+        return Ok(());
+    };
+    let suggestion = did_you_mean(first, allowed);
+    let hint = suggestion
+        .map(|s| format!(" Did you mean `{s}`?"))
+        .unwrap_or_default();
+    Err(ToolFailure::typed(
+        "unknown_argument",
+        format!(
+            "`{first}` is not an argument of {tool}; it takes {}.{hint}",
+            if allowed.is_empty() {
+                "no arguments".to_string()
+            } else {
+                allowed.join(", ")
+            }
+        ),
+        json!({"tool":tool,"unknown":unknown,"allowed":allowed,"did_you_mean":suggestion}),
+    ))
+}
+
+fn did_you_mean<'a>(given: &str, allowed: &[&'a str]) -> Option<&'a str> {
+    let given = given.to_ascii_lowercase();
+    let alias = match given.as_str() {
+        "q" | "text" | "search" | "term" | "terms" | "keywords" | "search_query" => "query",
+        "n" | "k" | "top_k" | "topk" | "page_size" | "pagesize" | "per_page" | "max_results"
+        | "size" | "count" => "limit",
+        "filter" | "where" => "filters",
+        "ns" | "index" | "collection" => "namespace",
+        "page_token" | "next_cursor" | "next_page_token" | "pagetoken" | "next" | "after" => {
+            "cursor"
+        }
+        "doc_id" | "document_id" | "record_id" | "key" | "_id" => "id",
+        _ => "",
+    };
+    if let Some(found) = allowed.iter().find(|a| **a == alias) {
+        return Some(found);
+    }
+    allowed
+        .iter()
+        .map(|a| (edit_distance(&given, a), *a))
+        .filter(|(d, a)| *d <= 2.max(a.len() / 4))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, a)| a)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (row[j + 1] + 1)
+                .min(row[j] + 1)
+                .min(prev + usize::from(ca != *cb));
+            prev = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 fn mcp_error(error: AppError) -> ErrorData {
@@ -413,7 +534,7 @@ impl McpHandler {
         &self,
         tool: &str,
         arguments: Map<String, Value>,
-    ) -> Result<CallToolResult, AppError> {
+    ) -> Result<CallToolResult, ToolFailure> {
         crate::metrics::scope_billing_caller(
             self.billing_caller.clone(),
             self.execute_attributed(tool, arguments),
@@ -425,11 +546,9 @@ impl McpHandler {
         &self,
         tool: &str,
         mut arguments: Map<String, Value>,
-    ) -> Result<CallToolResult, AppError> {
+    ) -> Result<CallToolResult, ToolFailure> {
         if tool == "list_namespaces" {
-            if !arguments.is_empty() {
-                return Err(invalid("list_namespaces takes no arguments"));
-            }
+            check_arguments(tool, &arguments, &[])?;
             let mut namespaces = Vec::new();
             let mut text = String::new();
             for ns in &self.spec.namespaces {
@@ -485,7 +604,7 @@ impl McpHandler {
             let search = match tool {
                 "search" => true,
                 "get" => false,
-                _ => return Err(invalid("unknown MCP tool")),
+                _ => return Err(invalid("unknown MCP tool").into()),
             };
             let namespace = arguments
                 .remove("namespace")
@@ -506,7 +625,7 @@ impl McpHandler {
             } else if let Some(suffix) = tool.strip_prefix("get_") {
                 (false, suffix)
             } else {
-                return Err(invalid("unknown MCP tool"));
+                return Err(invalid("unknown MCP tool").into());
             };
             let ns = self
                 .spec
@@ -516,6 +635,15 @@ impl McpHandler {
                 .ok_or_else(|| invalid("unknown MCP tool"))?;
             (search, ns)
         };
+        check_arguments(
+            if search { "search" } else { "get" },
+            &arguments,
+            if search {
+                &["query", "filters", "limit", "cursor"]
+            } else {
+                &["id"]
+            },
+        )?;
         self.authorize(ns)?;
         let mut headers = self.headers.clone();
         // Existing history tags carry the source without a second history writer.
@@ -525,83 +653,266 @@ impl McpHandler {
                 .parse()
                 .map_err(|_| invalid("invalid MCP history tag"))?,
         );
-        let response = if search {
-            let schema = self.schema(ns).await?;
-            let query = arguments
-                .remove("query")
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .filter(|v| !v.trim().is_empty())
-                .ok_or_else(|| invalid("query must be a nonempty string"))?;
-            let limit = match arguments.remove("limit") {
-                None => 10,
-                Some(v) => v
-                    .as_u64()
-                    .filter(|n| (1..=50).contains(n))
-                    .ok_or_else(|| invalid("limit must be an integer from 1 to 50"))?,
-            };
-            let filters = schema.filters(arguments.remove("filters"))?;
-            if !arguments.is_empty() {
-                return Err(invalid("unknown search argument"));
-            }
-            let rank_by = schema.rank_by(&query)?;
-            let mut body = json!({"rank_by":rank_by,"top_k":limit,"include_attributes":true});
-            if let Some(collapse) = &ns.collapse {
-                body["collapse"] = collapse.clone();
-            }
-            if let Some(filters) = filters {
-                body["filters"] = filters;
-            }
-            crate::routes::query::query(
-                State(self.state.clone()),
-                Path(ns.name.clone()),
-                OriginalUri(
-                    format!("/v2/namespaces/{}/query", ns.name)
-                        .parse()
-                        .map_err(|_| invalid("invalid namespace URI"))?,
-                ),
-                headers,
-                Json(body),
-            )
-            .await?
-        } else {
-            let id = match arguments.remove("id") {
-                Some(Value::String(id)) if !id.is_empty() => id,
-                Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
-                _ => return Err(invalid("id must be a nonempty string or unsigned integer")),
-            };
-            if !arguments.is_empty() {
-                return Err(invalid("unknown get argument"));
-            }
-            crate::routes::fetch::fetch_document(
-                State(self.state.clone()),
-                Path((ns.name.clone(), id)),
-                Query(crate::routes::fetch::FetchQueryParams {
-                    include_attributes: None,
-                }),
-                headers,
-            )
-            .await?
-            .into_response()
+        if search {
+            return self.search_page(ns, headers, arguments).await;
+        }
+        let id = match arguments.remove("id") {
+            Some(Value::String(id)) if !id.is_empty() => id,
+            Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
+            _ => return Err(invalid("id must be a nonempty string or unsigned integer").into()),
         };
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
-            .await
-            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
-        let mut body: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
-        if !status.is_success() {
-            return Err(AppError::ServiceUnavailable(format!(
-                "query failed ({status}): {body}"
-            )));
-        }
-        if search && ns.collapse.is_some() {
-            body = compact_groups(body)?;
-        }
+        let response = crate::routes::fetch::fetch_document(
+            State(self.state.clone()),
+            Path((ns.name.clone(), id)),
+            Query(crate::routes::fetch::FetchQueryParams {
+                include_attributes: None,
+            }),
+            headers,
+        )
+        .await?
+        .into_response();
+        let body = decode_response(response).await?;
         let text = render(&body, ns.link.as_deref(), ns.page_link);
         let mut result = CallToolResult::structured(body);
         result.content = vec![ContentBlock::text(text)];
         Ok(result)
     }
+
+    async fn query_body(
+        &self,
+        ns: &McpNamespace,
+        headers: &HeaderMap,
+        body: Value,
+    ) -> Result<Value, AppError> {
+        let response = crate::routes::query::query(
+            State(self.state.clone()),
+            Path(ns.name.clone()),
+            OriginalUri(
+                format!("/v2/namespaces/{}/query", ns.name)
+                    .parse()
+                    .map_err(|_| invalid("invalid namespace URI"))?,
+            ),
+            headers.clone(),
+            Json(body),
+        )
+        .await?;
+        let mut body = decode_response(response).await?;
+        if body.get("groups").is_some() {
+            body = compact_groups(body)?;
+        }
+        Ok(body)
+    }
+
+    /// One page of a search. The first page pins `as_of` and counts the
+    /// matches; the cursor carries both, so every later page reads the same
+    /// snapshot: rows written after page one cannot shift the offset.
+    async fn search_page(
+        &self,
+        ns: &McpNamespace,
+        headers: HeaderMap,
+        mut arguments: Map<String, Value>,
+    ) -> Result<CallToolResult, ToolFailure> {
+        let schema = self.schema(ns).await?;
+        let query = arguments
+            .remove("query")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| invalid("query must be a nonempty string"))?;
+        let limit = match arguments.remove("limit") {
+            None => 10,
+            Some(v) => v
+                .as_u64()
+                .filter(|n| (1..=50).contains(n))
+                .ok_or_else(|| invalid("limit must be an integer from 1 to 50"))?,
+        };
+        let filters = schema.filters(arguments.remove("filters"))?;
+        let rank_by = schema.rank_by(&query)?;
+        let fingerprint = page_fingerprint(ns, &rank_by, filters.as_ref());
+        let (as_of, offset, known_total) = match arguments.remove("cursor") {
+            None => (crate::consistency::now_ms(), 0, None),
+            Some(Value::String(cursor)) if !cursor.is_empty() => {
+                let cursor = PageCursor::decode(&cursor, &fingerprint)?;
+                (cursor.as_of, cursor.offset, Some(cursor.total))
+            }
+            Some(_) => {
+                return Err(
+                    invalid("cursor must be the next_cursor string of a previous page").into(),
+                )
+            }
+        };
+        let take = limit.min(MAX_WINDOW.saturating_sub(offset));
+        let mut base = json!({"rank_by":rank_by,"top_k":offset + take,"include_attributes":true});
+        if let Some(collapse) = &ns.collapse {
+            base["collapse"] = collapse.clone();
+        }
+        // Pin the snapshot: rows written after page one are not in the walk.
+        // Rows with no stamp (written around the gateway) stay visible.
+        let pinned = schema.stamped.then(|| {
+            json!([
+                "Or",
+                [
+                    [crate::clients::turbopuffer::UPSERTED_AT_ATTR, "Lte", as_of],
+                    [crate::clients::turbopuffer::UPSERTED_AT_ATTR, "Eq", null]
+                ]
+            ])
+        });
+        match (filters, pinned) {
+            (Some(filters), Some(pinned)) => base["filters"] = json!(["And", [filters, pinned]]),
+            (Some(filter), None) | (None, Some(filter)) => base["filters"] = filter,
+            (None, None) => {}
+        }
+        let mut body = self.query_body(ns, &headers, base.clone()).await?;
+        let key = if ns.collapse.is_some() {
+            "groups"
+        } else {
+            "rows"
+        };
+        let mut items = body
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let reached = items.len() as u64;
+        let page: Vec<Value> = items.drain((offset as usize).min(items.len())..).collect();
+        // A short read is the whole result set; otherwise count it, bounded.
+        let (total, exact) = match known_total {
+            Some(total) => (total.count, total.exact),
+            None if reached < offset + take => (reached, true),
+            None => {
+                let mut count = base;
+                count["top_k"] = json!(MAX_WINDOW);
+                count["include_attributes"] = json!(false);
+                let counted = self.query_body(ns, &headers, count).await?;
+                let counted = counted
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len) as u64;
+                (counted, counted < MAX_WINDOW)
+            }
+        };
+        let next = offset + page.len() as u64;
+        let next_cursor = (!page.is_empty() && next < total).then(|| {
+            PageCursor {
+                v: 1,
+                q: fingerprint,
+                as_of,
+                offset: next,
+                total: PageTotal {
+                    count: total,
+                    exact,
+                },
+            }
+            .encode()
+        });
+        let returned = page.len();
+        body[key] = Value::Array(page);
+        body["total"] = json!(total);
+        body["total_exact"] = json!(exact);
+        body["next_cursor"] = json!(next_cursor);
+        body["offset"] = json!(offset);
+        body["snapshot"] = json!(schema.stamped);
+        let mut text = render(&body, ns.link.as_deref(), ns.page_link);
+        text.push_str(&format!(
+            "\nShowing {}-{} of {}{}.",
+            offset + 1.min(returned as u64),
+            offset + returned as u64,
+            total,
+            if exact { "" } else { "+" }
+        ));
+        match &next_cursor {
+            Some(cursor) => text.push_str(&format!(" next_cursor: {cursor}")),
+            None => text.push_str(" No further pages."),
+        }
+        let mut result = CallToolResult::structured(body);
+        result.content = vec![ContentBlock::text(text)];
+        Ok(result)
+    }
+}
+
+async fn decode_response(response: Response) -> Result<Value, AppError> {
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
+    if !status.is_success() {
+        return Err(AppError::ServiceUnavailable(format!(
+            "query failed ({status}): {body}"
+        )));
+    }
+    Ok(body)
+}
+
+/// Deepest rank a cursor can reach, and the most matches counted.
+const MAX_WINDOW: u64 = 1000;
+
+#[derive(serde::Serialize, Deserialize)]
+struct PageTotal {
+    count: u64,
+    exact: bool,
+}
+
+/// The opaque `next_cursor`: which query it belongs to, the snapshot it reads
+/// and where the next page starts.
+#[derive(serde::Serialize, Deserialize)]
+struct PageCursor {
+    v: u8,
+    q: String,
+    as_of: u64,
+    offset: u64,
+    total: PageTotal,
+}
+
+impl PageCursor {
+    fn encode(&self) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        use base64::Engine;
+        B64.encode(serde_json::to_vec(self).expect("cursor is JSON-encodable"))
+    }
+
+    fn decode(raw: &str, fingerprint: &str) -> Result<Self, ToolFailure> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        use base64::Engine;
+        let bad = |why: &str| {
+            ToolFailure::typed(
+                "invalid_cursor",
+                format!("cursor is not a next_cursor from this search: {why}. Repeat the search without a cursor for page one."),
+                json!({"reason":why}),
+            )
+        };
+        let cursor: Self = B64
+            .decode(raw)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| bad("it does not decode"))?;
+        if cursor.v != 1 {
+            return Err(bad("unsupported cursor version"));
+        }
+        if cursor.q != fingerprint {
+            return Err(ToolFailure::typed(
+                "cursor_mismatch",
+                "cursor was issued for a different namespace, query or filters; send the same query and filters with it, or omit the cursor to start over",
+                json!({}),
+            ));
+        }
+        if cursor.offset == 0 || cursor.offset >= MAX_WINDOW || cursor.total.count > MAX_WINDOW {
+            return Err(bad("its position is out of range"));
+        }
+        Ok(cursor)
+    }
+}
+
+/// Identifies the search a cursor continues: namespace, ranking, filters and
+/// grouping. `limit` is left out, so page size can change between pages.
+fn page_fingerprint(ns: &McpNamespace, rank_by: &Value, filters: Option<&Value>) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(
+        json!([ns.name, rank_by, filters, ns.collapse])
+            .to_string()
+            .as_bytes(),
+    );
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -619,6 +930,8 @@ struct NamespaceSchema {
     text: Option<String>,
     fuzzy: bool,
     embed: Option<String>,
+    /// Rows carry the gateway's write stamp, so a page walk can pin a snapshot.
+    stamped: bool,
 }
 
 impl NamespaceSchema {
@@ -700,6 +1013,7 @@ impl NamespaceSchema {
             fuzzy,
             text,
             embed: choose(embed),
+            stamped: attrs.contains_key(crate::clients::turbopuffer::UPSERTED_AT_ATTR),
         })
     }
 
@@ -745,10 +1059,12 @@ impl NamespaceSchema {
         if ns.collapse.is_some() {
             search_description.push_str(" Returns distinct groups with one best matching row per group; limit counts groups. Use get with the best row id for details.");
         }
+        search_description.push_str(" Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.");
         let search_schema = json!({"type":"object","properties":{
             "query":{"type":"string","minLength":1},
             "filters":{"type":"object","properties":properties,"additionalProperties":false},
-            "limit":{"type":"integer","minimum":1,"maximum":50,"default":10}
+            "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
+            "cursor":{"type":"string","minLength":1,"description":"The next_cursor from the previous page of the same query. Omit for the first page."}
         },"required":["query"],"additionalProperties":false});
         let get_schema = json!({"type":"object","properties":{"id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]}},"required":["id"],"additionalProperties":false});
         vec![

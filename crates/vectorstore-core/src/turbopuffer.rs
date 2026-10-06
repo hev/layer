@@ -5183,8 +5183,13 @@ fn mock_compare_filter(actual: Option<&Value>, op: &str, expected: &Value) -> bo
     match op {
         op if op.eq_ignore_ascii_case("Exists") => actual.is_some(),
         op if op.eq_ignore_ascii_case("NotExists") => actual.is_none(),
-        op if op.eq_ignore_ascii_case("Eq") => actual == Some(expected),
-        op if op.eq_ignore_ascii_case("NotEq") => actual != Some(expected),
+        // Upstream treats a missing attribute as null.
+        op if op.eq_ignore_ascii_case("Eq") => {
+            actual == Some(expected) || (expected.is_null() && actual.is_none())
+        }
+        op if op.eq_ignore_ascii_case("NotEq") => {
+            actual != Some(expected) && !(expected.is_null() && actual.is_none())
+        }
         op if op.eq_ignore_ascii_case("In") => expected
             .as_array()
             .map(|values| actual.is_some_and(|actual| values.iter().any(|v| v == actual)))
