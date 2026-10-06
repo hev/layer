@@ -212,6 +212,82 @@ const CATALOG: &[MetricDoc] = &[
         alert: None,
     },
     MetricDoc {
+        name: "process_cpu_seconds_total",
+        kind: MetricKind::Counter,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Total user and system CPU time spent by the gateway process, in seconds (Linux).",
+        example_promql: "rate(process_cpu_seconds_total[5m])",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_open_fds",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Number of open file descriptors of the gateway process (Linux).",
+        example_promql: "process_open_fds",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_max_fds",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Maximum number of open file descriptors of the gateway process (Linux).",
+        example_promql: "process_open_fds / process_max_fds",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_virtual_memory_bytes",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Virtual memory size of the gateway process in bytes (Linux).",
+        example_promql: "process_virtual_memory_bytes",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_resident_memory_bytes",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Resident memory size of the gateway process in bytes (Linux).",
+        example_promql: "process_resident_memory_bytes",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_start_time_seconds",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Start time of the gateway process since the Unix epoch, in seconds (Linux).",
+        example_promql: "time() - process_start_time_seconds",
+        alert: None,
+    },
+    MetricDoc {
+        name: "process_threads",
+        kind: MetricKind::Gauge,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "Number of OS threads in the gateway process (Linux).",
+        example_promql: "process_threads",
+        alert: None,
+    },
+    MetricDoc {
+        name: "layer_runtime_scheduling_delay_seconds",
+        kind: MetricKind::Histogram,
+        family: MetricFamily::Saturation,
+        labels: &[],
+        description: "How late a 250 ms timer wakes on the async runtime; large values mean the runtime or its CPU is starved.",
+        example_promql: "histogram_quantile(0.99, sum by (le) (rate(layer_runtime_scheduling_delay_seconds_bucket[5m])))",
+        alert: Some(MetricAlert {
+            summary: "the gateway async runtime wakes timers more than 1s late",
+            expr: "histogram_quantile(0.99, sum by (le) (rate(layer_runtime_scheduling_delay_seconds_bucket[5m]))) > 1",
+            for_duration: "2m",
+        }),
+    },
+    MetricDoc {
         name: "layer_query_duration_seconds",
         kind: MetricKind::Histogram,
         family: MetricFamily::Query,
@@ -956,6 +1032,27 @@ mod tests {
                 | MetricFamily::Cost
                 | MetricFamily::License => {}
             }
+        }
+    }
+
+    /// The Linux process collector registers these names regardless of the build
+    /// host, and the gateway guard requires every registered metric to be cataloged.
+    #[test]
+    fn linux_process_collector_metrics_are_cataloged() {
+        for name in [
+            "process_cpu_seconds_total",
+            "process_open_fds",
+            "process_max_fds",
+            "process_virtual_memory_bytes",
+            "process_resident_memory_bytes",
+            "process_start_time_seconds",
+            "process_threads",
+            "layer_runtime_scheduling_delay_seconds",
+        ] {
+            assert!(
+                crate::metric(name).is_some(),
+                "{name} missing from the catalog"
+            );
         }
     }
 

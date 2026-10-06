@@ -223,6 +223,7 @@ impl LabelLimiter {
 }
 
 pub struct LayerMetrics {
+    runtime_scheduling_delay: Histogram,
     namespace_purge_pending: IntGaugeVec,
     namespace_purge_discovery_ready: IntGauge,
     registry: Registry,
@@ -830,7 +831,23 @@ impl LayerMetrics {
             "Current in-flight Turbopuffer calls.",
         );
 
+        // Process CPU, resident memory and descriptors (Linux only), so a stall that a
+        // liveness probe reports can be told apart from CPU starvation or memory growth.
+        #[cfg(target_os = "linux")]
+        {
+            let _ = registry.register(Box::new(
+                prometheus::process_collector::ProcessCollector::for_self(),
+            ));
+        }
+        let runtime_scheduling_delay = histogram_no_labels(
+            &registry,
+            "layer_runtime_scheduling_delay_seconds",
+            "How late a 250 ms timer wakes on the async runtime; large values mean the runtime or its CPU is starved.",
+            vec![0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
+        );
+
         Self {
+            runtime_scheduling_delay,
             namespace_purge_pending,
             namespace_purge_discovery_ready,
             registry,
@@ -921,6 +938,10 @@ impl LayerMetrics {
                 .with_label_values(&[namespace])
                 .set(*count);
         }
+    }
+
+    pub fn observe_runtime_scheduling_delay(&self, delay: std::time::Duration) {
+        self.runtime_scheduling_delay.observe(delay.as_secs_f64());
     }
 
     pub fn set_namespace_purge_discovery_ready(&self, ready: bool) {
@@ -3691,6 +3712,17 @@ impl UdfStore for MetricsUdfStore {
     }
 }
 
+/// Measures how late a fixed timer fires on this runtime. A starved or blocked
+/// runtime shows up here (and in the liveness probe) before anything else does.
+pub async fn run_runtime_delay_probe(metrics: Arc<LayerMetrics>) {
+    const TICK: std::time::Duration = std::time::Duration::from_millis(250);
+    loop {
+        let started = Instant::now();
+        tokio::time::sleep(TICK).await;
+        metrics.observe_runtime_scheduling_delay(started.elapsed().saturating_sub(TICK));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3703,6 +3735,25 @@ mod tests {
     #[test]
     fn registered_metrics_must_have_catalog_docs() {
         let _ = LayerMetrics::new();
+    }
+
+    #[tokio::test]
+    async fn runtime_scheduling_delay_is_observed_and_exported() {
+        let metrics = std::sync::Arc::new(LayerMetrics::new());
+        metrics.observe_runtime_scheduling_delay(std::time::Duration::from_millis(1500));
+        let probe = tokio::spawn(super::run_runtime_delay_probe(metrics.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        probe.abort();
+        let text = metrics.encode().unwrap();
+        assert!(text.contains("layer_runtime_scheduling_delay_seconds_bucket{le=\"2\"}"));
+        // The 1.5 s observation plus at least one timer tick from the probe.
+        let count: f64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("layer_runtime_scheduling_delay_seconds_count "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(count >= 2.0, "{text}");
     }
 
     #[test]

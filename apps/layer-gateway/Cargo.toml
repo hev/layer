@@ -40,7 +40,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1"
-prometheus = "0.14"
+prometheus = { version = "0.14", features = ["process"] }
 metrics-catalog = { path = "../../crates/metrics-catalog" }
 vectorstore-core = { path = "../../crates/vectorstore-core", default-features = false }
 base64 = "0.23"
