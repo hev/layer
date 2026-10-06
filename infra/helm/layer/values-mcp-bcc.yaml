@@ -65,21 +65,6 @@
               "link": "webUrl"
             },
             {
-              "name": "ki-invoices",
-              "toolName": "ki_invoices",
-              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages. ki_invoice_id is the id the KI MCP takes as invoice_ids; ki_project_id is the contract id; vendor ids are on ki_invoice_vendors.",
-              "filters": [
-                "job_number",
-                "vendor",
-                "status",
-                "has_document",
-                "job_id",
-                "ki_invoice_id",
-                "ki_project_id",
-                "ki_job_number"
-              ]
-            },
-            {
               "name": "ki-invoice-pages",
               "toolName": "ki_invoice_pages",
               "description": "KI AP invoice PDFs, full pages of text. Each hit carries the invoice's invoice_id, job, vendor and status. Pass invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch the PDF; ki_invoices has the amount and status.",
@@ -146,6 +131,52 @@
                 "ki_vendor_id",
                 "ki_project_id",
                 "ki_job_number"
+              ]
+            },
+            {
+              "name": "ki-cost-transactions",
+              "toolName": "ki_cost_transactions",
+              "description": "KI booked costs: one row per ProjectActualCost line, the code KI booked a cost to. ki_cost_code is the code (e.g. 06-110), ki_project_id the contract id, ki_invoice_id the invoice it was booked for (0 when the line is not an AP invoice, such as labor), cost_amount the booked amount, vendor the payee. Totals by vendor for a code: filter ki_cost_code (and ki_project_id), aggregate sum of cost_amount grouped by vendor. Contract ids and job numbers are in ki_contracts.",
+              "filters": [
+                "ki_cost_code",
+                "ki_cost_code_id",
+                "ki_project_id",
+                "ki_lead_id",
+                "ki_invoice_id",
+                "vendor",
+                "ki_cost_type",
+                "cost_amount"
+              ]
+            },
+            {
+              "name": "ki-pay-apps",
+              "toolName": "ki_pay_apps",
+              "description": "KI pay applications: one row per pay app on a contract, with gross billed, retention, amount received and the dates. ki_project_id is the contract id and ki_lead_id the job (see ki_contracts and ki_projects).",
+              "filters": [
+                "ki_project_id",
+                "ki_lead_id",
+                "ki_pay_id",
+                "accounting_status",
+                "gross_billed",
+                "amount_received"
+              ]
+            },
+            {
+              "name": "ki-invoices",
+              "toolName": "ki_invoices",
+              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status, whether a document is attached and the cost code KI booked it to. ki_cost_code (e.g. 06-110) is the code carrying most of the booked amount; ki_cost_codes lists every code when the invoice is split (ki_cost_code_status split) and ki_cost_code_status unbooked means KI has booked it to no code. Totals by vendor for a job and cost code: filter job_number and ki_cost_code, aggregate sum of amount grouped by vendor. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages. ki_invoice_id is the id the KI MCP takes as invoice_ids; ki_project_id is the contract id; vendor ids are on ki_invoice_vendors; the booked lines are in ki_cost_transactions.",
+              "filters": [
+                "amount",
+                "has_document",
+                "job_id",
+                "job_number",
+                "ki_cost_code",
+                "ki_cost_code_status",
+                "ki_invoice_id",
+                "ki_job_number",
+                "ki_project_id",
+                "status",
+                "vendor"
               ]
             }
           ],
