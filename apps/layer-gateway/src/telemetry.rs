@@ -188,6 +188,8 @@ pub struct Telemetry {
     backend_kinds: Vec<String>,
     distribution: Option<String>,
     distribution_version: Option<String>,
+    license_id: Option<String>,
+    license_tier: Option<String>,
     counters: Arc<TelemetryCounters>,
     http: reqwest::Client,
 }
@@ -223,6 +225,8 @@ impl Telemetry {
             backend_kinds: normalized_backend_kinds(backend_kinds),
             distribution: None,
             distribution_version: None,
+            license_id: None,
+            license_tier: None,
             counters,
             http,
         })
@@ -234,6 +238,15 @@ impl Telemetry {
     pub fn with_distribution(mut self, source: Option<String>, version: Option<String>) -> Self {
         self.distribution = source.as_deref().and_then(sanitize_distribution);
         self.distribution_version = version.as_deref().and_then(sanitize_distribution_version);
+        self
+    }
+
+    /// Reports which license this gateway runs: the mint's issuance id
+    /// (`jti`) and the tier of a license that verified. Never the key, the
+    /// subject or any contact. A value outside the documented shape is dropped.
+    pub fn with_license(mut self, id: Option<&str>, tier: Option<&str>) -> Self {
+        self.license_id = id.and_then(sanitize_license_id);
+        self.license_tier = tier.and_then(sanitize_distribution);
         self
     }
 
@@ -277,6 +290,12 @@ impl Telemetry {
         }
         if let Some(version) = &self.distribution_version {
             properties.insert("distributionVersion".into(), json!(version));
+        }
+        if let Some(id) = &self.license_id {
+            properties.insert("licenseId".into(), json!(id));
+        }
+        if let Some(tier) = &self.license_tier {
+            properties.insert("licenseTier".into(), json!(tier));
         }
         properties
     }
@@ -362,6 +381,13 @@ pub fn write_rows_from_response(body: &[u8]) -> WriteRows {
         patched: count("rows_patched"),
         deleted: count("rows_deleted"),
     }
+}
+
+/// Same rule as the telemetry proxy: lowercase hex and `-`, 32-36 chars (a UUID).
+fn sanitize_license_id(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    ((32..=36).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+        .then_some(value)
 }
 
 /// Same rule as the telemetry proxy: lowercase `[a-z0-9-]`, 1-32 chars.
@@ -586,6 +612,35 @@ mod tests {
         assert!(payload.get("apiKey").is_none());
         assert!(payload["properties"].get("distribution").is_none());
         assert!(payload["properties"].get("distributionVersion").is_none());
+    }
+
+    #[test]
+    fn license_id_and_tier_ride_on_started_and_heartbeat_only_when_valid() {
+        let id = "0b8f5c1e-5a47-4f0e-9d0e-3b6f1c2a7d90";
+        let telemetry = telemetry_with(Arc::new(TelemetryCounters::default()))
+            .with_license(Some(id), Some("Trial"));
+        for payload in [
+            telemetry.started_payload(),
+            telemetry.heartbeat_payload(UsageSnapshot::default()),
+        ] {
+            assert_eq!(payload["properties"]["licenseId"], id);
+            assert_eq!(payload["properties"]["licenseTier"], "trial");
+            let text = payload.to_string();
+            assert!(!text.contains("subject"));
+            assert!(!text.contains('@'));
+        }
+
+        let telemetry = telemetry_with(Arc::new(TelemetryCounters::default()))
+            .with_license(Some("not a uuid@example.com"), Some("tier with spaces"));
+        let payload = telemetry.started_payload();
+        assert!(payload["properties"].get("licenseId").is_none());
+        assert!(payload["properties"].get("licenseTier").is_none());
+
+        let telemetry =
+            telemetry_with(Arc::new(TelemetryCounters::default())).with_license(None, None);
+        assert!(telemetry.started_payload()["properties"]
+            .get("licenseId")
+            .is_none());
     }
 
     fn telemetry_with(counters: Arc<TelemetryCounters>) -> Telemetry {
