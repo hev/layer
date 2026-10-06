@@ -9,7 +9,7 @@
             {
               "name": "pov-bcc-pages",
               "toolName": "documents",
-              "description": "BCC documents",
+              "description": "BCC documents. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
               "collapse": {
                 "by": "document"
               },
@@ -20,14 +20,19 @@
                 "folder_1",
                 "folder_2",
                 "job_stage",
-                "region"
+                "region",
+                "ki_lead_id",
+                "ki_project_id",
+                "ki_job_number",
+                "ki_job_number_prefixed",
+                "ki_client_id"
               ],
               "link": "webUrl"
             },
             {
               "name": "pov-bcc-story-pages",
               "toolName": "story_documents",
-              "description": "Story Renovations documents, full pages (PDF)",
+              "description": "Story Renovations documents, full pages (PDF). Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
               "collapse": {
                 "by": "document"
               },
@@ -36,7 +41,12 @@
                 "job",
                 "division",
                 "region",
-                "doc_type"
+                "doc_type",
+                "ki_lead_id",
+                "ki_project_id",
+                "ki_job_number",
+                "ki_job_number_prefixed",
+                "ki_client_id"
               ],
               "link": "webUrl",
               "pageLink": true
@@ -44,27 +54,35 @@
             {
               "name": "pov-bcc-photos",
               "toolName": "images",
-              "description": "BCC images",
+              "description": "BCC images. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
               "filters": [
                 "job",
                 "company",
                 "folder_1",
                 "folder_2",
                 "job_stage",
-                "region"
+                "region",
+                "ki_lead_id",
+                "ki_project_id",
+                "ki_job_number",
+                "ki_job_number_prefixed",
+                "ki_client_id"
               ],
               "link": "webUrl"
             },
             {
               "name": "ki-invoices",
               "toolName": "ki_invoices",
-              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages.",
+              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages. ki_invoice_id is the id the KI MCP takes as invoice_ids; ki_project_id is the contract id; vendor ids are on ki_invoice_vendors.",
               "filters": [
                 "job_number",
                 "vendor",
                 "status",
                 "has_document",
-                "job_id"
+                "job_id",
+                "ki_invoice_id",
+                "ki_project_id",
+                "ki_job_number"
               ]
             },
             {
@@ -80,6 +98,60 @@
                 "status",
                 "job_id",
                 "invoice_number"
+              ]
+            },
+            {
+              "name": "ki-projects",
+              "toolName": "ki_projects",
+              "description": "KI Leads, one row per job: ki_lead_id is the id the KI MCP project tools take, with ki_job_number as KI spells it, name, status, client (ki_client_id) and division.",
+              "filters": [
+                "ki_lead_id",
+                "ki_job_number",
+                "ki_job_name",
+                "ki_client_id",
+                "ki_division_id",
+                "ki_status"
+              ]
+            },
+            {
+              "name": "ki-contracts",
+              "toolName": "ki_contracts",
+              "description": "KI contracts (KI's Project table), one row per contract: ki_project_id is the contract id, ki_lead_id the job it belongs to.",
+              "filters": [
+                "ki_project_id",
+                "ki_lead_id",
+                "ki_job_number"
+              ]
+            },
+            {
+              "name": "ki-companies",
+              "toolName": "ki_companies",
+              "description": "KI companies, the vendor directory: ki_vendor_id is the id invoices carry as their payee.",
+              "filters": [
+                "ki_vendor_id",
+                "ki_vendor_name",
+                "ki_vendor_number"
+              ]
+            },
+            {
+              "name": "ki-codes",
+              "toolName": "ki_cost_codes",
+              "description": "KI cost-code catalog: ki_cost_code_id is the code id, ki_cost_code its display (for example 06-110).",
+              "filters": [
+                "ki_cost_code_id",
+                "ki_cost_code",
+                "ki_category"
+              ]
+            },
+            {
+              "name": "ki-invoice-vendors",
+              "toolName": "ki_invoice_vendors",
+              "description": "Which vendor (ki_vendor_id) each KI invoice (ki_invoice_id) was paid to, with its contract (ki_project_id).",
+              "filters": [
+                "ki_invoice_id",
+                "ki_vendor_id",
+                "ki_project_id",
+                "ki_job_number"
               ]
             }
           ],
