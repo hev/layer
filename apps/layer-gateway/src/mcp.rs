@@ -90,7 +90,7 @@ impl McpServer {
 fn discovery_tool() -> Tool {
     Tool::new(
         "list_namespaces",
-        "List readable namespaces, tool names, descriptions, approximate row counts, search kinds, typed filters and source link attributes. Call this before choosing a namespace.",
+        "List readable namespaces, tool names, descriptions, approximate row counts, search kinds, typed filters, the fields aggregate can group and sum, and source link attributes. Call this before choosing a namespace.",
         json!({"type":"object","properties":{},"additionalProperties":false}).as_object().unwrap().clone(),
     ).with_annotations(ToolAnnotations::new().read_only(true))
 }
@@ -107,10 +107,38 @@ fn generic_tools() -> Vec<Tool> {
         "namespace":{"type":"string","minLength":1},
         "id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]}
     },"required":["namespace","id"],"additionalProperties":false});
+    let aggregate = json!({"type":"object","properties":{
+        "namespace":{"type":"string","minLength":1},
+        "group_by":aggregate_group_by_schema(),
+        "aggregates":aggregate_aggregates_schema(),
+        "filters":{"type":"object","description":"The same typed filters as search. Strings/booleans take exact values; numbers take min/max; dates take after/before."},
+        "limit":aggregate_limit_schema()
+    },"required":["namespace"],"additionalProperties":false});
     [("search", "Search one readable namespace. Call list_namespaces for namespace names and filter types. Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.", search),
-     ("get", "Fetch one record by id from a readable namespace. Call list_namespaces for namespace names.", get)]
+     ("get", "Fetch one record by id from a readable namespace. Call list_namespaces for namespace names.", get),
+     ("aggregate", AGGREGATE_DESCRIPTION, aggregate)]
         .into_iter().map(|(name, description, schema)| Tool::new(name, description, schema.as_object().unwrap().clone())
             .with_annotations(ToolAnnotations::new().read_only(true))).collect()
+}
+
+const AGGREGATE_DESCRIPTION: &str = "Count rows, or sum, min and max a numeric field, optionally grouped by one or two fields, with the same filters as search. Call list_namespaces for the groupable and summable fields. Every call is billed by the store at the namespace's size, so ask for everything in one call: at most 4 aggregates, and min/max (ungrouped only) each cost one more store query.";
+
+fn aggregate_group_by_schema() -> Value {
+    json!({"type":"array","items":{"type":"string"},"maxItems":MAX_GROUP_BY,"uniqueItems":true,
+        "description":"One or two groupable fields from list_namespaces. Omit for a single total."})
+}
+
+fn aggregate_aggregates_schema() -> Value {
+    json!({"type":"array","minItems":1,"maxItems":MAX_AGGREGATES,"items":{"type":"object","properties":{
+        "fn":{"type":"string","enum":["count","sum","min","max"]},
+        "field":{"type":"string","description":"A summable field for sum; a numeric or date field for min/max. Not used by count."}
+    },"required":["fn"],"additionalProperties":false},
+        "description":"Default: [{\"fn\":\"count\"}]. Results are named count, sum_<field>, min_<field>, max_<field>. min and max are not available with group_by."})
+}
+
+fn aggregate_limit_schema() -> Value {
+    json!({"type":"integer","minimum":1,"maximum":MAX_GROUPS,"default":DEFAULT_GROUPS,
+        "description":"Most groups returned. Groups come in key order, so a truncated result says so; add filters to narrow it."})
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -459,6 +487,8 @@ fn did_you_mean<'a>(given: &str, allowed: &[&'a str]) -> Option<&'a str> {
         | "size" | "count" => "limit",
         "filter" | "where" => "filters",
         "ns" | "index" | "collection" => "namespace",
+        "group" | "groupby" | "group_by_fields" | "by" | "groups" | "dimensions" => "group_by",
+        "aggregate" | "aggregations" | "metrics" | "measures" | "functions" | "agg" => "aggregates",
         "page_token" | "next_cursor" | "next_page_token" | "pagetoken" | "next" | "after" => {
             "cursor"
         }
@@ -579,8 +609,37 @@ impl McpHandler {
                     .map(|(name, ty)| format!("{name}: {}", ty.name()))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let fields = |keep: fn(&FilterType) -> bool| -> Vec<&String> {
+                    schema
+                        .filters
+                        .iter()
+                        .filter(|(_, ty)| keep(ty))
+                        .map(|(name, _)| name)
+                        .collect()
+                };
+                let (groupable, summable, extrema) = (
+                    fields(FilterType::groupable),
+                    fields(FilterType::summable),
+                    fields(FilterType::extrema),
+                );
+                let names = |fields: &[&String]| {
+                    if fields.is_empty() {
+                        "none".to_string()
+                    } else {
+                        fields
+                            .iter()
+                            .map(|f| f.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                };
+                let aggregate_tool = if self.spec.generic_tools() {
+                    "aggregate".into()
+                } else {
+                    format!("aggregate_{}", ns.tool_name())
+                };
                 text.push_str(&format!(
-                    "\n{} ({tool_name}): {description}; ~{} rows; {kind}; filters: {}; link: {}",
+                    "\n{} ({tool_name}): {description}; ~{} rows; {kind}; filters: {}; groupable: {}; summable: {}; link: {}",
                     ns.name,
                     schema.row_count,
                     if filter_text.is_empty() {
@@ -588,10 +647,17 @@ impl McpHandler {
                     } else {
                         &filter_text
                     },
+                    names(&groupable),
+                    names(&summable),
                     ns.link.as_deref().unwrap_or("none")
                 ));
-                namespaces.push(json!({"name":ns.name,"toolName":tool_name,"description":description,
-                    "rowCount":schema.row_count,"searchKind":kind,"filterableAttributes":filters,"linkAttribute":ns.link,"collapse":ns.collapse}));
+                namespaces.push(
+                    json!({"name":ns.name,"toolName":tool_name,"description":description,
+                    "rowCount":schema.row_count,"searchKind":kind,"filterableAttributes":filters,
+                    "aggregateToolName":aggregate_tool,"groupableAttributes":groupable,
+                    "summableAttributes":summable,"extremaAttributes":extrema,
+                    "linkAttribute":ns.link,"collapse":ns.collapse}),
+                );
             }
             let mut result = CallToolResult::structured(json!({"namespaces":namespaces}));
             result.content = vec![ContentBlock::text(format!(
@@ -600,10 +666,11 @@ impl McpHandler {
             ))];
             return Ok(result);
         }
-        let (search, ns) = if self.spec.generic_tools() {
-            let search = match tool {
-                "search" => true,
-                "get" => false,
+        let (kind, ns) = if self.spec.generic_tools() {
+            let kind = match tool {
+                "search" => ToolKind::Search,
+                "get" => ToolKind::Get,
+                "aggregate" => ToolKind::Aggregate,
                 _ => return Err(invalid("unknown MCP tool").into()),
             };
             let namespace = arguments
@@ -618,12 +685,14 @@ impl McpHandler {
                 .iter()
                 .find(|ns| ns.name == namespace)
                 .ok_or_else(|| invalid("namespace is not a member of this MCP server"))?;
-            (search, ns)
+            (kind, ns)
         } else {
-            let (search, suffix) = if let Some(suffix) = tool.strip_prefix("search_") {
-                (true, suffix)
+            let (kind, suffix) = if let Some(suffix) = tool.strip_prefix("search_") {
+                (ToolKind::Search, suffix)
             } else if let Some(suffix) = tool.strip_prefix("get_") {
-                (false, suffix)
+                (ToolKind::Get, suffix)
+            } else if let Some(suffix) = tool.strip_prefix("aggregate_") {
+                (ToolKind::Aggregate, suffix)
             } else {
                 return Err(invalid("unknown MCP tool").into());
             };
@@ -633,15 +702,15 @@ impl McpHandler {
                 .iter()
                 .find(|ns| ns.tool_name() == suffix)
                 .ok_or_else(|| invalid("unknown MCP tool"))?;
-            (search, ns)
+            (kind, ns)
         };
         check_arguments(
-            if search { "search" } else { "get" },
+            kind.name(),
             &arguments,
-            if search {
-                &["query", "filters", "limit", "cursor"]
-            } else {
-                &["id"]
+            match kind {
+                ToolKind::Search => &["query", "filters", "limit", "cursor"],
+                ToolKind::Get => &["id"],
+                ToolKind::Aggregate => &["group_by", "aggregates", "filters", "limit"],
             },
         )?;
         self.authorize(ns)?;
@@ -653,8 +722,10 @@ impl McpHandler {
                 .parse()
                 .map_err(|_| invalid("invalid MCP history tag"))?,
         );
-        if search {
-            return self.search_page(ns, headers, arguments).await;
+        match kind {
+            ToolKind::Search => return self.search_page(ns, headers, arguments).await,
+            ToolKind::Aggregate => return self.aggregate(ns, headers, arguments).await,
+            ToolKind::Get => {}
         }
         let id = match arguments.remove("id") {
             Some(Value::String(id)) if !id.is_empty() => id,
@@ -829,6 +900,309 @@ impl McpHandler {
     }
 }
 
+/// One requested aggregate: its result name and what it computes.
+enum AggregateFn {
+    Count,
+    Sum(String),
+    Min(String),
+    Max(String),
+}
+
+impl AggregateFn {
+    fn name(&self) -> String {
+        match self {
+            Self::Count => "count".into(),
+            Self::Sum(field) => format!("sum_{field}"),
+            Self::Min(field) => format!("min_{field}"),
+            Self::Max(field) => format!("max_{field}"),
+        }
+    }
+}
+
+fn unsupported(message: impl Into<String>, details: Value) -> ToolFailure {
+    ToolFailure::typed("unsupported_aggregate", message, details)
+}
+
+/// Store bytes billed by one aggregate call, summed over its queries.
+#[derive(Default)]
+struct BilledBytes {
+    queries: u64,
+    queried: u64,
+    returned: u64,
+}
+
+impl BilledBytes {
+    fn add(&mut self, body: &Value) {
+        self.queries += 1;
+        let bytes = |key: &str| {
+            body.pointer(&format!("/billing/{key}"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        self.queried += bytes("billable_logical_bytes_queried");
+        self.returned += bytes("billable_logical_bytes_returned");
+    }
+
+    fn json(&self) -> Value {
+        json!({"queries":self.queries,"billable_logical_bytes_queried":self.queried,
+            "billable_logical_bytes_returned":self.returned})
+    }
+}
+
+impl McpHandler {
+    /// Parse `aggregates` against the namespace's summable and orderable fields.
+    fn aggregate_functions(
+        schema: &NamespaceSchema,
+        value: Option<Value>,
+        grouped: bool,
+    ) -> Result<Vec<AggregateFn>, ToolFailure> {
+        let Some(value) = value else {
+            return Ok(vec![AggregateFn::Count]);
+        };
+        let items = value
+            .as_array()
+            .filter(|items| (1..=MAX_AGGREGATES).contains(&items.len()))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "aggregates must be a list of 1 to {MAX_AGGREGATES} objects like {{\"fn\":\"count\"}}"
+                ))
+            })?;
+        let mut functions: Vec<AggregateFn> = Vec::new();
+        for item in items {
+            let object = item
+                .as_object()
+                .ok_or_else(|| invalid("each aggregate must be an object with `fn`"))?;
+            check_arguments("aggregates item", object, &["fn", "field"])?;
+            let name = object.get("fn").and_then(Value::as_str).unwrap_or_default();
+            let field = object.get("field").map(|f| {
+                f.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("aggregate field must be a field name"))
+            });
+            let field = field.transpose()?;
+            let needs = |keep: fn(&FilterType) -> bool,
+                         what: &str|
+             -> Result<String, ToolFailure> {
+                let field = field
+                    .clone()
+                    .ok_or_else(|| invalid(format!("{name} needs a `field`")))?;
+                if schema.filters.get(&field).is_some_and(keep) {
+                    Ok(field)
+                } else {
+                    Err(ToolFailure::typed(
+                        "invalid_argument",
+                        format!("`{field}` is not a {what} field of this namespace. Call list_namespaces for the fields."),
+                        json!({"field":field}),
+                    ))
+                }
+            };
+            let function = match name {
+                "count" if field.is_none() => AggregateFn::Count,
+                "count" => return Err(invalid("count takes no `field`").into()),
+                "sum" => AggregateFn::Sum(needs(FilterType::summable, "summable")?),
+                "min" | "max" => {
+                    if grouped {
+                        return Err(unsupported(
+                            "min and max are not available with group_by: the store aggregates only count and sum per group. Filter to the group and call again without group_by.",
+                            json!({"fn":name}),
+                        ));
+                    }
+                    let field = needs(FilterType::extrema, "numeric or date")?;
+                    if name == "min" {
+                        AggregateFn::Min(field)
+                    } else {
+                        AggregateFn::Max(field)
+                    }
+                }
+                _ => return Err(invalid("aggregate fn must be count, sum, min or max").into()),
+            };
+            if functions.iter().any(|f| f.name() == function.name()) {
+                return Err(invalid(format!("duplicate aggregate {}", function.name())).into());
+            }
+            functions.push(function);
+        }
+        let extrema = functions
+            .iter()
+            .filter(|f| matches!(f, AggregateFn::Min(_) | AggregateFn::Max(_)))
+            .count();
+        if extrema > MAX_EXTREMA {
+            return Err(unsupported(
+                format!("at most {MAX_EXTREMA} of min and max per call: each is another billed store query"),
+                json!({"max":MAX_EXTREMA}),
+            ));
+        }
+        Ok(functions)
+    }
+
+    /// Count, sum, min and max over the rows a filter matches, optionally
+    /// grouped. Count and sum share one native aggregate query; each min or
+    /// max is one ordered one-row query. Every query is billed at the
+    /// namespace's size, so the call is bounded to three and reports the bytes.
+    async fn aggregate(
+        &self,
+        ns: &McpNamespace,
+        headers: HeaderMap,
+        mut arguments: Map<String, Value>,
+    ) -> Result<CallToolResult, ToolFailure> {
+        let schema = self.schema(ns).await?;
+        let group_by: Vec<String> = match arguments.remove("group_by") {
+            None => Vec::new(),
+            Some(value) => serde_json::from_value(value)
+                .ok()
+                .filter(|fields: &Vec<String>| fields.len() <= MAX_GROUP_BY)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "group_by must be a list of at most {MAX_GROUP_BY} field names"
+                    ))
+                })?,
+        };
+        for (index, field) in group_by.iter().enumerate() {
+            if group_by[..index].contains(field) {
+                return Err(invalid(format!("group_by repeats `{field}`")).into());
+            }
+            if !schema.filters.get(field).is_some_and(FilterType::groupable) {
+                return Err(ToolFailure::typed(
+                    "invalid_argument",
+                    format!(
+                        "`{field}` cannot be grouped by. Groupable fields: {}.",
+                        schema.field_names(FilterType::groupable)
+                    ),
+                    json!({"field":field}),
+                ));
+            }
+        }
+        let limit = match arguments.remove("limit") {
+            None => DEFAULT_GROUPS,
+            Some(v) => v
+                .as_u64()
+                .filter(|n| (1..=MAX_GROUPS).contains(n))
+                .ok_or_else(|| {
+                    invalid(format!("limit must be an integer from 1 to {MAX_GROUPS}"))
+                })?,
+        };
+        let functions = Self::aggregate_functions(
+            &schema,
+            arguments.remove("aggregates"),
+            !group_by.is_empty(),
+        )?;
+        let filters = schema.filters(arguments.remove("filters"))?;
+
+        let mut billed = BilledBytes::default();
+        let native: Map<String, Value> = functions
+            .iter()
+            .filter_map(|f| match f {
+                AggregateFn::Count => Some((f.name(), json!(["Count"]))),
+                AggregateFn::Sum(field) => Some((f.name(), json!(["Sum", field]))),
+                _ => None,
+            })
+            .collect();
+        let mut groups: Vec<Value> = vec![json!({})];
+        let mut truncated = false;
+        if !native.is_empty() {
+            let mut body = json!({"aggregate_by":native});
+            if let Some(filters) = &filters {
+                body["filters"] = filters.clone();
+            }
+            if !group_by.is_empty() {
+                body["group_by"] = json!(group_by);
+                // One past the limit shows whether the store cut the groups off.
+                body["top_k"] = json!(limit + 1);
+            }
+            let response = self.query_body(ns, &headers, body).await?;
+            billed.add(&response);
+            if group_by.is_empty() {
+                groups = vec![response
+                    .get("aggregations")
+                    .filter(|v| v.is_object())
+                    .cloned()
+                    .ok_or_else(|| invalid("the store returned no aggregations"))?];
+            } else {
+                groups = response
+                    .get("aggregation_groups")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| invalid("the store returned no aggregation groups"))?;
+                truncated = groups.len() as u64 > limit;
+                groups.truncate(limit as usize);
+            }
+        }
+        for function in &functions {
+            let (field, direction) = match function {
+                AggregateFn::Min(field) => (field, "asc"),
+                AggregateFn::Max(field) => (field, "desc"),
+                _ => continue,
+            };
+            let present = json!([field, "NotEq", null]);
+            let mut body = json!({"rank_by":[field,direction],"top_k":1,"include_attributes":[field],
+                "filters":filters.as_ref().map_or(present.clone(), |f| json!(["And", [f, present]]))});
+            body["consistency"] = json!({"level":"strong"});
+            let response = self.query_body(ns, &headers, body).await?;
+            billed.add(&response);
+            groups[0][function.name()] = response
+                .pointer("/rows/0")
+                .and_then(|row| row.get(field))
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
+
+        let mut text = if group_by.is_empty() {
+            "Totals".to_string()
+        } else {
+            format!("{} group(s) by {}", groups.len(), group_by.join(", "))
+        };
+        for group in groups.iter().take(100) {
+            let cell = |name: &str| match &group[name] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let key = group_by
+                .iter()
+                .map(|f| cell(f))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let values = functions
+                .iter()
+                .map(|f| format!("{}={}", f.name(), cell(&f.name())))
+                .collect::<Vec<_>>()
+                .join(", ");
+            text.push_str(&format!(
+                "\n{}{values}",
+                if key.is_empty() {
+                    String::new()
+                } else {
+                    format!("{key}: ")
+                }
+            ));
+        }
+        if truncated {
+            text.push_str(&format!(
+                "\nTruncated at {limit} groups, in key order: add filters or raise limit."
+            ));
+        }
+        text.push_str(&format!(
+            "\nBilled by the store: {:.2} GB queried over {} quer{}.",
+            billed.queried as f64 / 1e9,
+            billed.queries,
+            if billed.queries == 1 { "y" } else { "ies" }
+        ));
+        tracing::info!(
+            server = %self.name,
+            namespace = %ns.name,
+            queries = billed.queries,
+            billable_logical_bytes_queried = billed.queried,
+            billable_logical_bytes_returned = billed.returned,
+            "MCP aggregate billed"
+        );
+        let mut result = CallToolResult::structured(json!({
+            "namespace":ns.name,"group_by":group_by,"groups":groups,"truncated":truncated,
+            "limit":limit,"counts":if ns.collapse.is_some() { "rows" } else { "records" },
+            "billing":billed.json()
+        }));
+        result.content = vec![ContentBlock::text(text)];
+        Ok(result)
+    }
+}
+
 async fn decode_response(response: Response) -> Result<Value, AppError> {
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
@@ -843,6 +1217,32 @@ async fn decode_response(response: Response) -> Result<Value, AppError> {
     }
     Ok(body)
 }
+
+#[derive(Clone, Copy)]
+enum ToolKind {
+    Search,
+    Get,
+    Aggregate,
+}
+
+impl ToolKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Get => "get",
+            Self::Aggregate => "aggregate",
+        }
+    }
+}
+
+/// Most fields one aggregate groups by, as the store allows.
+const MAX_GROUP_BY: usize = 2;
+const MAX_AGGREGATES: usize = 4;
+/// Min and max are ordered one-row queries, each billed like any query.
+const MAX_EXTREMA: usize = 2;
+const DEFAULT_GROUPS: u64 = 100;
+const MAX_GROUPS: u64 = 1000;
+const AGGREGATE_COST: &str = "The store bills each query at the namespace's size (about 2 GB for the BCC pages), whatever the filters; a call makes at most three queries and returns the billed bytes.";
 
 /// Deepest rank a cursor can reach, and the most matches counted.
 const MAX_WINDOW: u64 = 1000;
@@ -1062,11 +1462,23 @@ impl NamespaceSchema {
         search_description.push_str(" Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.");
         let search_schema = json!({"type":"object","properties":{
             "query":{"type":"string","minLength":1},
-            "filters":{"type":"object","properties":properties,"additionalProperties":false},
+            "filters":{"type":"object","properties":properties.clone(),"additionalProperties":false},
             "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
             "cursor":{"type":"string","minLength":1,"description":"The next_cursor from the previous page of the same query. Omit for the first page."}
         },"required":["query"],"additionalProperties":false});
         let get_schema = json!({"type":"object","properties":{"id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]}},"required":["id"],"additionalProperties":false});
+        let aggregate_description = format!(
+            "Count rows, or sum/min/max a numeric field, optionally grouped by one or two fields, with the same filters as search. {description} Groupable: {}. Summable: {}.{} {AGGREGATE_COST}",
+            self.field_names(FilterType::groupable),
+            self.field_names(FilterType::summable),
+            if ns.collapse.is_some() { " Counts rows (pages), not collapsed documents." } else { "" },
+        );
+        let aggregate_schema = json!({"type":"object","properties":{
+            "group_by":aggregate_group_by_schema(),
+            "aggregates":aggregate_aggregates_schema(),
+            "filters":{"type":"object","properties":properties,"additionalProperties":false},
+            "limit":aggregate_limit_schema()
+        },"additionalProperties":false});
         vec![
             Tool::new(
                 format!("search_{}", ns.tool_name()),
@@ -1080,7 +1492,27 @@ impl NamespaceSchema {
                 get_schema.as_object().unwrap().clone(),
             )
             .with_annotations(ToolAnnotations::new().read_only(true)),
+            Tool::new(
+                format!("aggregate_{}", ns.tool_name()),
+                aggregate_description,
+                aggregate_schema.as_object().unwrap().clone(),
+            )
+            .with_annotations(ToolAnnotations::new().read_only(true)),
         ]
+    }
+
+    fn field_names(&self, keep: fn(&FilterType) -> bool) -> String {
+        let names: Vec<&str> = self
+            .filters
+            .iter()
+            .filter(|(_, ty)| keep(ty))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if names.is_empty() {
+            "none".into()
+        } else {
+            names.join(", ")
+        }
     }
 
     fn filters(&self, value: Option<Value>) -> Result<Option<Value>, AppError> {
@@ -1146,6 +1578,20 @@ impl NamespaceSchema {
 }
 
 impl FilterType {
+    /// Fields `group_by` takes. Floats and timestamps make one group per row.
+    fn groupable(&self) -> bool {
+        matches!(self, Self::String | Self::Boolean | Self::Integer)
+    }
+
+    fn summable(&self) -> bool {
+        matches!(self, Self::Integer | Self::Number)
+    }
+
+    /// Fields min and max can order.
+    fn extrema(&self) -> bool {
+        matches!(self, Self::Integer | Self::Number | Self::Date)
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::String => "string",

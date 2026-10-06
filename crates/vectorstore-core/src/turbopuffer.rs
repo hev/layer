@@ -4576,6 +4576,9 @@ async fn mock_passthrough(
                     "performance": {},
                 }));
             }
+            if let Some(response) = mock_native_query(client, namespace, &body).await {
+                return Ok(response);
+            }
             mock_query_body(client, namespace).await
         }
         ("POST", ["v2", "namespaces", _namespace, "explain_query"]) => {
@@ -4913,6 +4916,163 @@ async fn mock_write_body(
         }
     }
     Ok(response)
+}
+
+/// Mock bytes a native query bills, as upstream's floor does for a small namespace.
+pub const MOCK_NATIVE_QUERY_BILLED_BYTES: u64 = 1_280_000_000;
+
+fn mock_filter_matches(filter: &Value, doc: &DocumentResponse) -> bool {
+    let Some(parts) = filter.as_array() else {
+        return true;
+    };
+    match (parts.first().and_then(Value::as_str), parts.get(1)) {
+        (Some("And"), Some(Value::Array(all))) => all.iter().all(|f| mock_filter_matches(f, doc)),
+        (Some("Or"), Some(Value::Array(any))) => any.iter().any(|f| mock_filter_matches(f, doc)),
+        (Some(attr), Some(Value::String(op))) => {
+            let value = if attr == "id" {
+                Some(Value::String(doc.id.clone()))
+            } else {
+                doc.attributes.get(attr).cloned()
+            }
+            .unwrap_or(Value::Null);
+            let want = parts.get(2).cloned().unwrap_or(Value::Null);
+            let order = match (value.as_f64(), want.as_f64()) {
+                (Some(a), Some(b)) => a.partial_cmp(&b),
+                _ => value.as_str().zip(want.as_str()).map(|(a, b)| a.cmp(b)),
+            };
+            match op.as_str() {
+                "Eq" => value == want,
+                "NotEq" => value != want,
+                "Gte" => order.is_some_and(|o| o.is_ge()),
+                "Gt" => order.is_some_and(|o| o.is_gt()),
+                "Lte" => order.is_some_and(|o| o.is_le()),
+                "Lt" => order.is_some_and(|o| o.is_lt()),
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
+
+/// The native `aggregate_by` / `group_by` and attribute-ordered query forms,
+/// evaluated over the mock's documents. `None` leaves every other body to
+/// the row-listing mock.
+async fn mock_native_query(
+    client: &MockTurbopufferClient,
+    namespace: &str,
+    body: &Value,
+) -> Option<Value> {
+    let docs = client.docs.read().await;
+    let matching: Vec<&DocumentResponse> = docs
+        .get(namespace)
+        .map(|ns| ns.values().collect())
+        .unwrap_or_default();
+    let matching: Vec<&DocumentResponse> = matching
+        .into_iter()
+        .filter(|doc| {
+            body.get("filters")
+                .is_none_or(|filter| mock_filter_matches(filter, doc))
+        })
+        .collect();
+    let top_k = body.get("top_k").and_then(Value::as_u64).unwrap_or(1200) as usize;
+    let billing = |returned: usize| {
+        serde_json::json!({
+            "billable_logical_bytes_queried": MOCK_NATIVE_QUERY_BILLED_BYTES,
+            "billable_logical_bytes_returned": returned as u64,
+        })
+    };
+    if let Some(aggregates) = body.get("aggregate_by").and_then(Value::as_object) {
+        let group_by: Vec<&str> = body
+            .get("group_by")
+            .and_then(Value::as_array)
+            .map(|g| g.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let key = |doc: &DocumentResponse| -> Vec<Value> {
+            group_by
+                .iter()
+                .map(|attr| doc.attributes.get(*attr).cloned().unwrap_or(Value::Null))
+                .collect()
+        };
+        let mut groups: Vec<(Vec<Value>, Vec<&DocumentResponse>)> = Vec::new();
+        for doc in matching {
+            let k = key(doc);
+            match groups.iter_mut().find(|(existing, _)| *existing == k) {
+                Some((_, members)) => members.push(doc),
+                None => groups.push((k, vec![doc])),
+            }
+        }
+        groups.sort_by_key(|(k, _)| serde_json::to_string(k).unwrap_or_default());
+        let computed: Vec<Value> = groups
+            .iter()
+            .take(top_k)
+            .map(|(k, members)| {
+                let mut row = serde_json::Map::new();
+                for (attr, value) in group_by.iter().zip(k) {
+                    row.insert((*attr).to_string(), value.clone());
+                }
+                for (name, spec) in aggregates {
+                    let value = match spec.get(0).and_then(Value::as_str) {
+                        Some("Count") => Value::from(members.len() as u64),
+                        Some("Sum") => {
+                            let attr = spec.get(1).and_then(Value::as_str).unwrap_or_default();
+                            let sum: f64 = members
+                                .iter()
+                                .filter_map(|d| d.attributes.get(attr).and_then(Value::as_f64))
+                                .sum();
+                            if sum.fract() == 0.0 {
+                                Value::from(sum as i64)
+                            } else {
+                                Value::from(sum)
+                            }
+                        }
+                        _ => Value::Null,
+                    };
+                    row.insert(name.clone(), value);
+                }
+                Value::Object(row)
+            })
+            .collect();
+        let mut response = if group_by.is_empty() {
+            let totals = computed
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| serde_json::json!({}));
+            serde_json::json!({ "aggregations": totals })
+        } else {
+            serde_json::json!({ "aggregation_groups": computed })
+        };
+        response["billing"] = billing(64);
+        return Some(response);
+    }
+    let order = body.get("rank_by").and_then(Value::as_array)?;
+    let (attr, direction) = (order.first()?.as_str()?, order.get(1)?.as_str()?);
+    if attr == "id" || !matches!(direction, "asc" | "desc") {
+        return None;
+    }
+    let mut rows: Vec<&DocumentResponse> = matching;
+    rows.sort_by(|a, b| {
+        let (a, b) = (
+            a.attributes.get(attr).and_then(Value::as_f64),
+            b.attributes.get(attr).and_then(Value::as_f64),
+        );
+        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if direction == "desc" {
+        rows.reverse();
+    }
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .take(top_k)
+        .map(|doc| {
+            let mut row = serde_json::Map::new();
+            row.insert("id".into(), Value::String(doc.id.clone()));
+            if let Some(value) = doc.attributes.get(attr) {
+                row.insert(attr.to_string(), value.clone());
+            }
+            Value::Object(row)
+        })
+        .collect();
+    Some(serde_json::json!({ "rows": rows, "billing": billing(32) }))
 }
 
 async fn mock_query_body(
