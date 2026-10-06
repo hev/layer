@@ -1679,6 +1679,28 @@ fn compact_groups(body: Value) -> Result<Value, AppError> {
     Ok(json!({"groups":compact,"collapse":body["collapse"]}))
 }
 
+/// Where else the same file lives, from a row's `locations` attribute (a JSON
+/// list written when a document has several copies): each copy's source and its
+/// link, `webUrl` for a drive copy and `rest.url` for a REST one. None unless
+/// there is more than one copy.
+fn other_copies(attrs: &Value) -> Option<String> {
+    let locations: Vec<Value> = serde_json::from_str(attrs.get("locations")?.as_str()?).ok()?;
+    if locations.len() < 2 {
+        return None;
+    }
+    let links: Vec<String> = locations
+        .iter()
+        .filter_map(|location| {
+            let (source, url) = match location.get("rest") {
+                Some(rest) => ("rest", rest.get("url")?.as_str()?),
+                None => ("clouddrive", location.get("webUrl")?.as_str()?),
+            };
+            Some(format!("{source} {url}"))
+        })
+        .collect();
+    (links.len() > 1).then(|| links.join("; "))
+}
+
 fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
     let rows = body.get("rows").and_then(Value::as_array);
     let hits: Vec<&Value> = if let Some(groups) = body
@@ -1714,6 +1736,9 @@ fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
             if let (true, Some(page), false) = (page_link, page, url.contains('#')) {
                 text.push_str(&format!(" (page {page}: {url}#page={page})"));
             }
+        }
+        if let Some(copies) = other_copies(attrs) {
+            text.push_str(&format!(" [also: {copies}]"));
         }
     }
     text
@@ -1793,6 +1818,20 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("distinct groups"));
+    }
+
+    #[test]
+    fn a_document_with_several_copies_lists_every_link() {
+        let locations = json!([
+            {"source":"clouddrive","webUrl":"https://example.test/a.pdf"},
+            {"source":"rest","rest":{"url":"rest://ki/17.pdf","rowId":"17"}}
+        ])
+        .to_string();
+        let body = json!({"id":"doc#p1","attributes":{"text":"t","webUrl":"https://example.test/a.pdf","locations":locations}});
+        let text = render(&body, Some("webUrl"), false);
+        assert!(text.contains("— https://example.test/a.pdf [also: clouddrive https://example.test/a.pdf; rest rest://ki/17.pdf]"));
+        let single = json!({"id":"d#p1","attributes":{"text":"t","locations":json!([{"webUrl":"https://example.test/a.pdf"}]).to_string()}});
+        assert!(!render(&single, None, false).contains("also"));
     }
 
     #[test]
