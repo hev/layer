@@ -239,7 +239,7 @@ impl Telemetry {
 
     pub fn spawn(self) {
         tokio::spawn(async move {
-            self.send(self.started_payload()).await;
+            let mut started_pending = !self.send(self.started_payload()).await;
             let mut interval = tokio::time::interval(HEARTBEAT_TICK);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // The first tick completes immediately; heartbeats start an hour in.
@@ -247,18 +247,26 @@ impl Telemetry {
             let mut idle_ticks = 0u32;
             loop {
                 interval.tick().await;
-                idle_ticks = idle_ticks.saturating_add(1);
-                let usage = self.counters.take_usage();
-                if usage.is_empty() && idle_ticks < IDLE_HEARTBEAT_TICKS {
-                    continue;
-                }
-                if self.send(self.heartbeat_payload(usage)).await {
-                    idle_ticks = 0;
-                } else {
-                    self.counters.restore_usage(usage);
-                }
+                self.heartbeat_tick(&mut started_pending, &mut idle_ticks)
+                    .await;
             }
         });
+    }
+
+    async fn heartbeat_tick(&self, started_pending: &mut bool, idle_ticks: &mut u32) {
+        if *started_pending {
+            *started_pending = !self.send(self.started_payload()).await;
+        }
+        *idle_ticks = idle_ticks.saturating_add(1);
+        let usage = self.counters.take_usage();
+        if usage.is_empty() && *idle_ticks < IDLE_HEARTBEAT_TICKS {
+            return;
+        }
+        if self.send(self.heartbeat_payload(usage)).await {
+            *idle_ticks = 0;
+        } else {
+            self.counters.restore_usage(usage);
+        }
     }
 
     fn base_properties(&self) -> serde_json::Map<String, Value> {
@@ -304,8 +312,9 @@ impl Telemetry {
                 );
                 false
             }
-            Err(error) => {
-                debug!(error = %error, "Telemetry send failed");
+            Err(_) => {
+                // reqwest errors can include the endpoint URL; never log it.
+                debug!("Telemetry send failed");
                 false
             }
         }
@@ -423,6 +432,105 @@ fn normalized_backend_kinds(kinds: impl IntoIterator<Item = String>) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_endpoint(
+        statuses: Vec<axum::http::StatusCode>,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = Arc::clone(&events);
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(move |axum::Json(payload): axum::Json<Value>| {
+                let mut events = received.lock().expect("fake endpoint lock");
+                let status = statuses
+                    .get(events.len())
+                    .copied()
+                    .unwrap_or(axum::http::StatusCode::ACCEPTED);
+                events.push(payload);
+                async move { status }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake endpoint listener");
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fake endpoint server");
+        });
+        (endpoint, events, server)
+    }
+
+    #[tokio::test]
+    async fn failed_started_retries_and_failed_heartbeat_retains_usage() {
+        use axum::http::StatusCode;
+        let (endpoint, events, server) = fake_endpoint(vec![
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::ACCEPTED,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::ACCEPTED,
+        ])
+        .await;
+        let counters = Arc::new(TelemetryCounters::default());
+        counters.record_query();
+        let telemetry = Telemetry::new(endpoint, None, Vec::new(), Arc::clone(&counters))
+            .expect("telemetry client")
+            .with_distribution(Some("ci".to_string()), None);
+        let mut started_pending = !telemetry.send(telemetry.started_payload()).await;
+        assert!(started_pending);
+        let mut idle_ticks = 0;
+        telemetry
+            .heartbeat_tick(&mut started_pending, &mut idle_ticks)
+            .await;
+        assert!(!started_pending);
+        assert_eq!(idle_ticks, 1);
+        telemetry
+            .heartbeat_tick(&mut started_pending, &mut idle_ticks)
+            .await;
+        assert_eq!(idle_ticks, 0);
+        assert!(counters.take_usage().is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["event"], "gateway_started");
+        assert_eq!(events[1]["event"], "gateway_started");
+        for event in &events[2..] {
+            assert_eq!(event["event"], "gateway_heartbeat");
+            assert_eq!(event["properties"]["usage"]["queries"], 1);
+            assert_eq!(event["properties"]["distribution"], "ci");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn idle_gateway_waits_for_daily_heartbeat() {
+        let (endpoint, events, server) = fake_endpoint(Vec::new()).await;
+        let telemetry = Telemetry::new(
+            endpoint,
+            None,
+            Vec::new(),
+            Arc::new(TelemetryCounters::default()),
+        )
+        .expect("telemetry client");
+        let mut started_pending = false;
+        let mut idle_ticks = 0;
+        for _ in 1..IDLE_HEARTBEAT_TICKS {
+            telemetry
+                .heartbeat_tick(&mut started_pending, &mut idle_ticks)
+                .await;
+        }
+        assert!(events.lock().unwrap().is_empty());
+        telemetry
+            .heartbeat_tick(&mut started_pending, &mut idle_ticks)
+            .await;
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(idle_ticks, 0);
+        server.abort();
+    }
 
     #[test]
     fn counters_snapshot_feature_touches() {
