@@ -247,6 +247,10 @@ spec:
             {{- end }}
             - name: PORT
               value: {{ .Values.gateway.port | quote }}
+            {{- with (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
+            - name: LAYER_FIELD_STATS_CAPTURE_CONFIG
+              value: /etc/layer/field-stats-capture/capture.json
+            {{- end }}
             {{- if not (dig "telemetry" "enabled" true .Values.gateway) }}
             - name: LAYER_TELEMETRY
               value: "off"
@@ -342,8 +346,13 @@ spec:
               value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
               {{- end }}
             {{- end }}
-          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled }}
+          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
           volumeMounts:
+            {{- if (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
+            - name: field-stats-capture
+              mountPath: /etc/layer/field-stats-capture
+              readOnly: true
+            {{- end }}
             {{- if .Values.gateway.lattice.enabled }}
             - name: lattice-model
               mountPath: /var/lib/hevlayer/lattice
@@ -375,6 +384,14 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
       volumes:
+        {{- if (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
+        - name: field-stats-capture
+          configMap:
+            name: {{ .Values.gateway.fieldStatsCapture.configMapName | quote }}
+            items:
+              - key: capture.json
+                path: capture.json
+        {{- end }}
         {{- if .Values.gateway.lattice.enabled }}
         - name: lattice-model
           emptyDir: {}

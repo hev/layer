@@ -21,6 +21,12 @@ gateway:
     allowedHosts: ""
     servers: {}
   replicas: 1
+  # Field stats guarded capture (docs: /docs/api/namespace-metadata). Name of an
+  # existing ConfigMap with key capture.json holding the reviewed capture
+  # configuration. Empty keeps legacy snapshot behavior; the chart never
+  # creates or defaults review inputs.
+  fieldStatsCapture:
+    configMapName: ""
   # Anonymous gateway telemetry (docs: /docs/observability#telemetry). Set
   # false for CI, test and internal clusters so they don't show up in install
   # analytics.
