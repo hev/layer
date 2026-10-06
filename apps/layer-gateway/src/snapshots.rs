@@ -79,8 +79,8 @@ pub fn latest_snapshot_cache_key(namespace: &str) -> String {
     format!("latest/{}", namespace)
 }
 
-/// Persisted snapshot body. `sha` is the SHA-256 of the canonical JSON of the
-/// `fields` array (sorted) and is the only "content identity" in the system.
+/// Persisted snapshot body. `sha` identifies the aggregated snapshot contents;
+/// it is not a source generation or a certificate of current dataset coverage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotBody {
     pub namespace: String,
@@ -180,11 +180,14 @@ async fn snapshot_namespace_attributed(state: Arc<AppState>, namespace: String) 
         return;
     }
 
-    // Skip namespaces with no facet config — nothing to histogram.
-    let facet_fields = match state.facet_fields_for(&namespace) {
-        Some(fields) => fields,
-        _ => return,
-    };
+    let facet_fields = state.facet_fields_for(&namespace).unwrap_or_default();
+    #[cfg(feature = "pro")]
+    let stats_policy = crate::field_stats::policy(&state, &namespace).filter(|p| !matches!(&p.fields, crate::index_config::StatsFields::List(fields) if fields.is_empty()));
+    #[cfg(not(feature = "pro"))]
+    let stats_policy: Option<crate::index_config::FieldStatsPolicy> = None;
+    if facet_fields.is_empty() && stats_policy.is_none() {
+        return;
+    }
 
     // Watermark must exist; consistency.rs only fires us after an advance,
     // but a stale spawn could race a reset. Bail rather than guess.
@@ -195,10 +198,34 @@ async fn snapshot_namespace_attributed(state: Arc<AppState>, namespace: String) 
 
     // Floor: bail if we snapshot'd this namespace too recently.
     let now = now_ms();
-    let floor_ms = state
+    let snapshot_floor = state
         .snapshot_interval_ms_for(&namespace)
         .unwrap_or(state.snapshot_min_interval_ms);
-    if let Some(last) = state.last_snapshot_at.get(&namespace).map(|r| *r.value()) {
+    // Unsupported certified coverage must not change the legacy snapshot
+    // cadence. This probe is a capability contract, never a document scan.
+    #[cfg(feature = "field-stats-capture")]
+    let has_capture = state
+        .field_stats_capture
+        .as_ref()
+        .is_some_and(|p| p.configured(&namespace));
+    #[cfg(not(feature = "field-stats-capture"))]
+    let has_capture = false;
+    let floor_ms = stats_policy
+        .as_ref()
+        .filter(|_| has_capture)
+        .map_or(snapshot_floor, |p| {
+            if facet_fields.is_empty() {
+                p.interval_ms()
+            } else {
+                snapshot_floor.max(p.interval_ms())
+            }
+        });
+    let last_success = state.last_snapshot_at.get(&namespace).map(|r| *r.value());
+    let last_attempt = state
+        .last_snapshot_attempt_at
+        .get(&namespace)
+        .map(|r| *r.value());
+    if let Some(last) = last_success.into_iter().chain(last_attempt).max() {
         if now.saturating_sub(last) < floor_ms {
             debug!(
                 namespace = %namespace,
@@ -218,25 +245,38 @@ async fn snapshot_namespace_attributed(state: Arc<AppState>, namespace: String) 
         }
     }
 
-    let result = run_snapshot(state.as_ref(), &namespace, watermark_ms, &facet_fields).await;
+    let _flight = SnapshotFlight {
+        state: state.clone(),
+        namespace: namespace.clone(),
+    };
+    // The attempt floor is separate from the successful coverage marker. Reserve it
+    // before awaiting work so errors, cancellation and budget refusal cannot
+    // turn stable watcher polls into immediate repeated scan attempts.
+    state
+        .last_snapshot_attempt_at
+        .insert(namespace.clone(), now);
+    let result = reconcile_shared(state.clone(), &namespace, watermark_ms, &facet_fields).await;
 
     match result {
-        Ok(outcome) => {
-            if let Err(e) =
-                cache_latest_snapshot(state.aerospike.as_ref(), &namespace, outcome.body_bytes())
-                    .await
-            {
-                warn!(
-                    namespace = %namespace,
-                    error = %e,
-                    "failed to mirror latest snapshot to Aerospike"
-                );
+        Ok(None) => {
+            state.last_snapshot_at.insert(namespace.clone(), now);
+        }
+        Ok(Some(outcome)) => {
+            if let Some(bytes) = outcome.body_bytes() {
+                if let Err(e) =
+                    cache_latest_snapshot(state.aerospike.as_ref(), &namespace, bytes).await
+                {
+                    warn!(namespace = %namespace, error = %e, "failed to mirror latest snapshot to Aerospike");
+                }
             }
 
             // Bump `last_snapshot_at` whether the body changed or not — a
             // dedup'd snapshot still counts as "we just checked."
             state.last_snapshot_at.insert(namespace.clone(), now);
             match outcome {
+                SnapshotOutcome::StatsOnly => {
+                    debug!(namespace = %namespace, "field stats reconciled without snapshot history")
+                }
                 SnapshotOutcome::Wrote { key, sha, .. } => {
                     info!(namespace = %namespace, key = %key, sha = %sha, "snapshot written");
                 }
@@ -249,12 +289,23 @@ async fn snapshot_namespace_attributed(state: Arc<AppState>, namespace: String) 
             warn!(namespace = %namespace, error = %e, "snapshot failed");
         }
     }
+}
 
-    state.snapshot_inflight.remove(&namespace);
+// Cancellation releases the flight just as completion does. Otherwise a lost
+// capture future would permanently suppress later config/write reconciliation.
+struct SnapshotFlight {
+    state: Arc<AppState>,
+    namespace: String,
+}
+impl Drop for SnapshotFlight {
+    fn drop(&mut self) {
+        self.state.snapshot_inflight.remove(&self.namespace);
+    }
 }
 
 #[derive(Debug)]
 enum SnapshotOutcome {
+    StatsOnly,
     Wrote {
         key: String,
         sha: String,
@@ -267,12 +318,111 @@ enum SnapshotOutcome {
 }
 
 impl SnapshotOutcome {
-    fn body_bytes(&self) -> &[u8] {
+    fn body_bytes(&self) -> Option<&[u8]> {
         match self {
-            SnapshotOutcome::Wrote { bytes, .. } => bytes,
-            SnapshotOutcome::Deduped { bytes, .. } => bytes,
+            SnapshotOutcome::StatsOnly => None,
+            SnapshotOutcome::Wrote { bytes, .. } => Some(bytes),
+            SnapshotOutcome::Deduped { bytes, .. } => Some(bytes),
         }
     }
+}
+
+async fn reconcile_shared(
+    state: Arc<AppState>,
+    namespace: &str,
+    watermark_ms: u64,
+    facets: &[String],
+) -> Result<Option<SnapshotOutcome>, String> {
+    let reconcile_lock = state
+        .reconcile_locks
+        .entry(namespace.into())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _reconcile_guard = reconcile_lock.lock().await;
+    #[cfg(feature = "field-stats-capture")]
+    if let Some(provider) = state
+        .field_stats_capture
+        .as_ref()
+        .filter(|p| p.configured(namespace))
+    {
+        // Local SnapshotFlight is not cross-replica exclusion. Retain the
+        // existing owner's work lock across bundle lookup, scan and atomic put.
+        // Work lock -> capture/cache fence is the Function writer lock order.
+        let timeout = provider
+            .reconcile_timeout(namespace)
+            .filter(|duration| !duration.is_zero())
+            .ok_or("reviewed reconciliation deadline unavailable")?;
+        tokio::time::timeout(timeout, async {
+            let work_lock = provider.work_lock(namespace).await?;
+            layer_transform::udf::run_namespace_locked(
+                work_lock.as_ref(),
+                async {
+                    let session = provider
+                        .acquire(namespace, &state.store_for_namespace(namespace))
+                        .await?
+                        .ok_or_else(|| "configured capture unavailable".to_string())?;
+                    crate::field_stats_capture::reconcile(
+                        state.clone(),
+                        namespace.into(),
+                        watermark_ms,
+                        session,
+                    )
+                    .await
+                },
+                |e| e.to_string(),
+            )
+            .await
+        })
+        .await
+        .map_err(|_| "reconciliation/publication deadline exceeded".to_string())??;
+        return Ok(None);
+    }
+    let meta = state
+        .turbopuffer()
+        .head_namespace(namespace)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !meta.is_stable() {
+        return Ok(None);
+    }
+    #[cfg(feature = "pro")]
+    let policy = crate::field_stats::policy(&state, namespace);
+    #[cfg(not(feature = "pro"))]
+    let policy: Option<crate::index_config::FieldStatsPolicy> = None;
+    let mut projection = facets.to_vec();
+    #[cfg(feature = "pro")]
+    {
+        let fields = policy.as_ref().map_or_else(
+            || facets.to_vec(),
+            |p| {
+                p.resolve(&crate::field_stats::filterable_attributes(
+                    meta.raw.get("schema"),
+                ))
+            },
+        );
+        state
+            .field_stats_coverage
+            .insert(namespace.into(), fields.clone());
+        // Unconfigured stores retain legacy facets, never new declared scans.
+    }
+    projection.sort();
+    projection.dedup();
+    if projection.is_empty() {
+        if policy.is_some() {
+            return Err("certified field-stats coverage unavailable: no configured capture".into());
+        }
+        return Ok(None);
+    }
+    run_snapshot(
+        &state,
+        namespace,
+        watermark_ms,
+        facets,
+        &projection,
+        &meta.raw,
+    )
+    .await
+    .map(Some)
 }
 
 async fn run_snapshot(
@@ -280,10 +430,36 @@ async fn run_snapshot(
     namespace: &str,
     watermark_ms: u64,
     facet_fields: &[String],
+    projection: &[String],
+    before: &Value,
 ) -> Result<SnapshotOutcome, String> {
-    let aggregation = aggregate_facets(state, namespace, facet_fields, SNAPSHOT_SCAN_PAGE_SIZE)
+    let epoch = state
+        .stats_write_epoch
+        .get(namespace)
+        .map(|v| *v)
+        .unwrap_or(0);
+    let aggregation = aggregate_facets(state, namespace, projection, SNAPSHOT_SCAN_PAGE_SIZE)
         .await
         .map_err(|e| format!("upstream scan: {}", e))?;
+    let after = state
+        .turbopuffer()
+        .head_namespace(namespace)
+        .await
+        .map_err(|e| e.to_string())?;
+    let after_epoch = state
+        .stats_write_epoch
+        .get(namespace)
+        .map(|v| *v)
+        .unwrap_or(0);
+    if !after.is_stable()
+        || before.get("last_write_at") != after.raw.get("last_write_at")
+        || before.get("schema") != after.raw.get("schema")
+        || epoch != after_epoch
+    {
+        return Err(
+            "namespace changed during reconcile; keeping previous conservative stats".into(),
+        );
+    }
 
     #[cfg(feature = "pro")]
     if let Err(e) = crate::field_stats::store_reconciled(
@@ -291,13 +467,25 @@ async fn run_snapshot(
         namespace,
         watermark_ms,
         aggregation.row_count,
-        aggregation.stats.clone(),
+        None,
+        crate::field_stats::ScanStats {
+            fields: aggregation
+                .stats
+                .clone()
+                .fields
+                .into_iter()
+                .filter(|(f, _)| crate::field_stats::tracked_fields(state, namespace).contains(f))
+                .collect(),
+        },
     )
     .await
     {
-        warn!(namespace = %namespace, error = %e, "field stats reconcile store failed");
+        warn!(namespace, error = %e, "uncertified legacy field stats persistence failed; preserving snapshot availability");
     }
 
+    if facet_fields.is_empty() {
+        return Ok(SnapshotOutcome::StatsOnly);
+    }
     let (fields, fields_skipped) = build_field_summaries(facet_fields, &aggregation.counts);
     observe_skipped_fields(state.metrics.as_ref(), namespace, &fields_skipped);
     let sha = compute_content_sha(aggregation.row_count, &fields, &fields_skipped);
@@ -506,13 +694,13 @@ pub async fn cache_latest_snapshot_from_s3(
 
 /// Paginate Turbopuffer once, requesting only the configured facet fields,
 /// and aggregate distinct value counts per field.
-struct FacetAggregation {
-    row_count: u64,
-    counts: HashMap<String, HashMap<String, u64>>,
+pub(crate) struct FacetAggregation {
+    pub(crate) row_count: u64,
+    pub(crate) counts: HashMap<String, HashMap<String, u64>>,
     /// Missing counts, ranges and value counts for field stats, collected
     /// from the same pages (no extra scan, no extra fields).
     #[cfg(feature = "pro")]
-    stats: crate::field_stats::ScanStats,
+    pub(crate) stats: crate::field_stats::ScanStats,
 }
 
 async fn aggregate_facets(
@@ -540,7 +728,12 @@ async fn aggregate_facets(
         .collect();
     let mut row_count = 0;
     #[cfg(feature = "pro")]
-    let mut stats = crate::field_stats::ScanStats::default();
+    let mut stats = crate::field_stats::ScanStats {
+        fields: facet_fields
+            .iter()
+            .map(|f| (f.clone(), crate::field_stats::FieldAgg::default()))
+            .collect(),
+    };
     for partition in partitions {
         row_count += partition.row_count;
         #[cfg(feature = "pro")]
@@ -575,6 +768,57 @@ async fn aggregate_facets_partition(
     page_size: u32,
     filters: Option<Value>,
 ) -> Result<FacetAggregation, TurbopufferError> {
+    aggregate_facets_partition_at_consistency(
+        tpuf,
+        namespace,
+        facet_fields,
+        page_size,
+        filters,
+        false,
+    )
+    .await
+}
+
+pub(crate) type ScanPrepare = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), TurbopufferError>> + Send>,
+        > + Send
+        + Sync,
+>;
+pub(crate) struct ScanPageAdmission {
+    pub prepare: ScanPrepare,
+    pub permit: vectorstore_core::turbopuffer::QueryPermit,
+    pub billing: vectorstore_core::turbopuffer::ReadBillingObserver,
+}
+pub(crate) async fn aggregate_facets_partition_at_consistency(
+    tpuf: &dyn TurbopufferClient,
+    namespace: &str,
+    facet_fields: &[String],
+    page_size: u32,
+    filters: Option<Value>,
+    strong: bool,
+) -> Result<FacetAggregation, TurbopufferError> {
+    aggregate_facets_partition_with_admission(
+        tpuf,
+        namespace,
+        facet_fields,
+        page_size,
+        filters,
+        strong,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn aggregate_facets_partition_with_admission(
+    tpuf: &dyn TurbopufferClient,
+    namespace: &str,
+    facet_fields: &[String],
+    page_size: u32,
+    filters: Option<Value>,
+    strong: bool,
+    admission: Option<ScanPageAdmission>,
+) -> Result<FacetAggregation, TurbopufferError> {
     let mut counts: HashMap<String, HashMap<String, u64>> = facet_fields
         .iter()
         .map(|f| (f.clone(), HashMap::new()))
@@ -583,18 +827,64 @@ async fn aggregate_facets_partition(
     let mut cursor: Option<String> = None;
     let mut row_count = 0;
     #[cfg(feature = "pro")]
-    let mut stats = crate::field_stats::ScanStats::default();
+    let mut stats = crate::field_stats::ScanStats {
+        fields: facet_fields
+            .iter()
+            .map(|f| (f.clone(), crate::field_stats::FieldAgg::default()))
+            .collect(),
+    };
 
     loop {
-        let page = tpuf
-            .scan_page(
-                namespace,
-                cursor.as_deref(),
-                page_size,
-                filters.as_ref(),
-                Some(&include),
+        if let Some(admission) = &admission {
+            (admission.prepare)().await?;
+        }
+        let scan = async {
+            if strong {
+                #[cfg(feature = "field-stats-capture")]
+                {
+                    tpuf.scan_page_strong(
+                        namespace,
+                        cursor.as_deref(),
+                        page_size,
+                        filters.as_ref(),
+                        Some(&include),
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "field-stats-capture"))]
+                {
+                    return Err(TurbopufferError::Other(
+                        "complete capture feature unavailable".into(),
+                    ));
+                }
+            } else {
+                tpuf.scan_page(
+                    namespace,
+                    cursor.as_deref(),
+                    page_size,
+                    filters.as_ref(),
+                    Some(&include),
+                )
+                .await
+            }
+        };
+        let page = if let Some(admission) = &admission {
+            vectorstore_core::turbopuffer::scope_query_permit(
+                admission.permit.clone(),
+                vectorstore_core::turbopuffer::scope_read_billing(
+                    admission.billing.clone(),
+                    vectorstore_core::turbopuffer::scope_prepared_scan_metadata(scan),
+                ),
             )
-            .await?;
+            .await?
+        } else {
+            scan.await?
+        };
+        if page.next_cursor.is_some() && page.next_cursor == cursor {
+            return Err(TurbopufferError::Other(
+                "capture scan cursor did not advance".into(),
+            ));
+        }
 
         row_count += page.documents.len() as u64;
         for doc in &page.documents {
@@ -721,7 +1011,7 @@ fn value_to_key(val: &Value) -> String {
 /// Build canonical, sorted `FieldSummary` entries from raw counts, applying
 /// the cardinality cap. Fields over the cap are omitted from `fields` and
 /// recorded in `fields_skipped`.
-fn build_field_summaries(
+pub(crate) fn build_field_summaries(
     facet_fields: &[String],
     counts: &HashMap<String, HashMap<String, u64>>,
 ) -> (Vec<FieldSummary>, Vec<SnapshotFieldSkipped>) {
@@ -784,7 +1074,7 @@ impl SkipReason {
 /// `{row_count, fields: [...], fields_skipped: [...]}`.
 /// Namespace and watermark are intentionally excluded — two snapshots with
 /// identical facet distributions share a SHA even if their watermarks differ.
-fn compute_content_sha(
+pub(crate) fn compute_content_sha(
     row_count: u64,
     fields: &[FieldSummary],
     fields_skipped: &[SnapshotFieldSkipped],

@@ -39,6 +39,7 @@ pub trait IndexConfigSource: Send + Sync {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexConfig {
+    pub field_stats: HashMap<String, FieldStatsPolicy>,
     pub facet_fields: HashMap<String, Vec<String>>,
     pub scan_threads: HashMap<String, u32>,
     pub snapshot_interval_ms: HashMap<String, u64>,
@@ -54,6 +55,96 @@ pub struct IndexConfig {
 pub struct IndexDisplay {
     pub title: Option<String>,
     pub description: Option<String>,
+}
+
+/// Declarative coverage. Resolution uses the current upstream schema, never a row scan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FieldStatsPolicy {
+    #[serde(default)]
+    pub fields: StatsFields,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default = "default_stats_cap")]
+    pub value_cap: usize,
+    #[serde(default = "default_stats_interval")]
+    pub interval: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum StatsFields {
+    Auto(String),
+    List(Vec<String>),
+}
+impl Default for StatsFields {
+    fn default() -> Self {
+        Self::Auto("auto".into())
+    }
+}
+fn default_stats_cap() -> usize {
+    10_000
+}
+fn default_stats_interval() -> String {
+    "5m".into()
+}
+impl Default for FieldStatsPolicy {
+    fn default() -> Self {
+        Self {
+            fields: StatsFields::default(),
+            exclude: vec![],
+            value_cap: default_stats_cap(),
+            interval: default_stats_interval(),
+        }
+    }
+}
+impl FieldStatsPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        if matches!(&self.fields, StatsFields::Auto(v) if v != "auto") {
+            return Err("fields must be auto or a list".into());
+        }
+        if self.value_cap == 0 || self.value_cap > u32::MAX as usize {
+            return Err("valueCap must be positive".into());
+        }
+        if humantime::parse_duration(&self.interval)
+            .map_err(|e| e.to_string())?
+            .as_millis()
+            == 0
+        {
+            return Err("interval must be positive".into());
+        }
+        let fields = match &self.fields {
+            StatsFields::List(v) => v.as_slice(),
+            _ => &[],
+        };
+        if fields
+            .iter()
+            .chain(self.exclude.iter())
+            .any(|v| v.trim().is_empty() || v != v.trim() || v.starts_with("_hevlayer_"))
+        {
+            return Err("field names must be nonempty, trimmed and not reserved".into());
+        }
+        Ok(())
+    }
+    pub fn resolve(&self, filterable: &HashSet<String>) -> Vec<String> {
+        let mut fields: Vec<String> = match &self.fields {
+            StatsFields::Auto(_) => filterable.iter().cloned().collect(),
+            StatsFields::List(fields) => fields
+                .iter()
+                .filter(|f| filterable.contains(*f))
+                .cloned()
+                .collect(),
+        };
+        fields.retain(|f| !self.exclude.contains(f) && !f.starts_with("_hevlayer_"));
+        fields.sort();
+        fields.dedup();
+        fields
+    }
+    pub fn interval_ms(&self) -> u64 {
+        humantime::parse_duration(&self.interval)
+            .expect("validated policy")
+            .as_millis()
+            .min(u64::MAX as u128) as u64
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +184,7 @@ impl IndexConfigSource for StaticIndexConfigSource {
         }
         Ok(IndexConfig {
             facet_fields: normalized,
+            field_stats: HashMap::new(),
             scan_threads: HashMap::new(),
             snapshot_interval_ms: HashMap::new(),
             snapshot_retention: HashMap::new(),
@@ -122,12 +214,17 @@ pub async fn refresh_index_config_once(
     let namespaces: Vec<String> = config
         .facet_fields
         .keys()
+        .chain(config.field_stats.keys())
         .filter(|namespace| !vectorstore_core::namespace_pattern::is_pattern(namespace))
         .cloned()
         .collect();
     if !preserve_facet_fields {
         state.replace_facet_fields(config.facet_fields);
     }
+    *state
+        .field_stats_policy
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = config.field_stats;
     state.replace_scan_threads(config.scan_threads);
     state.replace_snapshot_interval_ms(config.snapshot_interval_ms);
     state.replace_snapshot_retention(config.snapshot_retention);
@@ -141,10 +238,8 @@ pub async fn refresh_index_config_once(
             "API snapshot policy refresh failed; keeping Index CR snapshot policy only"
         );
     }
-    if !preserve_facet_fields {
-        for namespace in &namespaces {
-            state.consistency.register(namespace);
-        }
+    for namespace in &namespaces {
+        state.consistency.register(namespace);
     }
     Ok(())
 }
@@ -260,6 +355,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_stats_auto_list_exclude_off_and_schema_changes() {
+        let schema = HashSet::from(["a".into(), "b".into()]);
+        let mut policy = FieldStatsPolicy::default();
+        assert_eq!(policy.value_cap, 10000);
+        assert_eq!(policy.interval_ms(), 300000);
+        assert_eq!(policy.resolve(&schema), vec!["a", "b"]);
+        policy.exclude = vec!["a".into()];
+        assert_eq!(policy.resolve(&schema), vec!["b"]);
+        policy.fields = StatsFields::List(vec!["a".into(), "c".into()]);
+        assert!(policy.resolve(&schema).is_empty());
+        let evolved = HashSet::from(["b".into(), "c".into()]);
+        assert_eq!(policy.resolve(&evolved), vec!["c"]);
+        policy.fields = StatsFields::List(vec![]);
+        assert!(policy.resolve(&evolved).is_empty());
+    }
+    #[test]
+    fn field_stats_rejects_invalid_contracts() {
+        for value in [
+            serde_json::json!({"fields":"all"}),
+            serde_json::json!({"valueCap":0}),
+            serde_json::json!({"interval":"0s"}),
+            serde_json::json!({"interval":"soon"}),
+            serde_json::json!({"fields":[""]}),
+            serde_json::json!({"exclude":["_hevlayer_private"]}),
+        ] {
+            assert!(serde_json::from_value::<FieldStatsPolicy>(value)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
+        assert!(
+            serde_json::from_value::<FieldStatsPolicy>(serde_json::json!({"fields":42})).is_err()
+        );
+    }
 
     #[tokio::test]
     async fn static_source_normalizes_field_lists() {

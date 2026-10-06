@@ -71,22 +71,7 @@ impl ConsistencyWatcher {
         self.mark_due(namespace);
     }
 
-    /// Arm consistency polling after a successful metadata read. Metadata
-    /// paths can discover namespaces that never flowed through this gateway's
-    /// write path; registering them keeps snapshots and stable watermarks from
-    /// depending on a local upsert having happened first.
-    pub fn register_from_metadata(&self, namespace: &str, status: IndexStatus) {
-        if !matches!(status, IndexStatus::Unknown) {
-            self.register_due(namespace);
-        }
-    }
-
-    /// A positive metadata observation is a short-lived scheduling hint.
-    /// Turbopuffer reports readiness at `pinning.status.ready_replicas`;
-    /// `pinning.replicas` is only the requested count. Missing, malformed,
-    /// zero, failed, or stale observations fail closed.
     pub fn observe_pinning(&self, namespace: &str, raw: &serde_json::Value) {
-        self.register(namespace);
         if raw
             .pointer("/pinning/status/ready_replicas")
             .and_then(serde_json::Value::as_u64)

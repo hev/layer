@@ -265,6 +265,7 @@ pub(crate) async fn reset_namespace_layer_state(
         ];
         #[cfg(feature = "pro")]
         keys.push(crate::field_stats::s3_key(namespace));
+        keys.push(format!("field-stats/{namespace}/reconcile-identity.json"));
         if let Err(e) = state.s3.delete_keys(&keys).await {
             outcome
                 .errors
@@ -338,6 +339,9 @@ pub(crate) fn purge_in_memory_namespace_state(state: &AppState, namespace: &str)
     state.warm_inflight.remove(namespace);
     state.reactive_warm_generations.remove(namespace);
     state.last_snapshot_at.remove(namespace);
+    state.reconcile_identity.remove(namespace);
+    state.stats_write_epoch.remove(namespace);
+    state.field_stats_coverage.remove(namespace);
     state.snapshot_inflight.remove(namespace);
     state.sharded_namespaces.remove(namespace);
     state.namespace_list_cache.clear();
@@ -551,9 +555,6 @@ async fn fetch_one(
     match meta {
         Ok(meta) => {
             state.consistency.observe_pinning(&namespace, &meta.raw);
-            state
-                .consistency
-                .register_from_metadata(&namespace, meta.index_status);
             let projected = project_metadata(&meta);
             let (stable_as_of_ms, is_stable) = stability_from_meta(&meta, metadata_started_ms);
             (

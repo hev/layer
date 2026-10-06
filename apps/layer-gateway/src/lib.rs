@@ -8,6 +8,18 @@ pub mod embedding;
 pub mod error;
 #[cfg(feature = "pro")]
 pub mod field_stats;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_applicability_registry;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_capture;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_capture_bootstrap;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_estimate_adapter;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_metadata_expense;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_scan_budget;
 pub mod history;
 pub mod index_config;
 pub mod index_gc;
@@ -139,6 +151,13 @@ pub struct AppState {
     /// watermark advances. Replaced atomically after successful Index CR
     /// refreshes.
     pub facet_fields: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub field_stats_policy: Arc<RwLock<HashMap<String, crate::index_config::FieldStatsPolicy>>>,
+    pub field_stats_coverage: Arc<DashMap<String, Vec<String>>>,
+    pub reconcile_identity: Arc<DashMap<String, String>>,
+    pub stats_write_epoch: Arc<DashMap<String, u64>>,
+    #[cfg(feature = "field-stats-capture")]
+    pub field_stats_capture: Option<Arc<dyn crate::field_stats_capture::CaptureProvider>>,
+    pub reconcile_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-namespace default origin scan fan-out width loaded from
     /// `Index.spec.scan.threads`. Absent namespace falls back to
     /// the readiness-dependent default; storage is bounded at 512 and
@@ -176,10 +195,12 @@ pub struct AppState {
     pub embedding_profiles: Arc<RwLock<HashMap<String, EmbeddingProfile>>>,
     /// Per-namespace title and description loaded from `Index.spec.metadata`.
     pub index_display: Arc<RwLock<HashMap<String, IndexDisplay>>>,
-    /// Wall-clock (epoch ms) of the last snapshot attempt per namespace.
-    /// Bumped on both successful writes and dedup'd skips so a steady-state
-    /// namespace doesn't re-scan every poll.
+    /// Wall-clock (epoch ms) of the last successful reconcile per namespace.
+    /// Errors and cancellation must not refresh this success marker.
     pub last_snapshot_at: Arc<DashMap<String, u64>>,
+    /// Attempt admission floor, including errors/refusals/cancellation; never
+    /// a coverage or freshness certificate. Local cache only.
+    pub last_snapshot_attempt_at: Arc<DashMap<String, u64>>,
     /// Single-flight guard for the snapshot writer. Presence means a
     /// snapshot job is currently running for that namespace.
     pub snapshot_inflight: Arc<DashMap<String, ()>>,

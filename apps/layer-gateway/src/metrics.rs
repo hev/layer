@@ -1928,6 +1928,13 @@ struct MetricsTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for MetricsTurbopufferClient {
+    async fn reconcile_change_token(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        self.inner.reconcile_change_token(namespace).await
+    }
+
     async fn check_readiness(&self) -> Result<(), TurbopufferError> {
         self.inner.check_readiness().await
     }
@@ -2332,6 +2339,29 @@ impl TurbopufferClient for MetricsTurbopufferClient {
             observer,
             self.inner
                 .scan_page(namespace, cursor, page_size, filters, include_attributes),
+        )
+        .await;
+        self.metrics.dec_tpuf_inflight();
+        result
+    }
+
+    async fn scan_page_strong(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        self.metrics.inc_tpuf_inflight();
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Scan, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .scan_page_strong(namespace, cursor, page_size, filters, include_attributes),
         )
         .await;
         self.metrics.dec_tpuf_inflight();
@@ -2954,6 +2984,71 @@ struct MetricsUdfStore {
 #[cfg(feature = "pro")]
 #[async_trait]
 impl UdfStore for MetricsUdfStore {
+    async fn begin_scan_budget(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        attempt: &str,
+    ) -> Result<(), UdfStoreError> {
+        self.inner.begin_scan_budget(scope, attempt).await
+    }
+    async fn reserve_scan_page(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        attempt: &str,
+        page_attempt: &str,
+        bound: Option<layer_transform::scan_budget::ScanPageCostBound>,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .reserve_scan_page(scope, attempt, page_attempt, bound)
+            .await
+    }
+    async fn observe_scan_page(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        attempt: &str,
+        page_attempt: &str,
+        observed_micro_usd: u64,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .observe_scan_page(scope, attempt, page_attempt, observed_micro_usd)
+            .await
+    }
+    async fn complete_scan_budget(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        attempt: &str,
+    ) -> Result<(), UdfStoreError> {
+        self.inner.complete_scan_budget(scope, attempt).await
+    }
+    async fn reserve_metadata_expense(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        request_id: &str,
+        bound: Option<layer_transform::scan_budget::ScanPageCostBound>,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .reserve_metadata_expense(scope, request_id, bound)
+            .await
+    }
+    async fn observe_metadata_expense(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        request_id: &str,
+        observed_micro_usd: u64,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .observe_metadata_expense(scope, request_id, observed_micro_usd)
+            .await
+    }
+    async fn complete_metadata_expense(
+        &self,
+        scope: &layer_transform::scan_budget::ScanBudgetScope,
+        request_id: &str,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .complete_metadata_expense(scope, request_id)
+            .await
+    }
     async fn reserve_queries(
         &self,
         udf_id: &str,

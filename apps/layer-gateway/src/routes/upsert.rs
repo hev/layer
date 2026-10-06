@@ -137,6 +137,13 @@ pub(crate) async fn write_namespace(
     mut body: Value,
     staged_rows: bool,
 ) -> Result<Response, AppError> {
+    let reconcile_lock = state
+        .reconcile_locks
+        .entry(namespace.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _reconcile_guard = reconcile_lock.lock().await;
+
     // Branch and copy bodies are classified before anything can rewrite
     // them, and forwarded byte-for-byte on their own path (RFC 0124).
     if let Some(classified) = crate::routes::branch::classify(&body) {

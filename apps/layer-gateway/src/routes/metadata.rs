@@ -79,10 +79,6 @@ pub async fn get_namespace_metadata(
         }
     };
 
-    state
-        .consistency
-        .register_from_metadata(&namespace, meta.index_status);
-
     let readiness = index_readiness(&state, &namespace, &meta).await;
     let mut body = match meta.raw {
         Value::Object(map) => map,
@@ -114,11 +110,8 @@ pub async fn get_namespace_metadata(
                 .get("approx_row_count")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let (stats, reconcile) =
+            let (stats, _) =
                 crate::field_stats::read(&state, &namespace, schema, upstream_rows, top).await;
-            if reconcile {
-                crate::field_stats::request_reconcile(&state, &namespace);
-            }
             Some(stats)
         }
         None => None,

@@ -1371,6 +1371,26 @@ spec:
                 - normalization
                 - outputDim
                 type: object
+              fieldStats:
+                nullable: true
+                properties:
+                  exclude:
+                    default: []
+                    items:
+                      type: string
+                    type: array
+                  fields:
+                    default: auto
+                    x-kubernetes-preserve-unknown-fields: true
+                  interval:
+                    default: 5m
+                    type: string
+                  valueCap:
+                    default: 10000
+                    format: uint32
+                    minimum: 1.0
+                    type: integer
+                type: object
               metadata:
                 default:
                   annotations: {}
@@ -1775,13 +1795,14 @@ spec:
                 items:
                   type: string
                 type: array
-              queriesPerItem:
-                type: integer
-                format: uint32
-                minimum: 0.0
               paused:
                 default: false
                 type: boolean
+              queriesPerItem:
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
               retry:
                 default:
                   initialBackoffSeconds: 5

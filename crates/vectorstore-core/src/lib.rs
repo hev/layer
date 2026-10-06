@@ -11,5 +11,6 @@ pub mod pgvector;
 pub mod pgvector_capabilities;
 pub mod s3;
 pub mod search;
+pub mod search_profile;
 pub mod turbopuffer;
 pub mod vector_store;

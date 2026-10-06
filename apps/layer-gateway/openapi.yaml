@@ -3500,6 +3500,15 @@ components:
     NamespaceFieldStats:
       type: object
       description: 'Per-attribute statistics, present only with `?field_stats=true`.
+        Reads never initiate scans or register reconciliation and conservatively report
+        stored counts as approximate without retained source guards. Index.spec.fieldStats
+        defaults to auto coverage, valueCap 10000 and interval 5m; fields [] disables
+        stats. Gated certified coverage/reuse requires complete persisted artifacts
+        and owner-issued opaque receipts validated under retained capture guards;
+        this source integration depends on unmerged, unaccepted APIs and is not enabled
+        in production. Existing configured snapshot facets retain their periodic full
+        scans and interval without broadening to newly declared stats fields. Counts
+        and timestamps do not certify source identity or silent external-write detection.
 
         '
       properties:
@@ -3508,7 +3517,8 @@ components:
           - integer
           - 'null'
           format: int64
-          description: Epoch ms of the last reconcile or write the stats include.
+          description: Stable watermark (epoch ms) of the last completed reconcile.
+            Managed writes do not advance it.
         rows:
           type:
           - integer
@@ -3525,7 +3535,8 @@ components:
           items:
             type: string
           description: 'Filterable attributes in `schema` with no stats because they
-            are not in the namespace''s `snapshot.facetFields`.
+            are excluded or not selected by `Index.spec.fieldStats`, or awaiting initial
+            coverage.
 
             '
     FieldStat:

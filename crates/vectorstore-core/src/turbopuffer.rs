@@ -148,6 +148,13 @@ async fn reserve_provider_query(namespace: &str, queries: u32) -> Result<(), Tur
     Ok(())
 }
 
+// Opt-in for financially admitted capture scans. Existing callers retain their
+// compatibility path; this scope forbids auxiliary metadata IO inside a page.
+tokio::task_local! { static PREPARED_SCAN_METADATA_ONLY: (); }
+pub async fn scope_prepared_scan_metadata<F: std::future::Future>(future: F) -> F::Output {
+    PREPARED_SCAN_METADATA_ONLY.scope((), future).await
+}
+
 /// Observer for billing otherwise discarded by row-only read interfaces.
 pub type ReadBillingObserver = std::sync::Arc<dyn Fn(&str, &Value) + Send + Sync>;
 tokio::task_local! {
@@ -157,7 +164,15 @@ pub async fn scope_read_billing<F: std::future::Future>(
     observer: ReadBillingObserver,
     future: F,
 ) -> F::Output {
-    READ_BILLING_OBSERVER.scope(observer, future).await
+    let inherited = READ_BILLING_OBSERVER.try_with(Clone::clone).ok();
+    let composed: ReadBillingObserver = match inherited {
+        Some(parent) => Arc::new(move |namespace, billing| {
+            parent(namespace, billing);
+            observer(namespace, billing);
+        }),
+        None => observer,
+    };
+    READ_BILLING_OBSERVER.scope(composed, future).await
 }
 /// Report upstream billing before projecting a response into another result.
 pub fn observe_projected_billing(namespace: &str, response: &Value) {
@@ -512,7 +527,32 @@ pub trait TurbopufferClient: Send + Sync {
             .unimplemented(crate::capabilities::WireFeature::Facet)
     }
 
+    /// Exhaustive strong pages for an owner-guarded complete capture. Unsupported
+    /// adapters must refuse, never silently use eventual scan_page.
+    async fn scan_page_strong(
+        &self,
+        _namespace: &str,
+        _cursor: Option<&str>,
+        _page_size: u32,
+        _filters: Option<&Value>,
+        _include_attributes: Option<&[String]>,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "strong capture scan unsupported by store".into(),
+        ))
+    }
+
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError>;
+
+    /// Durable identity that changes for every committed data mutation,
+    /// including external writes and deletes. Schema is checked separately. Timestamp/count hints do not meet
+    /// this contract. None means safe unchanged-scan suppression is unavailable.
+    async fn reconcile_change_token(
+        &self,
+        _namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        Ok(None)
+    }
 
     /// Gateway embedding profiles the store holds for `namespace`, as last
     /// written under [`EMBEDDING_PROFILES_KEY`] (RFC 0118 step E). `None` when
@@ -958,6 +998,28 @@ impl TurbopufferClient for RoutingTurbopufferClient {
             .await
     }
 
+    async fn reconcile_change_token(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .reconcile_change_token(namespace)
+            .await
+    }
+
+    async fn scan_page_strong(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .scan_page_strong(namespace, cursor, page_size, filters, include_attributes)
+            .await
+    }
+
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .head_namespace(namespace)
@@ -988,6 +1050,7 @@ pub struct HttpTurbopufferClient {
     // from a successful write body. Their complete rows require hydration.
     generated_columns: RwLock<HashMap<String, HashMap<String, String>>>,
     id_types: RwLock<HashMap<String, (std::time::Instant, bool)>>,
+    scan_vector_dimensions: RwLock<HashMap<String, (std::time::Instant, usize)>>,
 }
 
 /// Opaque source provenance: boundary and client cannot be independently supplied.
@@ -1035,6 +1098,7 @@ impl HttpTurbopufferClient {
             shared_cache: None,
             generated_columns: Default::default(),
             id_types: RwLock::new(HashMap::new()),
+            scan_vector_dimensions: Default::default(),
         }
     }
 
@@ -1083,6 +1147,7 @@ impl HttpTurbopufferClient {
             shared_cache: None,
             generated_columns: Default::default(),
             id_types: Default::default(),
+            scan_vector_dimensions: Default::default(),
         }
     }
     async fn shared_session(
@@ -1440,6 +1505,88 @@ impl HttpTurbopufferClient {
         Ok(integer)
     }
 
+    /// Explicit metadata preparation must execute outside the row-page permit,
+    /// under its own financial admission. Cache type from THIS actual response;
+    /// never accept a caller's separately asserted namespace ID type.
+    pub async fn head_namespace_for_strong_scan(
+        &self,
+        namespace: &str,
+    ) -> Result<NamespaceMeta, TurbopufferError> {
+        if self.api_key.is_none() || REQUEST_UPSTREAM_API_KEY.try_with(|_| ()).is_ok() {
+            return Err(TurbopufferError::Other(
+                "prepared scan requires bound static client".into(),
+            ));
+        }
+        // A failed/cancelled explicit refresh must not retain an old vector
+        // dimension as current preparation.
+        self.scan_vector_dimensions
+            .write()
+            .unwrap()
+            .remove(namespace);
+        let meta = self.head_namespace(namespace).await?;
+        let integer = match meta.raw["schema"]["id"]["type"].as_str() {
+            Some("uint") => true,
+            Some("string" | "uuid") => false,
+            _ => {
+                return Err(TurbopufferError::Other(
+                    "namespace metadata has no supported id type".into(),
+                ))
+            }
+        };
+        let mut dimensions = self.scan_vector_dimensions.write().unwrap();
+        dimensions.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+        dimensions.remove(namespace);
+        if dimensions.len() >= 4096 {
+            dimensions.clear();
+        }
+        if let Ok(dimension) = crate::search_profile::vector_dimensions(&meta.raw) {
+            dimensions.insert(namespace.into(), (std::time::Instant::now(), dimension));
+        }
+        drop(dimensions);
+        let mut cache = self.id_types.write().unwrap();
+        cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(namespace.into(), (std::time::Instant::now(), integer));
+        Ok(meta)
+    }
+    fn prepared_vector_dimension(&self, namespace: &str) -> Result<usize, TurbopufferError> {
+        if self.api_key.is_none() || REQUEST_UPSTREAM_API_KEY.try_with(|_| ()).is_ok() {
+            return Err(TurbopufferError::Other(
+                "vector scan requires bound static client".into(),
+            ));
+        }
+        self.scan_vector_dimensions
+            .read()
+            .unwrap()
+            .get(namespace)
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
+            .map(|(_, dimension)| *dimension)
+            .ok_or_else(|| {
+                TurbopufferError::Other(
+                    "vector scan source schema must be independently prepared".into(),
+                )
+            })
+    }
+    fn prepared_integer_ids(&self, namespace: &str) -> Result<bool, TurbopufferError> {
+        if self.api_key.is_none() || REQUEST_UPSTREAM_API_KEY.try_with(|_| ()).is_ok() {
+            return Err(TurbopufferError::Other(
+                "prepared scan requires bound static client".into(),
+            ));
+        }
+        self.id_types
+            .read()
+            .unwrap()
+            .get(namespace)
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
+            .map(|(_, integer)| *integer)
+            .ok_or_else(|| {
+                TurbopufferError::Other(
+                    "scan metadata must be independently admitted and prepared".into(),
+                )
+            })
+    }
     fn wire_id(id: &str, integer: bool) -> Option<Value> {
         if integer {
             id.parse::<u64>().ok().map(Value::from)
@@ -1660,6 +1807,624 @@ fn rows_from_query_body(resp_body: &Value) -> Vec<QueryResult> {
             })
         })
         .collect()
+}
+
+impl HttpTurbopufferClient {
+    async fn scan_page_at_consistency(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
+        strong: bool,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        if strong && !(1..=10_000).contains(&page_size) {
+            return Err(TurbopufferError::Other(
+                "invalid strong scan page size".into(),
+            ));
+        }
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::OrderedScan)?;
+        // Reserved payload is opt-in, never an implicit all-attributes expansion.
+        // Bind dimension to independently admitted metadata on this actual client;
+        // neither a prior row nor a caller's default is schema evidence.
+        let vector_dimension = if strong
+            && include_attributes.is_some_and(|fields| fields.iter().any(|f| f == "vector"))
+        {
+            if include_attributes.is_some_and(|fields| fields.len() > 64) {
+                return Err(TurbopufferError::Other(
+                    "vector projection exceeds 64 fields".into(),
+                ));
+            }
+            Some(self.prepared_vector_dimension(namespace)?)
+        } else {
+            None
+        };
+        // Bind every strong response to the namespace's ID type, including
+        // the first page. A string cursor alone cannot detect a type switch
+        // between pages. This HEAD/type cache is not a content revision proof.
+        let integer_ids = if strong && PREPARED_SCAN_METADATA_ONLY.try_with(|_| ()).is_ok() {
+            Some(self.prepared_integer_ids(namespace)?)
+        } else if strong || cursor.is_some() {
+            Some(self.integer_ids(namespace).await?)
+        } else {
+            None
+        };
+        let cursor_filter = if let Some(cursor) = cursor {
+            let id = Self::wire_id(cursor, integer_ids.unwrap()).ok_or_else(|| {
+                TurbopufferError::Other("invalid integer id scan cursor".to_string())
+            })?;
+            Some(serde_json::json!(["id", "Gt", id]))
+        } else {
+            None
+        };
+
+        let combined_filter = match (cursor_filter, filters) {
+            (Some(cf), Some(uf)) => Some(serde_json::json!(["And", [cf, uf.clone()]])),
+            (Some(cf), None) => Some(cf),
+            (None, Some(uf)) => Some(uf.clone()),
+            (None, None) => None,
+        };
+
+        let query_top_k = if strong {
+            page_size
+        } else {
+            page_size.saturating_add(1).min(10_000)
+        };
+        let mut body = serde_json::json!({
+            "rank_by": ["id", "asc"],
+            "top_k": query_top_k,
+            "include_attributes": true,
+            "consistency": {"level": if strong { "strong" } else { "eventual" }},
+        });
+        if let Some(f) = combined_filter {
+            body["filters"] = f;
+        }
+        if let Some(attrs) = include_attributes {
+            body["include_attributes"] =
+                serde_json::to_value(attrs).map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        }
+
+        reserve_provider_query(namespace, 1).await?;
+        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
+        let resp = self
+            .authorize(self.client.post(&url).json(&body))?
+            .send()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(TurbopufferError::from_response(resp).await);
+        }
+
+        let resp_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+
+        observe_projected_billing(namespace, &resp_body);
+
+        if strong {
+            validate_strong_scan_rows(&resp_body, cursor, query_top_k, integer_ids.unwrap())?;
+            if let Some(dimension) = vector_dimension {
+                if self.prepared_vector_dimension(namespace)? != dimension {
+                    return Err(TurbopufferError::Other(
+                        "vector schema changed during scan".into(),
+                    ));
+                }
+                for row in resp_body["rows"].as_array().expect("validated rows") {
+                    validate_scan_vector(row.get("vector"), dimension)?;
+                }
+            }
+        }
+
+        let rows = resp_body
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut documents: Vec<DocumentResponse> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let (id, _) = id_from_wire(row.get("id")?)?;
+                let mut attributes = HashMap::new();
+                if let Some(obj) = row.as_object() {
+                    for (k, v) in obj {
+                        if !is_system_column(k) || (k == "vector" && vector_dimension.is_some()) {
+                            attributes.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Some(DocumentResponse { id, attributes })
+            })
+            .collect();
+
+        // Ask for one extra row when possible. At Turbopuffer's 10k top_k cap,
+        // an exact full page schedules one confirming follow-up request.
+        let page_size = page_size as usize;
+        let next_cursor = if documents.len() > page_size {
+            documents.truncate(page_size);
+            documents.last().map(|d| d.id.clone())
+        } else if query_top_k == page_size as u32 && documents.len() == page_size {
+            documents.last().map(|d| d.id.clone())
+        } else {
+            None
+        };
+
+        Ok(DocumentPage {
+            documents,
+            next_cursor,
+        })
+    }
+}
+
+/// An explicitly projected vector must be a complete, schema-sized numeric
+/// payload. Missing/null vectors refuse rather than certifying incomplete search.
+fn validate_scan_vector(value: Option<&Value>, dimension: usize) -> Result<(), TurbopufferError> {
+    let valid = value.and_then(Value::as_array).is_some_and(|values| {
+        dimension > 0
+            && values.len() == dimension
+            && values
+                .iter()
+                .all(|v| v.as_f64().is_some_and(f64::is_finite))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(TurbopufferError::Other(
+            "invalid source-schema vector payload".into(),
+        ))
+    }
+}
+
+/// A malformed, omitted or non-advancing row cannot certify complete capture.
+/// Preserve integer ordering instead of comparing decimal text.
+fn validate_strong_scan_rows(
+    body: &Value,
+    cursor: Option<&str>,
+    top_k: u32,
+    expected_integer: bool,
+) -> Result<(), TurbopufferError> {
+    let invalid = || TurbopufferError::Other("invalid/non-advancing strong scan response".into());
+    let rows = body
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if body.get("error").is_some_and(|v| !v.is_null()) || rows.len() > top_k as usize {
+        return Err(invalid());
+    }
+    let mut previous: Option<(String, bool)> = None;
+    for row in rows {
+        let (id, integer) = row.get("id").and_then(id_from_wire).ok_or_else(invalid)?;
+        if id.is_empty() || !row.is_object() || integer != expected_integer {
+            return Err(invalid());
+        }
+        let prior = previous
+            .as_ref()
+            .map(|(id, kind)| (id.as_str(), *kind))
+            .or_else(|| cursor.map(|id| (id, integer)));
+        if let Some((prior_id, prior_integer)) = prior {
+            if prior_integer != integer {
+                return Err(invalid());
+            }
+            let advancing = if integer {
+                id.parse::<u64>().map_err(|_| invalid())?
+                    > prior_id.parse::<u64>().map_err(|_| invalid())?
+            } else {
+                id.as_str() > prior_id
+            };
+            if !advancing {
+                return Err(invalid());
+            }
+        }
+        previous = Some((id, integer));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod strong_scan_contract_tests {
+    use super::*;
+    #[test]
+    fn numeric_and_string_ordering_is_strict_and_malformed_rows_refuse() {
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":9},{"id":10}]}),
+            Some("8"),
+            3,
+            true
+        )
+        .is_ok());
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":"a"},{"id":"b"}]}),
+            None,
+            3,
+            false
+        )
+        .is_ok());
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"rows":[{}]}),
+            serde_json::json!({"rows":[{"id":"a"},{"id":"a"}]}),
+            serde_json::json!({"rows":[{"id":9},{"id":"10"}]}),
+            serde_json::json!({"rows":[{"id":-1}]}),
+            serde_json::json!({"rows":[{"id":1.5}]}),
+            serde_json::json!({"rows":[],"error":"partial result"}),
+        ] {
+            assert!(validate_strong_scan_rows(&body, None, 3, false).is_err());
+        }
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":10},{"id":9}]}),
+            None,
+            3,
+            true
+        )
+        .is_err());
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":"b"}]}),
+            Some("b"),
+            3,
+            false
+        )
+        .is_err());
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":"a"},{"id":"b"}]}),
+            None,
+            1,
+            false
+        )
+        .is_err());
+        // Never infer a new ID type from the next row after a string cursor.
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":10}]}),
+            Some("9"),
+            3,
+            false
+        )
+        .is_err());
+        assert!(validate_strong_scan_rows(
+            &serde_json::json!({"rows":[{"id":"10"}]}),
+            Some("9"),
+            3,
+            true
+        )
+        .is_err());
+        assert!(
+            validate_strong_scan_rows(&serde_json::json!({"rows":[]}), Some("b"), 3, false).is_ok()
+        );
+    }
+
+    #[test]
+    fn projected_vectors_require_finite_complete_schema_dimensions() {
+        assert!(validate_scan_vector(Some(&serde_json::json!([1.0, -2.0])), 2).is_ok());
+        for value in [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([1]),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!([1, "2"]),
+            serde_json::json!([1, null]),
+            serde_json::json!({"vector":[1, 2]}),
+        ] {
+            assert!(validate_scan_vector(Some(&value), 2).is_err());
+        }
+        assert!(validate_scan_vector(None, 2).is_err());
+        assert!(validate_scan_vector(Some(&serde_json::json!([])), 0).is_err());
+        // serde_json cannot construct a nonfinite Number; overflowing numeric
+        // JSON is rejected before validation rather than coerced to a vector.
+        assert!(serde_json::from_str::<Value>("[1,1e999]").is_err());
+    }
+
+    #[tokio::test]
+    async fn strong_vector_projection_preserves_payload_and_meters_invalid_pages() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new()
+            .route("/v2/namespaces/ns/metadata", get(|| async {
+                Json(serde_json::json!({"schema":{"id":{"type":"string"},"vector":{"type":"[2]f32"}}}))
+            }))
+            .route("/v2/namespaces/ns/query", post(move |Json(body): Json<Value>| {
+                let calls = counted.clone();
+                async move {
+                    assert_eq!(body["consistency"]["level"], "strong");
+                    let index = calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    let vector = match index {
+                        0..=2 => serde_json::json!([1.25, -2.5]),
+                        3 => serde_json::json!([1.0]),
+                        _ => serde_json::json!([1.0, "bad"]),
+                    };
+                    if index == 0 { assert_eq!(body["include_attributes"], serde_json::json!(["vector"])); }
+                    if index == 1 { assert_eq!(body["include_attributes"], true); }
+                    if index == 2 { assert_eq!(body["include_attributes"], serde_json::json!(["text"])); }
+                    Json(serde_json::json!({"rows":[{"id":"a","text":"retained","vector":vector}],
+                        "billing":{"billable_logical_bytes_queried":42}}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = HttpTurbopufferClient::new("fixture", &format!("http://{address}"));
+        let projection = ["vector".into()];
+        let oversized = vec!["vector".into(); 65];
+        let error = client
+            .scan_page_strong("ns", None, 2, None, Some(&oversized))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds 64 fields"));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(client
+            .scan_page_strong("ns", None, 2, None, Some(&projection))
+            .await
+            .is_err());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        client.head_namespace_for_strong_scan("ns").await.unwrap();
+        let metered = Arc::new(AtomicUsize::new(0));
+        let counted = metered.clone();
+        let observer: ReadBillingObserver = Arc::new(move |_, body| {
+            assert_eq!(body["billable_logical_bytes_queried"], 42);
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+        let page = scope_read_billing(
+            observer.clone(),
+            client.scan_page_strong("ns", None, 2, None, Some(&projection)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.documents[0].attributes["vector"],
+            serde_json::json!([1.25, -2.5])
+        );
+        assert!(page.next_cursor.is_none());
+        for fields in [None, Some(vec!["text".into()])] {
+            let page = scope_read_billing(
+                observer.clone(),
+                client.scan_page_strong("ns", None, 2, None, fields.as_deref()),
+            )
+            .await
+            .unwrap();
+            assert!(!page.documents[0].attributes.contains_key("vector"));
+        }
+        for _ in 0..2 {
+            assert!(scope_read_billing(
+                observer.clone(),
+                client.scan_page_strong("ns", None, 2, None, Some(&projection))
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 5);
+        assert_eq!(metered.load(AtomicOrdering::SeqCst), 5);
+        client.scan_vector_dimensions.write().unwrap().insert(
+            "ns".into(),
+            (std::time::Instant::now() - Duration::from_secs(61), 2),
+        );
+        assert!(client
+            .scan_page_strong("ns", None, 2, None, Some(&projection))
+            .await
+            .is_err());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 5);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn vector_schema_refresh_during_physical_page_refuses_after_billing() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let dimensions = Arc::new(AtomicUsize::new(2));
+        let read_dimensions = dimensions.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let query_entered = entered.clone();
+        let query_release = release.clone();
+        let app = Router::new()
+            .route("/v2/namespaces/ns/metadata", get(move || {
+                let dimensions = read_dimensions.clone();
+                async move { Json(serde_json::json!({"schema":{"id":{"type":"string"},
+                    "vector":{"type":format!("[{}]f32", dimensions.load(AtomicOrdering::SeqCst))}}})) }
+            }))
+            .route("/v2/namespaces/ns/query", post(move || {
+                let entered = query_entered.clone(); let release = query_release.clone();
+                async move {
+                    entered.notify_one(); release.notified().await;
+                    Json(serde_json::json!({"rows":[{"id":"a","vector":[1.0,2.0]}],
+                        "billing":{"billable_logical_bytes_queried":42}}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Arc::new(HttpTurbopufferClient::new(
+            "fixture",
+            &format!("http://{address}"),
+        ));
+        client.head_namespace_for_strong_scan("ns").await.unwrap();
+        let billed = Arc::new(AtomicUsize::new(0));
+        let observed = billed.clone();
+        let observer: ReadBillingObserver = Arc::new(move |_, _| {
+            observed.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+        let scanning = client.clone();
+        let page = tokio::spawn(async move {
+            scope_read_billing(
+                observer,
+                scanning.scan_page_strong("ns", None, 2, None, Some(&["vector".into()])),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        dimensions.store(3, AtomicOrdering::SeqCst);
+        client.head_namespace_for_strong_scan("ns").await.unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), page)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("vector schema changed"));
+        assert_eq!(billed.load(AtomicOrdering::SeqCst), 1);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn nested_scan_billing_preserves_parent_and_consumer_receipts() {
+        let parent = Arc::new(AtomicUsize::new(0));
+        let child = Arc::new(AtomicUsize::new(0));
+        let p = parent.clone();
+        let c = child.clone();
+        let outer: ReadBillingObserver = Arc::new(move |_, _| {
+            p.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+        let inner: ReadBillingObserver = Arc::new(move |_, _| {
+            c.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+        scope_read_billing(outer, scope_read_billing(inner, async {
+            observe_projected_billing("ns", &serde_json::json!({"billing":{"billable_logical_bytes_queried":1,"billable_logical_bytes_returned":2}}));
+        })).await;
+        assert_eq!(parent.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(child.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn strong_http_pages_exhaust_and_meter_without_eventual_fallback() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let metadata_calls = Arc::new(AtomicUsize::new(0));
+        let head_calls = metadata_calls.clone();
+        let app = Router::new().route("/v2/namespaces/sessions/query", post(move |Json(body): Json<Value>| {
+            let calls = observed.clone();
+            async move {
+                assert_eq!(body["consistency"]["level"], "strong");
+                assert_eq!(body["top_k"], 2);
+                assert_eq!(body["rank_by"], serde_json::json!(["id", "asc"]));
+                assert_eq!(body["include_attributes"], serde_json::json!(["session_id", "end"]));
+                let index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let rows = if index == 0 {
+                    assert!(body.get("filters").is_none());
+                    serde_json::json!([{"id":"a","session_id":"s","end":1},{"id":"b","session_id":"t","end":2}])
+                } else {
+                    assert_eq!(index, 1);
+                    assert_eq!(body["filters"], serde_json::json!(["id","Gt","b"]));
+                    serde_json::json!([])
+                };
+                Json(serde_json::json!({"rows":rows,"billing":{"billable_logical_bytes_queried":42}}))
+            }
+        }));
+        let app = app.route(
+            "/v2/namespaces/sessions/metadata",
+            get(move || {
+                let calls = head_calls.clone();
+                async move {
+                    calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    Json(serde_json::json!({"schema":{"id":{"type":"string"}}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = HttpTurbopufferClient::new("fixture", &format!("http://{addr}"));
+        // The budgeted scope cannot acquire metadata as a page side effect.
+        assert!(scope_prepared_scan_metadata(client.scan_page_strong(
+            "sessions",
+            None,
+            2,
+            None,
+            Some(&["session_id".into()])
+        ))
+        .await
+        .is_err());
+        assert_eq!(metadata_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        client
+            .head_namespace_for_strong_scan("sessions")
+            .await
+            .unwrap();
+        assert_eq!(metadata_calls.load(AtomicOrdering::SeqCst), 1);
+        let metered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = metered.clone();
+        let observer: ReadBillingObserver = std::sync::Arc::new(move |namespace, body| {
+            assert_eq!(namespace, "sessions");
+            assert_eq!(body["billable_logical_bytes_queried"], 42);
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        // Budget admission runs before physical dispatch, even for this
+        // direct strong scanner rather than the ordinary query interface.
+        let denied: QueryPermit = std::sync::Arc::new(|namespace, queries| {
+            assert_eq!(namespace, "sessions");
+            assert_eq!(queries, 1);
+            Box::pin(async { Err(TurbopufferError::Other("fixture budget exhausted".into())) })
+        });
+        let refused = scope_query_permit(
+            denied,
+            client.scan_page_strong("sessions", None, 2, None, Some(&["session_id".into()])),
+        )
+        .await;
+        assert!(refused.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(metered.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let page = scope_prepared_scan_metadata(scope_read_billing(
+            observer.clone(),
+            client.scan_page_strong(
+                "sessions",
+                None,
+                2,
+                None,
+                Some(&["session_id".into(), "end".into()]),
+            ),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(page.documents.len(), 2);
+        assert_eq!(page.next_cursor.as_deref(), Some("b"));
+        let confirmed = scope_prepared_scan_metadata(scope_read_billing(
+            observer,
+            client.scan_page_strong(
+                "sessions",
+                page.next_cursor.as_deref(),
+                2,
+                None,
+                Some(&["session_id".into(), "end".into()]),
+            ),
+        ))
+        .await
+        .unwrap();
+        assert!(confirmed.documents.is_empty());
+        assert!(confirmed.next_cursor.is_none());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(metered.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(metadata_calls.load(AtomicOrdering::SeqCst), 1);
+        client.id_types.write().unwrap().clear();
+        assert!(scope_prepared_scan_metadata(client.scan_page_strong(
+            "sessions",
+            None,
+            2,
+            None,
+            Some(&["session_id".into()])
+        ))
+        .await
+        .is_err());
+        assert_eq!(metadata_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[async_trait]
@@ -2556,98 +3321,34 @@ impl TurbopufferClient for HttpTurbopufferClient {
         filters: Option<&Value>,
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
-        self.capabilities()
-            .require(crate::capabilities::WireFeature::OrderedScan)?;
-        // Build filter: Id > cursor AND any user filters
-        let cursor_filter = if let Some(cursor) = cursor {
-            let id =
-                Self::wire_id(cursor, self.integer_ids(namespace).await?).ok_or_else(|| {
-                    TurbopufferError::Other("invalid integer id scan cursor".to_string())
-                })?;
-            Some(serde_json::json!(["id", "Gt", id]))
-        } else {
-            None
-        };
+        self.scan_page_at_consistency(
+            namespace,
+            cursor,
+            page_size,
+            filters,
+            include_attributes,
+            false,
+        )
+        .await
+    }
 
-        let combined_filter = match (cursor_filter, filters) {
-            (Some(cf), Some(uf)) => Some(serde_json::json!(["And", [cf, uf.clone()]])),
-            (Some(cf), None) => Some(cf),
-            (None, Some(uf)) => Some(uf.clone()),
-            (None, None) => None,
-        };
-
-        let query_top_k = page_size.saturating_add(1).min(10_000);
-        let mut body = serde_json::json!({
-            "rank_by": ["id", "asc"],
-            "top_k": query_top_k,
-            "include_attributes": true,
-            "consistency": {"level": "eventual"},
-        });
-        if let Some(f) = combined_filter {
-            body["filters"] = f;
-        }
-        if let Some(attrs) = include_attributes {
-            body["include_attributes"] =
-                serde_json::to_value(attrs).map_err(|e| TurbopufferError::Other(e.to_string()))?;
-        }
-
-        reserve_provider_query(namespace, 1).await?;
-        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        observe_projected_billing(namespace, &resp_body);
-
-        let rows = resp_body
-            .get("rows")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut documents: Vec<DocumentResponse> = rows
-            .into_iter()
-            .filter_map(|row| {
-                let (id, _) = id_from_wire(row.get("id")?)?;
-                let mut attributes = HashMap::new();
-                if let Some(obj) = row.as_object() {
-                    for (k, v) in obj {
-                        if !is_system_column(k) {
-                            attributes.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                Some(DocumentResponse { id, attributes })
-            })
-            .collect();
-
-        // Ask for one extra row when possible. At Turbopuffer's 10k top_k cap,
-        // an exact full page schedules one confirming follow-up request.
-        let page_size = page_size as usize;
-        let next_cursor = if documents.len() > page_size {
-            documents.truncate(page_size);
-            documents.last().map(|d| d.id.clone())
-        } else if query_top_k == page_size as u32 && documents.len() == page_size {
-            documents.last().map(|d| d.id.clone())
-        } else {
-            None
-        };
-
-        Ok(DocumentPage {
-            documents,
-            next_cursor,
-        })
+    async fn scan_page_strong(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        self.scan_page_at_consistency(
+            namespace,
+            cursor,
+            page_size,
+            filters,
+            include_attributes,
+            true,
+        )
+        .await
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
@@ -2775,6 +3476,9 @@ pub struct MockTurbopufferClient {
     /// failure handling without mutating the mock store first.
     delete_namespace_status: tokio::sync::RwLock<HashMap<String, u16>>,
     scan_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
+    scan_returned_bytes: AtomicUsize,
+    strong_scan_calls: AtomicUsize,
+    reconcile_token_supported: std::sync::atomic::AtomicBool,
     scan_include_attributes: tokio::sync::RwLock<Vec<Option<Vec<String>>>>,
     ranked_query_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
     /// Every `ranked_query` call as the store received it, in arrival order.
@@ -2855,6 +3559,9 @@ impl MockTurbopufferClient {
             head_not_found: tokio::sync::RwLock::new(std::collections::HashSet::new()),
             delete_namespace_status: tokio::sync::RwLock::new(HashMap::new()),
             scan_filters: tokio::sync::RwLock::new(Vec::new()),
+            scan_returned_bytes: AtomicUsize::new(0),
+            strong_scan_calls: AtomicUsize::new(0),
+            reconcile_token_supported: std::sync::atomic::AtomicBool::new(true),
             scan_include_attributes: tokio::sync::RwLock::new(Vec::new()),
             ranked_query_filters: tokio::sync::RwLock::new(Vec::new()),
             ranked_query_calls: tokio::sync::RwLock::new(Vec::new()),
@@ -2917,6 +3624,20 @@ impl MockTurbopufferClient {
     pub fn metadata_request_count(&self) -> usize {
         self.metadata_requests.load(AtomicOrdering::SeqCst)
     }
+    /// Serialized returned documents, not billable upstream logical bytes.
+    pub fn strong_scan_calls(&self) -> usize {
+        self.strong_scan_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    pub fn scan_returned_bytes(&self) -> usize {
+        self.scan_returned_bytes.load(AtomicOrdering::SeqCst)
+    }
+
+    pub fn set_reconcile_token_supported(&self, supported: bool) {
+        self.reconcile_token_supported
+            .store(supported, AtomicOrdering::SeqCst);
+    }
+
     pub async fn scan_filters(&self) -> Vec<Option<Value>> {
         self.scan_filters.read().await.clone()
     }
@@ -3680,10 +4401,48 @@ impl TurbopufferClient for MockTurbopufferClient {
             None
         };
 
+        self.scan_returned_bytes.fetch_add(
+            serde_json::to_vec(&documents)
+                .expect("mock documents serialize")
+                .len(),
+            AtomicOrdering::SeqCst,
+        );
         Ok(DocumentPage {
             documents,
             next_cursor,
         })
+    }
+
+    async fn scan_page_strong(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+        filters: Option<&Value>,
+        include_attributes: Option<&[String]>,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        self.strong_scan_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        self.scan_page(namespace, cursor, page_size, filters, include_attributes)
+            .await
+    }
+
+    async fn reconcile_change_token(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        if !self.reconcile_token_supported.load(AtomicOrdering::SeqCst) {
+            return Ok(None);
+        }
+        // Test-only content identity; production adapters must provide a real
+        // cheap revision, never emulate this by scanning rows.
+        let docs = self.docs.read().await;
+        let mut rows: Vec<_> = docs
+            .get(namespace)
+            .into_iter()
+            .flat_map(|ns| ns.values())
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(Some(serde_json::json!(rows).to_string()))
     }
 
     async fn head_namespace(&self, namespace: &str) -> Result<NamespaceMeta, TurbopufferError> {
