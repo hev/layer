@@ -54,6 +54,18 @@
                 "region"
               ],
               "link": "webUrl"
+            },
+            {
+              "name": "ki-invoices",
+              "toolName": "ki_invoices",
+              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status and whether a document is attached. Booked cost codes are not on this namespace. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document.",
+              "filters": [
+                "job_number",
+                "vendor",
+                "status",
+                "has_document",
+                "job_id"
+              ]
             }
           ],
           "host": "mcp.hevlayer.com"
