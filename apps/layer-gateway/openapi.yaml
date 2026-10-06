@@ -3517,8 +3517,9 @@ components:
           - integer
           - 'null'
           format: int64
-          description: Stable watermark (epoch ms) of the last completed reconcile.
-            Managed writes do not advance it.
+          description: Epoch ms on the `stable_as_of` clock, the stable watermark
+            of the last completed reconcile scan. Tracked writes update counts but
+            never advance it. Null until the first reconcile completes.
         rows:
           type:
           - integer
@@ -3563,7 +3564,14 @@ components:
               type: string
               enum:
               - exact
+              - estimate
               - lower_bound
+              description: 'How the count was computed, not whether it is current
+                (that is `state`). `exact` up to the Index `valueCap`; `estimate`
+                is a HyperLogLog sketch within about 2% above it; `lower_bound` is
+                a field stored before sketches existed.
+
+                '
         min:
           type: number
           description: Smallest numeric value. Numeric attributes only.
@@ -3589,6 +3597,13 @@ components:
           enum:
           - exact
           - approximate
+          description: 'Maintenance state, independent of `distinct.quality`: `exact`
+            only when the counts are certified current as of `as_of` plus every tracked
+            write; `approximate` otherwise, including cold recovery, writes that bypass
+            the gateway, and a delete in a field above the value cap, where the sketch
+            cannot subtract.
+
+            '
         approximate_since:
           type: integer
           format: int64

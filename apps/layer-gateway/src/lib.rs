@@ -21,6 +21,8 @@ pub mod field_stats_metadata_expense;
 #[cfg(feature = "field-stats-capture")]
 pub mod field_stats_scan_budget;
 pub mod history;
+#[cfg(feature = "pro")]
+pub mod hll;
 pub mod index_config;
 pub mod index_gc;
 pub mod keys;
