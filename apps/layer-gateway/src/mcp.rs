@@ -1,5 +1,5 @@
 //! Seeded, stateless, read-only MCP data servers. No independent namespace ACL.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Extension, OriginalUri, Path, Query, Request, State};
@@ -705,7 +705,7 @@ impl McpHandler {
             (kind, ns)
         };
         check_arguments(
-            kind.name(),
+            tool,
             &arguments,
             match kind {
                 ToolKind::Search => &["query", "filters", "limit", "cursor"],
@@ -774,6 +774,61 @@ impl McpHandler {
         Ok(body)
     }
 
+    /// Replace the ids a ranking returned with their rows, in rank order. A row
+    /// deleted since stays as its id, so a page never loses a place.
+    async fn fill_attributes(
+        &self,
+        ns: &McpNamespace,
+        headers: &HeaderMap,
+        page: &mut [Value],
+    ) -> Result<(), AppError> {
+        let row_of = |item: &Value| -> Value {
+            if ns.collapse.is_some() {
+                item["best"].clone()
+            } else {
+                item.clone()
+            }
+        };
+        let ids: Vec<Value> = page.iter().map(|item| row_of(item)["id"].clone()).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let found = self
+            .query_body(
+                ns,
+                headers,
+                json!({"rank_by":["id","asc"],"top_k":ids.len(),"include_attributes":true,
+                       "filters":["id","In",ids]}),
+            )
+            .await?;
+        let rows: HashMap<String, Value> = found["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|row| (row["id"].to_string(), row.clone()))
+            .collect();
+        for item in page.iter_mut() {
+            let id = row_of(item)["id"].to_string();
+            let Some(mut row) = rows.get(&id).cloned() else {
+                continue;
+            };
+            let slot = if ns.collapse.is_some() {
+                &mut item["best"]
+            } else {
+                &mut *item
+            };
+            // The ranking's score (`$score`, `$dist`) stays; the id lookup has none.
+            if let (Some(ranked), Some(row)) = (slot.as_object(), row.as_object_mut()) {
+                row.retain(|name, _| !name.starts_with('$'));
+                for (name, value) in ranked.iter().filter(|(name, _)| name.starts_with('$')) {
+                    row.insert(name.clone(), value.clone());
+                }
+            }
+            *slot = row;
+        }
+        Ok(())
+    }
+
     /// One page of a search. The first page pins `as_of` and counts the
     /// matches; the cursor carries both, so every later page reads the same
     /// snapshot: rows written after page one cannot shift the offset.
@@ -812,7 +867,11 @@ impl McpHandler {
             }
         };
         let take = limit.min(MAX_WINDOW.saturating_sub(offset));
-        let mut base = json!({"rank_by":rank_by,"top_k":offset + take,"include_attributes":true});
+        // Rank ids only, over the same fixed window on every page: approximate
+        // ranking can reorder when `top_k` changes, and a page of full text
+        // down to a deep offset can outgrow a response. Page two reads the
+        // ranking page one saw.
+        let mut base = json!({"rank_by":rank_by,"top_k":MAX_WINDOW,"include_attributes":false});
         if let Some(collapse) = &ns.collapse {
             base["collapse"] = collapse.clone();
         }
@@ -832,35 +891,25 @@ impl McpHandler {
             (Some(filter), None) | (None, Some(filter)) => base["filters"] = filter,
             (None, None) => {}
         }
-        let mut body = self.query_body(ns, &headers, base.clone()).await?;
+        let mut body = self.query_body(ns, &headers, base).await?;
         let key = if ns.collapse.is_some() {
             "groups"
         } else {
             "rows"
         };
-        let mut items = body
+        let ranked = body
             .get_mut(key)
             .and_then(Value::as_array_mut)
             .map(std::mem::take)
             .unwrap_or_default();
-        let reached = items.len() as u64;
-        let page: Vec<Value> = items.drain((offset as usize).min(items.len())..).collect();
-        // A short read is the whole result set; otherwise count it, bounded.
         let (total, exact) = match known_total {
             Some(total) => (total.count, total.exact),
-            None if reached < offset + take => (reached, true),
-            None => {
-                let mut count = base;
-                count["top_k"] = json!(MAX_WINDOW);
-                count["include_attributes"] = json!(false);
-                let counted = self.query_body(ns, &headers, count).await?;
-                let counted = counted
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len) as u64;
-                (counted, counted < MAX_WINDOW)
-            }
+            None => (ranked.len() as u64, (ranked.len() as u64) < MAX_WINDOW),
         };
+        let start = (offset as usize).min(ranked.len());
+        let mut page: Vec<Value> =
+            ranked[start..(start + take as usize).min(ranked.len())].to_vec();
+        self.fill_attributes(ns, &headers, &mut page).await?;
         let next = offset + page.len() as u64;
         let next_cursor = (!page.is_empty() && next < total).then(|| {
             PageCursor {
@@ -1223,16 +1272,6 @@ enum ToolKind {
     Search,
     Get,
     Aggregate,
-}
-
-impl ToolKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Search => "search",
-            Self::Get => "get",
-            Self::Aggregate => "aggregate",
-        }
-    }
 }
 
 /// Most fields one aggregate groups by, as the store allows.
