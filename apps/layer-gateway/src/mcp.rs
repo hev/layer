@@ -1361,6 +1361,8 @@ enum FilterType {
     Number,
     Integer,
     Date,
+    /// A `[]string` attribute; a filter value matches rows whose list contains it.
+    StringList,
 }
 
 struct NamespaceSchema {
@@ -1407,6 +1409,7 @@ impl NamespaceSchema {
                 .or_else(|| attr.as_str());
             let ty = match ty {
                 Some("string" | "uuid") => FilterType::String,
+                Some("[]string" | "[]uuid") => FilterType::StringList,
                 Some("bool" | "boolean") => FilterType::Boolean,
                 Some("int" | "uint" | "int64" | "uint64") => FilterType::Integer,
                 Some("float" | "float64" | "number") => FilterType::Number,
@@ -1574,6 +1577,9 @@ impl NamespaceSchema {
                 FilterType::Boolean if value.is_boolean() => {
                     predicates.push(json!([name, "Eq", value]))
                 }
+                FilterType::StringList if value.is_string() => {
+                    predicates.push(json!([name, "Contains", value]))
+                }
                 FilterType::Number | FilterType::Integer | FilterType::Date => {
                     let bounds = value
                         .as_object()
@@ -1634,6 +1640,7 @@ impl FilterType {
     fn name(&self) -> &'static str {
         match self {
             Self::String => "string",
+            Self::StringList => "string list",
             Self::Boolean => "boolean",
             Self::Number => "number",
             Self::Integer => "integer",
@@ -1643,7 +1650,7 @@ impl FilterType {
 
     fn schema(&self) -> Value {
         match self {
-            Self::String => json!({"type":"string"}),
+            Self::String | Self::StringList => json!({"type":"string"}),
             Self::Boolean => json!({"type":"boolean"}),
             Self::Date => {
                 json!({"type":"object","properties":{"after":{"type":"string","format":"date-time"},"before":{"type":"string","format":"date-time"}},"minProperties":1,"additionalProperties":false})
@@ -1965,5 +1972,22 @@ mod tests {
         )
         .is_err());
         assert!(NamespaceSchema::from_metadata(&spec, &json!({"schema":{}})).is_err());
+    }
+
+    #[test]
+    fn string_list_filters_match_rows_whose_list_contains_the_value() {
+        let mut spec = ns();
+        spec.filters = Some(vec!["codes".into()]);
+        let schema = NamespaceSchema::from_metadata(
+            &spec,
+            &json!({"schema":{"codes":{"type":"[]string","filterable":true}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            schema.filters(Some(json!({"codes":"06-110"}))).unwrap(),
+            Some(json!(["codes", "Contains", "06-110"]))
+        );
+        assert!(schema.filters(Some(json!({"codes":["06-110"]}))).is_err());
+        assert_eq!(schema.field_names(FilterType::groupable), "none");
     }
 }

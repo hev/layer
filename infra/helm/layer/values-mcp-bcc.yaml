@@ -9,7 +9,7 @@
             {
               "name": "pov-bcc-pages",
               "toolName": "documents",
-              "description": "BCC documents. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
+              "description": "BCC documents. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN). Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
               "collapse": {
                 "by": "document"
               },
@@ -23,14 +23,17 @@
                 "region",
                 "ki_lead_id",
                 "ki_job_number",
-                "ki_client_id"
+                "ki_client_id",
+                "cost_code_ki",
+                "cost_code_final15",
+                "cost_code_catalog45"
               ],
               "link": "webUrl"
             },
             {
               "name": "pov-bcc-story-pages",
               "toolName": "story_documents",
-              "description": "Story Renovations documents, full pages (PDF). Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
+              "description": "Story Renovations documents, full pages (PDF). Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN). Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
               "collapse": {
                 "by": "document"
               },
@@ -42,7 +45,10 @@
                 "doc_type",
                 "ki_lead_id",
                 "ki_job_number",
-                "ki_client_id"
+                "ki_client_id",
+                "cost_code_ki",
+                "cost_code_final15",
+                "cost_code_catalog45"
               ],
               "link": "webUrl",
               "pageLink": true
@@ -50,7 +56,7 @@
             {
               "name": "pov-bcc-photos",
               "toolName": "images",
-              "description": "BCC images. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN).",
+              "description": "BCC images. Each hit carries the KI ids of its job: ki_lead_id (pass to the KI MCP project tools), ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN). Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
               "filters": [
                 "job",
                 "company",
@@ -60,7 +66,9 @@
                 "region",
                 "ki_lead_id",
                 "ki_job_number",
-                "ki_client_id"
+                "ki_client_id",
+                "cost_code_ki",
+                "cost_code_final15"
               ],
               "link": "webUrl"
             },
@@ -164,7 +172,7 @@
             {
               "name": "ki-invoices",
               "toolName": "ki_invoices",
-              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status, whether a document is attached and the cost code KI booked it to. ki_cost_code (e.g. 06-110) is the code carrying most of the booked amount; ki_cost_codes lists every code when the invoice is split (ki_cost_code_status split) and ki_cost_code_status unbooked means KI has booked it to no code. Totals by vendor for a job and cost code: filter job_number and ki_cost_code, aggregate sum of amount grouped by vendor. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages. ki_invoice_id is the id the KI MCP takes as invoice_ids; ki_project_id is the contract id; vendor ids are on ki_invoice_vendors; the booked lines are in ki_cost_transactions.",
+              "description": "KI AP invoices: one row per invoice with job, vendor, amount, status, whether a document is attached and the cost code KI booked it to. ki_cost_code (e.g. 06-110) is the code carrying most of the booked amount; ki_cost_codes lists every code when the invoice is split (ki_cost_code_status split) and ki_cost_code_status unbooked means KI has booked it to no code. Totals by vendor for a job and cost code: filter job_number and ki_cost_code, aggregate sum of amount grouped by vendor. Pass a row's invoice_id as invoice_ids to the KI MCP tool export_invoice_documents to fetch its document. The invoice PDF text is searchable in ki_invoice_pages. ki_invoice_id is the id the KI MCP takes as invoice_ids; ki_project_id is the contract id; vendor ids are on ki_invoice_vendors; the booked lines are in ki_cost_transactions. Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
               "filters": [
                 "amount",
                 "has_document",
@@ -176,7 +184,9 @@
                 "ki_job_number",
                 "ki_project_id",
                 "status",
-                "vendor"
+                "vendor",
+                "cost_code_ki",
+                "cost_code_final15"
               ]
             },
             {
