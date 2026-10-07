@@ -178,6 +178,23 @@
                 "status",
                 "vendor"
               ]
+            },
+            {
+              "name": "pov-bcc-invoice-docs",
+              "toolName": "invoice_documents",
+              "description": "Invoice PDFs from SharePoint and KI, one document per file, full pages. A file in both systems is one document: each hit lists every copy (webUrl for SharePoint, rest://bcc-ki/{id}.pdf for KI) and carries the KI invoice's ki_invoice_id, ki_job_number, ki_vendor and ki_status.",
+              "collapse": {
+                "by": "document"
+              },
+              "filters": [
+                "ki_invoice_id",
+                "ki_job_number",
+                "ki_vendor",
+                "ki_status",
+                "ki_job_id"
+              ],
+              "link": "webUrl",
+              "pageLink": true
             }
           ],
           "host": "mcp.hevlayer.com"
