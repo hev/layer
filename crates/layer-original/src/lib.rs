@@ -1,0 +1,214 @@
+//! A page row points at its retained original with `original_blob`
+//! (`blob://<namespace>/<sha256>`) and `original_bytes`. The reference is
+//! derived, never free-form: it is exactly the address of the row's own
+//! indexed `original_sha256` in the row's own namespace. The pipeline writes it
+//! at ingest, the backfill Function writes it for existing rows, and the
+//! gateway re-derives it before serving a byte. All three use this crate.
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+pub const BLOB_ATTR: &str = "original_blob";
+pub const BYTES_ATTR: &str = "original_bytes";
+/// Written by the extract worker on every page row, before retention existed.
+pub const SHA_ATTR: &str = "original_sha256";
+
+/// Attributes a Function needs to resolve and verify an original.
+pub const INPUT_ATTRS: [&str; 8] = [
+    SHA_ATTR,
+    "original_version",
+    "original_etag",
+    "original_item",
+    "original_drive",
+    "original_mime",
+    BLOB_ATTR,
+    BYTES_ATTR,
+];
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn reference(namespace: &str, sha256: &str) -> String {
+    format!("blob://{namespace}/{}", sha256.to_ascii_lowercase())
+}
+
+/// The attribute patch that records a retained original. Identical for the
+/// pipeline's staged rows, the backfill's completion patch and `patch_rows`.
+pub fn patch(namespace: &str, sha256: &str, bytes: u64) -> Map<String, Value> {
+    let mut attrs = Map::new();
+    attrs.insert(BLOB_ATTR.into(), json!(reference(namespace, sha256)));
+    attrs.insert(BYTES_ATTR.into(), json!(bytes));
+    attrs
+}
+
+/// What a row says its original is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub sha256: String,
+    pub bytes: Option<u64>,
+    pub mime: String,
+    /// The provider version the row was indexed from (`original_version`).
+    pub version: Option<String>,
+    pub etag: Option<String>,
+    pub item: Option<String>,
+    pub drive: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The row has no retained original reference.
+    NotRetained,
+    /// The row has no usable indexed hash, so nothing can be verified.
+    NoHash,
+    /// The stored reference is not the one derived from the row and namespace.
+    NotBound,
+    /// The bytes are not the document the row was indexed from.
+    Mismatch(&'static str),
+}
+
+fn string(attrs: &Value, name: &str) -> Option<String> {
+    attrs
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+impl Identity {
+    /// The row's indexed identity, without requiring a retained reference.
+    pub fn of_row(attrs: &Value) -> Result<Self, Refusal> {
+        let sha256 = string(attrs, SHA_ATTR)
+            .filter(|sha| is_sha256(sha))
+            .map(|sha| sha.to_ascii_lowercase())
+            .ok_or(Refusal::NoHash)?;
+        Ok(Self {
+            sha256,
+            bytes: attrs.get(BYTES_ATTR).and_then(Value::as_u64),
+            mime: string(attrs, "original_mime").unwrap_or_else(|| "application/pdf".into()),
+            version: string(attrs, "original_version"),
+            etag: string(attrs, "original_etag"),
+            item: string(attrs, "original_item"),
+            drive: string(attrs, "original_drive"),
+        })
+    }
+
+    /// Bind a retained reference to this row and namespace: it must be exactly
+    /// the derived address, so another namespace's blob, other bytes, a bucket
+    /// or a URL are refused.
+    pub fn bound(namespace: &str, attrs: &Value) -> Result<Self, Refusal> {
+        let Some(stored) = attrs.get(BLOB_ATTR).and_then(Value::as_str) else {
+            return Err(Refusal::NotRetained);
+        };
+        let identity = Self::of_row(attrs)?;
+        if stored != reference(namespace, &identity.sha256) {
+            return Err(Refusal::NotBound);
+        }
+        Ok(identity)
+    }
+
+    /// Whether the row already carries exactly this retained original.
+    pub fn is_retained_in(namespace: &str, attrs: &Value) -> bool {
+        Self::bound(namespace, attrs).is_ok()
+    }
+
+    /// Bytes must hash to the indexed hash, match a recorded size and, for a
+    /// PDF, start like one.
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), Refusal> {
+        if sha256_hex(bytes) != self.sha256 {
+            return Err(Refusal::Mismatch("hash differs from the indexed original"));
+        }
+        if self.bytes.is_some_and(|n| n != bytes.len() as u64) {
+            return Err(Refusal::Mismatch("size differs from the indexed size"));
+        }
+        if self.mime == "application/pdf" && !bytes.starts_with(b"%PDF-") {
+            return Err(Refusal::Mismatch("not a PDF"));
+        }
+        Ok(())
+    }
+
+    /// The provider copy the bytes came from must be the version the row was
+    /// indexed from. Absent facts on either side are not a disagreement; a
+    /// present one that differs is.
+    pub fn check_source(
+        &self,
+        etag: Option<&str>,
+        item: Option<&str>,
+        drive: Option<&str>,
+    ) -> Result<(), Refusal> {
+        for (row, source, what) in [
+            (&self.etag, etag, "etag differs from the indexed version"),
+            (&self.item, item, "item differs from the indexed document"),
+            (
+                &self.drive,
+                drive,
+                "drive differs from the indexed document",
+            ),
+        ] {
+            if let (Some(row), Some(source)) = (row, source) {
+                if row != source {
+                    return Err(Refusal::Mismatch(what));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(ns: &str, bytes: &[u8]) -> Value {
+        let sha = sha256_hex(bytes);
+        json!({"original_sha256": sha, "original_blob": reference(ns, &sha),
+               "original_bytes": bytes.len(), "original_etag": "e1"})
+    }
+
+    #[test]
+    fn one_reference_format_and_patch() {
+        let sha = sha256_hex(b"%PDF-1");
+        assert_eq!(
+            reference("ns", &sha.to_uppercase()),
+            format!("blob://ns/{sha}")
+        );
+        let p = patch("ns", &sha, 6);
+        assert_eq!(p[BLOB_ATTR], format!("blob://ns/{sha}"));
+        assert_eq!(p[BYTES_ATTR], 6);
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn binds_only_the_derived_address() {
+        let attrs = row("docs", b"%PDF-1");
+        assert!(Identity::bound("docs", &attrs).is_ok());
+        assert_eq!(Identity::bound("other", &attrs), Err(Refusal::NotBound));
+        let mut url = attrs.clone();
+        url[BLOB_ATTR] = json!("s3://bucket/key");
+        assert_eq!(Identity::bound("docs", &url), Err(Refusal::NotBound));
+        assert_eq!(
+            Identity::bound("docs", &json!({})),
+            Err(Refusal::NotRetained)
+        );
+        let mut no_hash = attrs;
+        no_hash.as_object_mut().unwrap().remove(SHA_ATTR);
+        assert_eq!(Identity::bound("docs", &no_hash), Err(Refusal::NoHash));
+    }
+
+    #[test]
+    fn verifies_bytes_and_source_version() {
+        let attrs = row("docs", b"%PDF-1");
+        let id = Identity::bound("docs", &attrs).unwrap();
+        assert!(id.verify(b"%PDF-1").is_ok());
+        assert!(id.verify(b"%PDF-2").is_err());
+        assert!(id.check_source(Some("e1"), None, None).is_ok());
+        assert!(id.check_source(None, Some("x"), None).is_ok());
+        assert!(id.check_source(Some("e2"), None, None).is_err());
+    }
+}

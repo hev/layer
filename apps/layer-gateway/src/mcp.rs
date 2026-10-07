@@ -56,6 +56,9 @@ pub struct McpNamespace {
     /// Also show each page row's `page` as a PDF page-anchored copy of `link`.
     #[serde(default)]
     pub page_link: bool,
+    /// Serve the retained original file (and bounded page images) on demand
+    /// through `fetch_original`. Search and `get` stay text-only.
+    pub originals: Option<crate::mcp_original::OriginalsConfig>,
     /// Gateway collapse configuration; search returns only each group's best row.
     pub collapse: Option<Value>,
 }
@@ -119,6 +122,31 @@ fn generic_tools() -> Vec<Tool> {
      ("aggregate", AGGREGATE_DESCRIPTION, aggregate)]
         .into_iter().map(|(name, description, schema)| Tool::new(name, description, schema.as_object().unwrap().clone())
             .with_annotations(ToolAnnotations::new().read_only(true))).collect()
+}
+
+fn fetch_original_description() -> &'static str {
+    "Fetch the retained ORIGINAL file of a record's document by the record id from search or get. \
+     Without `pages` it returns the whole PDF as an embedded resource when it is small enough; some \
+     hosts do not show embedded files to the model. With `pages` (page numbers of the original PDF) it \
+     returns those pages as images the model can see, for charts, drawings, stamps and anything OCR text \
+     missed. The source (SharePoint) link and page links are always in the text, never replaced."
+}
+
+fn fetch_original_schema(generic: bool, max_pages: usize) -> Map<String, Value> {
+    let mut properties = json!({
+        "id":{"anyOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}]},
+        "pages":{"type":"array","items":{"type":"integer","minimum":1},"minItems":1,"maxItems":max_pages,
+            "description":"Original PDF page numbers to return as images."}
+    });
+    let mut required = vec!["id"];
+    if generic {
+        properties["namespace"] = json!({"type":"string","minLength":1});
+        required.push("namespace");
+    }
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+        .as_object()
+        .unwrap()
+        .clone()
 }
 
 const AGGREGATE_DESCRIPTION: &str = "Count rows, or sum, min and max a numeric field, optionally grouped by one or two fields, with the same filters as search. Call list_namespaces for the groupable and summable fields. Every call is billed by the store at the namespace's size, so ask for everything in one call: at most 4 aggregates, and min/max (ungrouped only) each cost one more store query.";
@@ -193,6 +221,9 @@ pub fn registry_from_json(raw: Option<&str>) -> Result<Arc<McpRegistry>, AppErro
             }
             if let Some(collapse) = &ns.collapse {
                 crate::routes::collapse::parse(collapse)?;
+            }
+            if let Some(originals) = &ns.originals {
+                originals.validate()?;
             }
             if let Some(filters) = &ns.filters {
                 let mut seen = HashSet::new();
@@ -366,6 +397,23 @@ impl ServerHandler for McpHandler {
         let mut tools = vec![discovery_tool()];
         if self.spec.generic_tools() {
             tools.extend(generic_tools());
+            if let Some(max_pages) = self
+                .spec
+                .namespaces
+                .iter()
+                .filter(|ns| self.authorize(ns).is_ok())
+                .filter_map(|ns| ns.originals.as_ref().map(|o| o.max_pages()))
+                .max()
+            {
+                tools.push(
+                    Tool::new(
+                        "fetch_original",
+                        fetch_original_description(),
+                        fetch_original_schema(true, max_pages),
+                    )
+                    .with_annotations(ToolAnnotations::new().read_only(true)),
+                );
+            }
             return Ok(ListToolsResult {
                 tools,
                 ..Default::default()
@@ -377,6 +425,16 @@ impl ServerHandler for McpHandler {
             }
             let schema = self.schema(ns).await.map_err(mcp_error)?;
             tools.extend(schema.tools(ns));
+            if let Some(originals) = &ns.originals {
+                tools.push(
+                    Tool::new(
+                        format!("fetch_original_{}", ns.tool_name()),
+                        fetch_original_description(),
+                        fetch_original_schema(false, originals.max_pages()),
+                    )
+                    .with_annotations(ToolAnnotations::new().read_only(true)),
+                );
+            }
         }
         Ok(ListToolsResult {
             tools,
@@ -671,6 +729,7 @@ impl McpHandler {
                 "search" => ToolKind::Search,
                 "get" => ToolKind::Get,
                 "aggregate" => ToolKind::Aggregate,
+                "fetch_original" => ToolKind::Original,
                 _ => return Err(invalid("unknown MCP tool").into()),
             };
             let namespace = arguments
@@ -693,6 +752,8 @@ impl McpHandler {
                 (ToolKind::Get, suffix)
             } else if let Some(suffix) = tool.strip_prefix("aggregate_") {
                 (ToolKind::Aggregate, suffix)
+            } else if let Some(suffix) = tool.strip_prefix("fetch_original_") {
+                (ToolKind::Original, suffix)
             } else {
                 return Err(invalid("unknown MCP tool").into());
             };
@@ -711,9 +772,16 @@ impl McpHandler {
                 ToolKind::Search => &["query", "filters", "limit", "cursor"],
                 ToolKind::Get => &["id"],
                 ToolKind::Aggregate => &["group_by", "aggregates", "filters", "limit"],
+                ToolKind::Original => &["id", "pages"],
             },
         )?;
         self.authorize(ns)?;
+        if matches!(kind, ToolKind::Original) {
+            return self
+                .fetch_original(ns, arguments)
+                .await
+                .map_err(ToolFailure::from);
+        }
         let mut headers = self.headers.clone();
         // Existing history tags carry the source without a second history writer.
         headers.append(
@@ -726,6 +794,7 @@ impl McpHandler {
             ToolKind::Search => return self.search_page(ns, headers, arguments).await,
             ToolKind::Aggregate => return self.aggregate(ns, headers, arguments).await,
             ToolKind::Get => {}
+            ToolKind::Original => unreachable!("handled above"),
         }
         let id = match arguments.remove("id") {
             Some(Value::String(id)) if !id.is_empty() => id,
@@ -743,7 +812,15 @@ impl McpHandler {
         .await?
         .into_response();
         let body = decode_response(response).await?;
-        let text = render(&body, ns.link.as_deref(), ns.page_link);
+        let mut text = render(&body, ns.link.as_deref(), ns.page_link);
+        if ns.originals.is_some()
+            && body
+                .pointer("/attributes/original_blob")
+                .or(body.get("original_blob"))
+                .is_some()
+        {
+            text.push_str("\nThe original file is retained: call fetch_original with this id (optionally `pages`).");
+        }
         let mut result = CallToolResult::structured(body);
         result.content = vec![ContentBlock::text(text)];
         Ok(result)
@@ -1272,6 +1349,7 @@ enum ToolKind {
     Search,
     Get,
     Aggregate,
+    Original,
 }
 
 /// Most fields one aggregate groups by, as the store allows.
@@ -1352,6 +1430,159 @@ fn page_fingerprint(ns: &McpNamespace, rank_by: &Value, filters: Option<&Value>)
             .as_bytes(),
     );
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl McpHandler {
+    /// The authorized read of the record, then the bytes its own row binds to.
+    /// Auth order: MCP entitlement (handle), namespace read grant (caller),
+    /// record read through the normal fetch path, reference binding, hash check.
+    async fn fetch_original(
+        &self,
+        ns: &McpNamespace,
+        mut arguments: Map<String, Value>,
+    ) -> Result<CallToolResult, AppError> {
+        use crate::mcp_original as original;
+        let config = ns
+            .originals
+            .as_ref()
+            .ok_or_else(|| invalid("originals are not enabled for this namespace"))?;
+        let id = match arguments.remove("id") {
+            Some(Value::String(id)) if !id.is_empty() => id,
+            Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
+            _ => return Err(invalid("id must be a nonempty string or unsigned integer")),
+        };
+        let pages = original::parse_pages(arguments.remove("pages"), config.max_pages())?;
+        if !arguments.is_empty() {
+            return Err(invalid("unknown fetch_original argument"));
+        }
+        let mut headers = self.headers.clone();
+        headers.append(
+            "x-hevlayer-tag",
+            format!("mcp.{}", self.name)
+                .parse()
+                .map_err(|_| invalid("invalid MCP history tag"))?,
+        );
+        let response = crate::routes::fetch::fetch_document(
+            State(self.state.clone()),
+            Path((ns.name.clone(), id.clone())),
+            Query(crate::routes::fetch::FetchQueryParams {
+                include_attributes: None,
+            }),
+            headers,
+        )
+        .await?
+        .into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
+        let body: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
+        if !status.is_success() {
+            return Err(AppError::NotFound(format!(
+                "record `{id}` was not found or is no longer available ({status})"
+            )));
+        }
+        let attrs = body.get("attributes").unwrap_or(&body);
+        let bound = original::bind(&ns.name, attrs)?;
+        let is_pdf = bound.mime == "application/pdf";
+        let hard_limit = if pages.is_some() {
+            10 * 1024 * 1024
+        } else {
+            config.max_bytes()
+        };
+        if pages.is_some() && !is_pdf {
+            return Err(invalid("page images are only available for PDF originals"));
+        }
+        if attrs
+            .get("page_basis")
+            .and_then(Value::as_str)
+            .is_some_and(|b| b != "original_pdf")
+        {
+            return Err(invalid("this record's pages come from a converted copy; page images of the original are not available"));
+        }
+        let file = original::load(&self.state, &ns.name, &bound, hard_limit).await?;
+        let name = attrs
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("original.pdf");
+        let source = ns
+            .link
+            .as_deref()
+            .and_then(|field| attrs.get(field))
+            .and_then(Value::as_str);
+        let page_number = attrs.get("page").and_then(Value::as_u64);
+        let mut text = format!(
+            "Original file `{name}` ({} bytes, sha256 {})",
+            file.len(),
+            bound.sha256
+        );
+        if let Some(url) = source {
+            text.push_str(&format!("\nSource link: {url}"));
+            if let (true, Some(page), false) = (ns.page_link, page_number, url.contains('#')) {
+                text.push_str(&format!("\nPage {page} link: {url}#page={page}"));
+            }
+        }
+        let mut structured = json!({
+            "id": id, "namespace": ns.name, "name": name, "mimeType": bound.mime,
+            "bytes": file.len(), "sha256": bound.sha256, "version": bound.version,
+            "sourceLink": source,
+            "pageLink": match (ns.page_link, source, page_number) {
+                (true, Some(url), Some(page)) if !url.contains('#') => json!(format!("{url}#page={page}")),
+                _ => Value::Null,
+            },
+        });
+        let mut content = Vec::new();
+        match pages {
+            None => {
+                text.push_str("\nThe PDF is attached as an embedded resource. If your host does not show it, call again with `pages`.");
+                content.push(ContentBlock::text(text));
+                content.push(ContentBlock::resource(
+                    ResourceContents::blob(
+                        original::b64(&file),
+                        format!("layer://{}/original/{}", ns.name, bound.sha256),
+                    )
+                    .with_mime_type(bound.mime.clone()),
+                ));
+            }
+            Some(pages) => {
+                let outcome = original::render_pages(file, pages, config.max_width()).await?;
+                text.push_str(&format!(
+                    "\nPage images of the original ({} pages total): {}",
+                    outcome.page_count,
+                    outcome
+                        .images
+                        .iter()
+                        .map(|i| i.page.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                if !outcome.omitted.is_empty() {
+                    text.push_str(&format!(
+                        "\nOmitted to stay within the response limit; request them separately: {}",
+                        outcome
+                            .omitted
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                structured["pageCount"] = json!(outcome.page_count);
+                structured["pages"] =
+                    json!(outcome.images.iter().map(|i| i.page).collect::<Vec<_>>());
+                structured["omittedPages"] = json!(outcome.omitted);
+                content.push(ContentBlock::text(text));
+                for image in outcome.images {
+                    content.push(ContentBlock::text(format!("Page {}", image.page)));
+                    content.push(ContentBlock::image(original::b64(&image.png), "image/png"));
+                }
+            }
+        }
+        let mut result = CallToolResult::structured(structured);
+        result.content = content;
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1763,6 +1994,7 @@ mod tests {
             filters: None,
             link: None,
             page_link: false,
+            originals: None,
             collapse: None,
         }
     }

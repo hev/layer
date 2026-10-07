@@ -1,3 +1,6 @@
+{{- if and (dig "functionReadCache" "configMapName" "" .Values.gateway) (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
+{{- fail "configure one shared writer authority: functionReadCache or fieldStatsCapture" }}
+{{- end }}
 {{- if and .Values.gateway.queue.embedded (gt (int .Values.gateway.replicas) 1) }}
 {{- fail "gateway.queue.embedded requires gateway.replicas=1 until pipeline sharding lands" }}
 {{- end }}
@@ -247,6 +250,10 @@ spec:
             {{- end }}
             - name: PORT
               value: {{ .Values.gateway.port | quote }}
+            {{- with (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
+            - name: LAYER_FUNCTION_READ_CACHE_CONFIG
+              value: /etc/layer/function-read-cache/cache.json
+            {{- end }}
             {{- with (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
             - name: LAYER_FIELD_STATS_CAPTURE_CONFIG
               value: /etc/layer/field-stats-capture/capture.json
@@ -346,8 +353,13 @@ spec:
               value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
               {{- end }}
             {{- end }}
-          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
+          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
           volumeMounts:
+            {{- if (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
+            - name: function-read-cache
+              mountPath: /etc/layer/function-read-cache
+              readOnly: true
+            {{- end }}
             {{- if (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
             - name: field-stats-capture
               mountPath: /etc/layer/field-stats-capture
@@ -384,6 +396,14 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
       volumes:
+        {{- if (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
+        - name: function-read-cache
+          configMap:
+            name: {{ .Values.gateway.functionReadCache.configMapName | quote }}
+            items:
+              - key: cache.json
+                path: cache.json
+        {{- end }}
         {{- if (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) }}
         - name: field-stats-capture
           configMap:

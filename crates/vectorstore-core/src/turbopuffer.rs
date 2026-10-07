@@ -1,3 +1,4 @@
+pub mod receipts;
 pub const TURBOPUFFER_CAPABILITIES: crate::capabilities::Capabilities =
     crate::capabilities::Capabilities {
         kind: "turbopuffer",
@@ -1186,6 +1187,26 @@ impl HttpTurbopufferClient {
                     })
                     .collect();
                 if !missing.is_empty() {
+                    // Reuse only the namespace identity certified by this
+                    // retained original fence. Schema/delete epoch changes
+                    // remove it; missing/error identity still reads metadata
+                    // strongly through the provider below.
+                    let identity = if session.fence.version().readable {
+                        session.schema().await.unwrap_or(None)
+                    } else {
+                        None
+                    };
+                    if let Some(identity) = identity {
+                        uncached
+                            .generated_columns
+                            .write()
+                            .unwrap()
+                            .insert(namespace.to_owned(), identity.generated);
+                        uncached.id_types.write().unwrap().insert(
+                            namespace.to_owned(),
+                            (std::time::Instant::now(), identity.integer_ids),
+                        );
+                    }
                     let fetched = uncached.fetch_many(namespace, &missing).await?;
                     let schema = uncached
                         .generated_columns
@@ -1888,20 +1909,12 @@ impl HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Scan,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         observe_projected_billing(namespace, &resp_body);
 
@@ -2484,11 +2497,10 @@ impl TurbopufferClient for HttpTurbopufferClient {
             self.base_url,
             blob_set_namespace(namespace)
         );
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let request = self.authorize(self.client.post(&url).json(&body))?;
+        let mut receipt =
+            receipts::Pending::new(&blob_set_namespace(namespace), receipts::ReadKind::Fetch);
+        let resp = receipt.send(request).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             // No blob-set namespace yet: nothing was ever stored here.
             return Ok(None);
@@ -2500,6 +2512,8 @@ impl TurbopufferClient for HttpTurbopufferClient {
             .json()
             .await
             .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        receipt.billing(&resp_body);
+        receipt.finished_json_success();
         observe_projected_billing(&blob_set_namespace(namespace), &resp_body);
         resp_body
             .get("rows")
@@ -2647,6 +2661,11 @@ impl TurbopufferClient for HttpTurbopufferClient {
                 )));
             }
         };
+        let query_units = body
+            .as_ref()
+            .and_then(|b| b.get("queries"))
+            .and_then(Value::as_array)
+            .map_or(1, |q| q.len().max(1).try_into().unwrap_or(u32::MAX));
         let request = if let Some(body) = body {
             request.json(&body)
         } else {
@@ -2656,11 +2675,28 @@ impl TurbopufferClient for HttpTurbopufferClient {
         let dispatch = async {
             let headers_timer =
                 crate::delete_timing::start(crate::delete_timing::Phase::UpstreamHeaders);
-            let resp = self
-                .authorize(request)?
-                .send()
-                .await
-                .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+            let request = self.authorize(request)?;
+            let measured_read = path.strip_prefix("/v2/namespaces/").and_then(|p| {
+                if method == "POST" {
+                    p.strip_suffix("/query")
+                        .map(|n| (n, receipts::ReadKind::Query))
+                } else if method == "GET" {
+                    p.strip_suffix("/metadata")
+                        .map(|n| (n, receipts::ReadKind::Metadata))
+                } else {
+                    None
+                }
+            });
+            let mut receipt = measured_read.map(|(namespace, kind)| {
+                receipts::Pending::with_units(namespace, kind, query_units)
+            });
+            let resp = match &mut receipt {
+                Some(receipt) => receipt.send(request).await?,
+                None => request
+                    .send()
+                    .await
+                    .map_err(|e| TurbopufferError::Other(e.to_string()))?,
+            };
             drop(headers_timer);
             let status = resp.status().as_u16();
             let content_type = resp
@@ -2675,6 +2711,9 @@ impl TurbopufferClient for HttpTurbopufferClient {
                 .map_err(|e| TurbopufferError::Other(e.to_string()))?
                 .to_vec();
 
+            if let Some(receipt) = &mut receipt {
+                receipt.finished_bytes(status, &body);
+            }
             drop(body_timer);
             Ok(TurbopufferPassthroughResponse {
                 status,
@@ -2876,20 +2915,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Query,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         Ok(TurbopufferQueryOutcome {
             rows: rows_from_query_body(&resp_body),
@@ -2922,20 +2953,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Query,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         Ok(TurbopufferQueryOutcome {
             rows: rows_from_query_body(&resp_body),
@@ -2959,19 +2982,13 @@ impl TurbopufferClient for HttpTurbopufferClient {
         }
         reserve_provider_query(namespace, legs.len().max(1) as u32).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        resp.json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))
+        receipts::read_json_with_units(
+            namespace,
+            receipts::ReadKind::Query,
+            self.authorize(self.client.post(&url).json(&body))?,
+            legs.len().max(1).try_into().unwrap_or(u32::MAX),
+        )
+        .await
     }
 
     async fn fetch(
@@ -3003,20 +3020,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Fetch,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         observe_projected_billing(namespace, &resp_body);
 
@@ -3111,20 +3120,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::FetchMany,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         observe_projected_billing(namespace, &resp_body);
 
@@ -3197,18 +3198,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
         let body = serde_json::json!({"rank_by":["id","asc"],"top_k":10000,"filters":["_hevlayer_parent_id","Eq",parent],"include_attributes":true,"consistency":{"level":"strong"}});
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Siblings,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
         observe_projected_billing(namespace, &resp_body);
         let rows = rows_from_query_body(&resp_body);
         if rows.len() >= 10000 {
@@ -3271,20 +3266,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
 
         reserve_provider_query(namespace, 1).await?;
         let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp = self
-            .authorize(self.client.post(&url).json(&body))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Vector,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
 
         observe_projected_billing(namespace, &resp_body);
 
@@ -3358,20 +3345,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
         // Metadata is a billed physical read too. Retain inherited Function
         // and expense permits before dispatch, including identity hydration.
         reserve_provider_query(namespace, 1).await?;
-        let resp = self
-            .authorize(self.client.get(&url))?
-            .send()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(TurbopufferError::from_response(resp).await);
-        }
-
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        let body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Metadata,
+            self.authorize(self.client.get(&url))?,
+        )
+        .await?;
 
         if (self.capture_metadata || self.canonical_cache.is_some() || self.shared_cache.is_some())
             && self.api_key.is_some()

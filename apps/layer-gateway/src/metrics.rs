@@ -119,6 +119,20 @@ impl BillingCaller {
     }
 }
 tokio::task_local! { static BILLING_CALLER: BillingCaller; }
+/// Payload-free attribution for evidence only; admission and counters stay in
+/// their existing paths. An overlong caller is reported as unknown.
+#[cfg(feature = "pro")]
+pub(crate) fn billing_caller_receipt() -> (&'static str, String) {
+    BILLING_CALLER
+        .try_with(|caller| {
+            if caller.name.len() <= 128 {
+                (caller.kind, caller.name.clone())
+            } else {
+                ("unknown", "unknown".into())
+            }
+        })
+        .unwrap_or_else(|_| ("unknown", "unknown".into()))
+}
 pub async fn scope_billing_caller<F: std::future::Future>(
     caller: BillingCaller,
     future: F,

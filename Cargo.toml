@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "apps/layer-gateway",
+  "crates/layer-original",
   "crates/metrics-catalog",
   "crates/vectorstore-core",
 ]

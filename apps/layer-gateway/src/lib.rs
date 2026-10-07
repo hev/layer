@@ -20,6 +20,10 @@ pub mod field_stats_estimate_adapter;
 pub mod field_stats_metadata_expense;
 #[cfg(feature = "field-stats-capture")]
 pub mod field_stats_scan_budget;
+#[cfg(feature = "pro")]
+pub mod function_cache_bootstrap;
+#[cfg(feature = "pro")]
+mod function_receipts;
 pub mod history;
 #[cfg(feature = "pro")]
 pub mod hll;
@@ -28,6 +32,7 @@ pub mod index_gc;
 pub mod keys;
 pub mod lineage;
 pub mod mcp;
+pub mod mcp_original;
 pub mod metrics;
 pub mod models;
 pub mod namespace_purge;

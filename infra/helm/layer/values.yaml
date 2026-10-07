@@ -27,6 +27,9 @@ gateway:
   # creates or defaults review inputs.
   fieldStatsCapture:
     configMapName: ""
+  # Existing reviewed ConfigMap with cache.json; never created or enabled here.
+  functionReadCache:
+    configMapName: ""
   # Anonymous gateway telemetry (docs: /docs/observability#telemetry). Set
   # false for CI, test and internal clusters so they don't show up in install
   # analytics.

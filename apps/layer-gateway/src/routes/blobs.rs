@@ -269,7 +269,7 @@ pub(crate) fn blob_cache_set(namespace: &str) -> String {
 }
 
 fn blob_reference(namespace: &str, sha256: &str) -> String {
-    format!("blob://{namespace}/{sha256}")
+    layer_original::reference(namespace, sha256)
 }
 
 fn sniff_content_type(bytes: &[u8]) -> &'static str {
