@@ -1990,4 +1990,29 @@ mod tests {
         assert!(schema.filters(Some(json!({"codes":["06-110"]}))).is_err());
         assert_eq!(schema.field_names(FilterType::groupable), "none");
     }
+    #[test]
+    fn numeric_estimate_ranges_use_inclusive_store_predicates() {
+        let schema = NamespaceSchema::from_metadata(
+            &ns(),
+            &json!({"schema":{
+                "ki_estimate_total":{"type":"float","filterable":true}
+            }}),
+        )
+        .unwrap();
+        assert_eq!(
+            schema
+                .filters(Some(json!({"ki_estimate_total":{"min":100.5,"max":200.5}})))
+                .unwrap(),
+            Some(json!([
+                "And",
+                [
+                    ["ki_estimate_total", "Lte", 200.5],
+                    ["ki_estimate_total", "Gte", 100.5]
+                ]
+            ]))
+        );
+        assert!(schema
+            .filters(Some(json!({"ki_estimate_total":{"min":"100.5"}})))
+            .is_err());
+    }
 }
