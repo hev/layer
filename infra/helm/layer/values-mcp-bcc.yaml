@@ -205,6 +205,24 @@
               ],
               "link": "webUrl",
               "pageLink": true
+            },
+            {
+              "name": "ki-estimates",
+              "toolName": "ki_estimates",
+              "description": "Story KI estimates, one detail row per estimate. ki_estimate_total is a scalar KI total; use inclusive numeric min/max. Each result carries its KI lead and job context. Quantity, general-item and markup lines are searchable text; cost_code_ki and cost_code_final15 remain distinct catalogs. webUrl opens the authenticated KI detail API. Job-level Story selection policy is separate.",
+              "filters": [
+                "ki_estimate_total",
+                "ki_lead_id",
+                "ki_estimate_status",
+                "ki_estimate_type",
+                "ki_estimate_version",
+                "cost_code_ki",
+                "job",
+                "company",
+                "ki_job_number",
+                "cost_code_final15"
+              ],
+              "link": "webUrl"
             }
           ],
           "host": "mcp.hevlayer.com"
