@@ -178,6 +178,11 @@ impl SnapshotBudgets {
             by_namespace,
         }
     }
+    pub fn namespaces(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.by_namespace.keys().cloned().collect();
+        names.sort();
+        names
+    }
     pub fn covers(&self, namespace: &str) -> bool {
         self.by_namespace.contains_key(namespace)
     }
@@ -296,6 +301,30 @@ mod tests {
         // Metadata without sizes cannot be assumed.
         b.sample(&json!({"schema": schema()}), now);
         assert!(b.page_bound("ns", &fields()).unwrap().is_none());
+    }
+
+    /// Deployer check: parse a rendered configuration exactly as startup does
+    /// (a refused file panics the gateway), e.g.
+    /// `SNAPSHOT_BUDGET_CONFIG_UNDER_REVIEW=/path cargo test ... -- --ignored`.
+    #[test]
+    #[ignore = "requires SNAPSHOT_BUDGET_CONFIG_UNDER_REVIEW"]
+    fn field_stats_snapshot_budget_rendered_configuration_is_accepted() {
+        let path = std::env::var("SNAPSHOT_BUDGET_CONFIG_UNDER_REVIEW")
+            .expect("path of the rendered configuration required");
+        let config = SnapshotBudgetConfiguration::parse(
+            &std::fs::read(path).unwrap(),
+            super::now().unwrap(),
+        )
+        .expect("configuration refused");
+        println!(
+            "accepted: store {} namespaces {:?}",
+            config.store_ref,
+            config
+                .namespaces
+                .iter()
+                .map(|n| &n.review.namespace)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
