@@ -413,6 +413,25 @@ async fn reconcile_shared(
         }
         return Ok(None);
     }
+    // A namespace with a reviewed snapshot budget scans only under the shared
+    // spend ledger. Any refusal (uncovered projection, stale inputs, exhausted
+    // window, no financial store) is an error here: no scan, and the previous
+    // conservative stats and `as_of` stay.
+    #[cfg(feature = "field-stats-capture")]
+    let lease = match state
+        .snapshot_budgets
+        .as_ref()
+        .filter(|budgets| budgets.covers(namespace))
+    {
+        Some(budgets) => Some(
+            budgets
+                .begin(state.udf_store.clone(), namespace, &projection, &meta.raw)
+                .await?,
+        ),
+        None => None,
+    };
+    #[cfg(not(feature = "field-stats-capture"))]
+    let lease: Option<()> = None;
     run_snapshot(
         &state,
         namespace,
@@ -420,10 +439,16 @@ async fn reconcile_shared(
         facets,
         &projection,
         &meta.raw,
+        lease,
     )
     .await
     .map(Some)
 }
+
+#[cfg(feature = "field-stats-capture")]
+type SnapshotLease = Option<Arc<dyn crate::field_stats_scan_budget::ScanBudgetLease>>;
+#[cfg(not(feature = "field-stats-capture"))]
+type SnapshotLease = Option<()>;
 
 async fn run_snapshot(
     state: &AppState,
@@ -432,15 +457,37 @@ async fn run_snapshot(
     facet_fields: &[String],
     projection: &[String],
     before: &Value,
+    lease: SnapshotLease,
 ) -> Result<SnapshotOutcome, String> {
     let epoch = state
         .stats_write_epoch
         .get(namespace)
         .map(|v| *v)
         .unwrap_or(0);
-    let aggregation = aggregate_facets(state, namespace, projection, SNAPSHOT_SCAN_PAGE_SIZE)
-        .await
-        .map_err(|e| format!("upstream scan: {}", e))?;
+    let aggregation = aggregate_facets(
+        state,
+        namespace,
+        projection,
+        SNAPSHOT_SCAN_PAGE_SIZE,
+        &lease,
+    )
+    .await
+    .map_err(|e| format!("upstream scan: {}", e))?;
+    // The scan is finished and billed whatever the consistency checks below
+    // decide, so its attempt completes now: the cost is known and starts its
+    // 24 h window. Unsettled billing, a failed page or a canceled scan never
+    // reaches this line and stays charged (the ledger has no refund).
+    #[cfg(feature = "field-stats-capture")]
+    if let Some(lease) = &lease {
+        lease
+            .settle_observed()
+            .await
+            .map_err(|e| format!("scan billing: {e}"))?;
+        lease
+            .complete()
+            .await
+            .map_err(|e| format!("scan budget completion: {e}"))?;
+    }
     let after = state
         .turbopuffer()
         .head_namespace(namespace)
@@ -708,9 +755,41 @@ async fn aggregate_facets(
     namespace: &str,
     facet_fields: &[String],
     page_size: u32,
+    lease: &SnapshotLease,
 ) -> Result<FacetAggregation, TurbopufferError> {
     let threads = state.scan_threads_for(namespace);
+    #[cfg(feature = "field-stats-capture")]
+    let lease = lease.as_ref();
+    #[cfg(not(feature = "field-stats-capture"))]
+    let _ = lease;
     let partitions = shard_fanout(state, namespace, threads, |filters| async move {
+        #[cfg(feature = "field-stats-capture")]
+        if let Some(lease) = lease {
+            // Every page of every shard reserves under the one lease; its
+            // admission mutex serializes reservations, so concurrent shard
+            // workers cannot over-commit the window.
+            let preparing = lease.clone();
+            let admission = ScanPageAdmission {
+                prepare: Arc::new(move || {
+                    let lease = preparing.clone();
+                    Box::pin(
+                        async move { lease.prepare_page().await.map_err(TurbopufferError::Other) },
+                    )
+                }),
+                permit: lease.permit(),
+                billing: lease.billing(),
+            };
+            return aggregate_facets_partition_with_admission(
+                state.turbopuffer(),
+                namespace,
+                facet_fields,
+                page_size,
+                filters,
+                false,
+                Some(admission),
+            )
+            .await;
+        }
         aggregate_facets_partition(
             state.turbopuffer(),
             namespace,

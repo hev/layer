@@ -20,6 +20,8 @@ pub mod field_stats_estimate_adapter;
 pub mod field_stats_metadata_expense;
 #[cfg(feature = "field-stats-capture")]
 pub mod field_stats_scan_budget;
+#[cfg(feature = "field-stats-capture")]
+pub mod field_stats_snapshot_budget;
 #[cfg(feature = "pro")]
 pub mod function_cache_bootstrap;
 #[cfg(feature = "pro")]
@@ -164,6 +166,9 @@ pub struct AppState {
     pub stats_write_epoch: Arc<DashMap<String, u64>>,
     #[cfg(feature = "field-stats-capture")]
     pub field_stats_capture: Option<Arc<dyn crate::field_stats_capture::CaptureProvider>>,
+    /// Namespaces whose legacy snapshot scan runs under the shared spend cap.
+    #[cfg(feature = "field-stats-capture")]
+    pub snapshot_budgets: Option<Arc<crate::field_stats_snapshot_budget::SnapshotBudgets>>,
     pub reconcile_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-namespace default origin scan fan-out width loaded from
     /// `Index.spec.scan.threads`. Absent namespace falls back to

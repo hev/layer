@@ -3456,6 +3456,8 @@ pub struct MockTurbopufferClient {
     delete_namespace_status: tokio::sync::RwLock<HashMap<String, u16>>,
     scan_filters: tokio::sync::RwLock<Vec<Option<Value>>>,
     scan_returned_bytes: AtomicUsize,
+    /// Billing each mock scan page reports, when set: (queried, returned) bytes.
+    scan_billing: std::sync::Mutex<Option<(u64, u64)>>,
     strong_scan_calls: AtomicUsize,
     reconcile_token_supported: std::sync::atomic::AtomicBool,
     scan_include_attributes: tokio::sync::RwLock<Vec<Option<Vec<String>>>>,
@@ -3539,6 +3541,7 @@ impl MockTurbopufferClient {
             delete_namespace_status: tokio::sync::RwLock::new(HashMap::new()),
             scan_filters: tokio::sync::RwLock::new(Vec::new()),
             scan_returned_bytes: AtomicUsize::new(0),
+            scan_billing: std::sync::Mutex::new(None),
             strong_scan_calls: AtomicUsize::new(0),
             reconcile_token_supported: std::sync::atomic::AtomicBool::new(true),
             scan_include_attributes: tokio::sync::RwLock::new(Vec::new()),
@@ -3606,6 +3609,12 @@ impl MockTurbopufferClient {
     /// Serialized returned documents, not billable upstream logical bytes.
     pub fn strong_scan_calls(&self) -> usize {
         self.strong_scan_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    /// Every scan page admits through the ambient query permit and then reports
+    /// this billing, as the HTTP client does. Unset (default) reports none.
+    pub fn set_scan_billing(&self, queried: u64, returned: u64) {
+        *self.scan_billing.lock().unwrap() = Some((queried, returned));
     }
 
     pub fn scan_returned_bytes(&self) -> usize {
@@ -4332,6 +4341,7 @@ impl TurbopufferClient for MockTurbopufferClient {
         include_attributes: Option<&[String]>,
     ) -> Result<DocumentPage, TurbopufferError> {
         let _guard = enter_counter(&self.scan_page_active, &self.scan_page_max_active);
+        reserve_provider_query(namespace, 1).await?;
         if let Some(delay) = *self.scan_page_delay.read().await {
             tokio::time::sleep(delay).await;
         }
@@ -4386,6 +4396,15 @@ impl TurbopufferClient for MockTurbopufferClient {
                 .len(),
             AtomicOrdering::SeqCst,
         );
+        if let Some((queried, returned)) = *self.scan_billing.lock().unwrap() {
+            observe_projected_billing(
+                namespace,
+                &serde_json::json!({"billing": {
+                    "billable_logical_bytes_queried": queried,
+                    "billable_logical_bytes_returned": returned,
+                }}),
+            );
+        }
         Ok(DocumentPage {
             documents,
             next_cursor,
