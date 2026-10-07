@@ -1986,6 +1986,35 @@ fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bcc_values_seed_is_valid_and_enables_originals_on_the_pdf_namespaces() {
+        let values: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../infra/helm/layer/values-mcp-bcc.yaml"
+        )))
+        .unwrap();
+        let servers = &values["gateway"]["mcp"]["servers"];
+        let registry = registry_from_json(Some(&servers.to_string())).unwrap();
+        let bcc = &registry.servers["bcc"];
+        for name in [
+            "pov-bcc-pages",
+            "pov-bcc-story-pages",
+            "pov-bcc-invoice-docs",
+        ] {
+            let ns = bcc.namespaces.iter().find(|n| n.name == name).unwrap();
+            let originals = ns.originals.as_ref().expect(name);
+            assert_eq!(originals.max_bytes(), 700_000);
+            assert_eq!(originals.max_pages(), 3);
+        }
+        assert!(
+            bcc.namespaces
+                .iter()
+                .filter(|n| n.originals.is_some())
+                .count()
+                == 3
+        );
+    }
+
     fn ns() -> McpNamespace {
         McpNamespace {
             name: "docs".into(),
