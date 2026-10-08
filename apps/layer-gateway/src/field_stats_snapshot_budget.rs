@@ -11,6 +11,11 @@
 //! nothing is refunded. A namespace NOT listed here keeps the previous uncapped
 //! behavior; listing is how an operator puts a namespace under the cap.
 //!
+//! The review's `schema_identity` is the sha256 of the compact, key-sorted JSON of
+//! the PROJECTED attributes' schema entries only (not the whole schema), so an
+//! unrelated new attribute does not stop the scan; a change to a projected
+//! attribute does.
+//!
 //! This is not capture: no fences, witness or exactness are involved, so the
 //! stats it produces are always `approximate`. The review inputs are supplied
 //! assertions, as in capture; there is no independent client authority on this
@@ -49,7 +54,38 @@ impl SnapshotBudgetConfiguration {
             return Ok(None);
         };
         let bytes = std::fs::read(path).map_err(|_| "snapshot budget configuration unreadable")?;
-        Self::parse(&bytes, now()?).map(Some)
+        Self::parse_at_startup(&bytes, now()?).map(Some)
+    }
+    /// Startup must not take the gateway down because a review window lapsed
+    /// while the process was running or between renders. An expired entry still
+    /// loads (so its namespace stays under the cap) and every page estimate
+    /// refuses against the real clock, i.e. the scan fails closed until the
+    /// file is re-rendered and the gateway restarts. Structure and every other
+    /// check stay strict.
+    pub fn parse_at_startup(bytes: &[u8], now: u64) -> Result<Self, String> {
+        let lenient = |d: &Self| -> u64 {
+            d.namespaces
+                .iter()
+                .map(|n| {
+                    n.review
+                        .valid_until_unix_seconds
+                        .min(n.calibration.valid_until_unix_seconds)
+                        .min(n.metadata_estimate.valid_until_unix_seconds)
+                })
+                .min()
+                .unwrap_or(0)
+        };
+        let config: Self = serde_json::from_slice(bytes)
+            .map_err(|_| "snapshot budget configuration malformed or incomplete")?;
+        let earliest_end = lenient(&config);
+        if earliest_end <= now {
+            tracing::warn!(
+                "Snapshot budget review expired; covered namespaces will refuse to scan until it is re-rendered"
+            );
+        }
+        // Validate as of one second before the earliest window end, never later
+        // than now, so only expiry is excused.
+        Self::parse(bytes, now.min(earliest_end.saturating_sub(1)))
     }
     pub fn parse(bytes: &[u8], now: u64) -> Result<Self, String> {
         let config: Self = serde_json::from_slice(bytes)
@@ -124,9 +160,22 @@ impl NamespaceSnapshotBudget {
     pub fn sample(&self, meta: &Value, at_unix_seconds: u64) {
         let rows = meta.get("approx_row_count").and_then(Value::as_u64);
         let bytes = meta.get("approx_logical_bytes").and_then(Value::as_u64);
+        // The scan reads only the projected attributes, so its cost model is tied
+        // to THEIR schema. Hashing the whole schema would refuse every scan each
+        // time a pipeline or Function adds an unrelated attribute. A projected
+        // attribute missing from the schema leaves no identity and refuses.
         let schema = meta
             .get("schema")
-            .and_then(|s| crate::field_stats_estimate_adapter::schema_identity(s).ok());
+            .and_then(Value::as_object)
+            .and_then(|all| {
+                let projected: serde_json::Map<String, Value> = self
+                    .model
+                    .fields
+                    .iter()
+                    .map(|f| all.get(f).map(|v| (f.clone(), v.clone())))
+                    .collect::<Option<_>>()?;
+                crate::field_stats_estimate_adapter::schema_identity(&Value::Object(projected)).ok()
+            });
         *self.inputs.write().unwrap() = match (rows, bytes, schema) {
             (Some(rows), Some(namespace_bytes), Some(schema_identity)) => {
                 Some(CurrentEstimateInputs {
@@ -294,9 +343,22 @@ mod tests {
         assert!(b.page_bound("other", &fields()).is_err());
         b.sample(&meta(100, 1000), now - 601);
         assert!(b.page_bound("ns", &fields()).unwrap().is_none());
-        let mut changed = meta(100, 1000);
-        changed["schema"]["new_attribute"] = json!({"type": "string"});
-        b.sample(&changed, now);
+        // An unrelated new attribute keeps the review valid; a projected
+        // attribute that changed or vanished does not.
+        let mut unrelated = meta(100, 1000);
+        unrelated["schema"]["new_attribute"] = json!({"type": "string"});
+        b.sample(&unrelated, now);
+        assert!(b.page_bound("ns", &fields()).unwrap().is_some());
+        let mut retyped = meta(100, 1000);
+        retyped["schema"]["doc_type"] = json!({"type": "uint", "filterable": true});
+        b.sample(&retyped, now);
+        assert!(b.page_bound("ns", &fields()).unwrap().is_none());
+        let mut dropped = meta(100, 1000);
+        dropped["schema"]
+            .as_object_mut()
+            .unwrap()
+            .remove("doc_type");
+        b.sample(&dropped, now);
         assert!(b.page_bound("ns", &fields()).unwrap().is_none());
         // Metadata without sizes cannot be assumed.
         b.sample(&json!({"schema": schema()}), now);
@@ -353,5 +415,21 @@ mod tests {
         );
         assert!(parse(|v| v["namespaces"][0]["unknown"] = json!(1)).is_err());
         assert!(SnapshotBudgetConfiguration::parse(&config(now, |_| {}), now + 5000).is_err());
+        // Startup tolerates a lapsed window (the scan then refuses) but not a
+        // malformed or inconsistent file.
+        let expired =
+            SnapshotBudgetConfiguration::parse_at_startup(&config(now, |_| {}), now + 5000)
+                .expect("expired review still loads");
+        let store = expired.store_ref.clone();
+        let b =
+            NamespaceSnapshotBudget::new(&store, expired.namespaces.into_iter().next().unwrap());
+        b.sample(&meta(100, 1000), now + 5000);
+        assert!(b.page_bound("ns", &fields()).unwrap().is_none());
+        assert!(SnapshotBudgetConfiguration::parse_at_startup(
+            &config(now, |v| v["namespaces"][0]["calibration"]
+                ["uplift_numerator"] = json!(0)),
+            now + 5000
+        )
+        .is_err());
     }
 }
