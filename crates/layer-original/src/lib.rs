@@ -110,6 +110,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// PDF readers accept up to 1 KiB of junk before `%PDF-`, and so does the REST
+/// connector's own attachment check; a byte-identical copy of a file that was
+/// indexed that way must not be refused for it. The hash is the real proof.
+pub fn has_pdf_header(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(1024 + 5)]
+        .windows(5)
+        .any(|w| w == b"%PDF-")
+}
+
 pub fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -227,7 +236,7 @@ impl Identity {
         if self.bytes.is_some_and(|n| n != bytes.len() as u64) {
             return Err(Refusal::Mismatch("size differs from the indexed size"));
         }
-        if self.mime == "application/pdf" && !bytes.starts_with(b"%PDF-") {
+        if self.mime == "application/pdf" && !has_pdf_header(bytes) {
             return Err(Refusal::Mismatch("not a PDF"));
         }
         Ok(())
@@ -339,6 +348,27 @@ mod tests {
         let mut no_hash = attrs;
         no_hash.as_object_mut().unwrap().remove(SHA_ATTR);
         assert_eq!(Identity::bound("docs", &no_hash), Err(Refusal::NoHash));
+    }
+
+    #[test]
+    fn a_pdf_header_may_follow_up_to_a_kib_of_junk() {
+        assert!(has_pdf_header(b"%PDF-1.4"));
+        assert!(has_pdf_header(b"\r\n  \xef\xbb\xbf%PDF-1.7 body"));
+        let mut late = vec![b' '; 1100];
+        late.extend_from_slice(b"%PDF-1.4");
+        assert!(!has_pdf_header(&late));
+        assert!(!has_pdf_header(b"<html>error</html>"));
+        assert!(!has_pdf_header(b""));
+        // The hash is still the proof: junk before the header passes the type
+        // check only for bytes that hash to the indexed original.
+        let junk: Vec<u8> = [b"\n".as_slice(), b"%PDF-1.4 x"].concat();
+        let mut id = Identity::of_legacy_row(
+            &json!({"content_hash": sha256_hex(&junk), "source_bytes": junk.len()}),
+        )
+        .unwrap();
+        id.mime = "application/pdf".into();
+        assert!(id.verify(&junk).is_ok());
+        assert!(id.verify(b"\n%PDF-1.4 y").is_err());
     }
 
     #[test]
