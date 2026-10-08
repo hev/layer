@@ -54,6 +54,55 @@ pub fn legacy_urls(attrs: &Value) -> Vec<String> {
     urls
 }
 
+/// A REST copy of a document, as `locations` records it (`source: "rest"`):
+/// the Warehouse, the mapped row id and the row's mapped attributes, which is
+/// everything the connector needs to rebuild the attachment request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestCopy {
+    pub warehouse: String,
+    pub row_id: String,
+    pub attributes: serde_json::Map<String, Value>,
+}
+
+/// The REST copies named by a legacy row's `locations`. Bounded.
+pub fn legacy_rest_copies(attrs: &Value) -> Vec<RestCopy> {
+    let locations = match attrs.get("locations") {
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok(),
+        Some(other) => Some(other.clone()),
+        None => None,
+    };
+    let Some(Value::Array(list)) = locations else {
+        return Vec::new();
+    };
+    let mut copies: Vec<RestCopy> = Vec::new();
+    for location in &list {
+        let rest = location.get("rest").unwrap_or(location);
+        let (Some(warehouse), Some(row_id)) = (
+            rest.get("warehouse").and_then(Value::as_str),
+            rest.get("rowId").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let copy = RestCopy {
+            warehouse: warehouse.to_owned(),
+            row_id: row_id.to_owned(),
+            attributes: rest
+                .get("attributes")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        if !copies
+            .iter()
+            .any(|c| c.warehouse == copy.warehouse && c.row_id == copy.row_id)
+            && copies.len() < 5
+        {
+            copies.push(copy);
+        }
+    }
+    copies
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -253,6 +302,26 @@ mod tests {
             Err(Refusal::NoHash)
         );
         assert!(legacy_urls(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn rest_copies_are_read_from_locations_with_their_row_identity() {
+        let attrs = json!({"locations": serde_json::to_string(&json!([
+            {"source": "clouddrive", "webUrl": "https://a.example/x.pdf"},
+            {"source": "rest", "path": "bcc-ki/1.pdf", "mime": "application/pdf",
+             "rest": {"warehouse": "bcc-ki", "rowId": "1", "url": "rest://bcc-ki/1.pdf",
+                      "attributePrefix": "ki_", "attributes": {"has_document": true}}},
+            {"source": "rest", "rest": {"warehouse": "bcc-ki", "rowId": "1", "attributes": {}}},
+            {"source": "rest", "rest": {"warehouse": "bcc-ki"}}
+        ])).unwrap()});
+        let copies = legacy_rest_copies(&attrs);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            (copies[0].warehouse.as_str(), copies[0].row_id.as_str()),
+            ("bcc-ki", "1")
+        );
+        assert_eq!(copies[0].attributes["has_document"], true);
+        assert!(legacy_rest_copies(&json!({})).is_empty());
     }
 
     #[test]
