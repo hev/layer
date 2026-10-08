@@ -198,7 +198,11 @@ impl Identity {
             .ok_or(Refusal::NoHash)?;
         Ok(Self {
             sha256,
-            bytes: attrs.get("source_bytes").and_then(Value::as_u64),
+            // Advisory pre-download gate only; 0 means "not recorded".
+            bytes: attrs
+                .get("source_bytes")
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0),
             // Unknown until the provider says; a PDF header is checked once it does.
             mime: "application/octet-stream".into(),
             version: None,
@@ -227,15 +231,16 @@ impl Identity {
         Self::bound(namespace, attrs).is_ok()
     }
 
-    /// Bytes must hash to the indexed hash, match a recorded size and, for a
+    /// Bytes must hash to the indexed hash and, for a
     /// PDF, start like one.
     pub fn verify(&self, bytes: &[u8]) -> Result<(), Refusal> {
         if sha256_hex(bytes) != self.sha256 {
             return Err(Refusal::Mismatch("hash differs from the indexed original"));
         }
-        if self.bytes.is_some_and(|n| n != bytes.len() as u64) {
-            return Err(Refusal::Mismatch("size differs from the indexed size"));
-        }
+        // No size check here. Equal SHA-256 means equal length, and the recorded
+        // size is not always right: a REST source lists size 0 until downloaded,
+        // so `source_bytes` of a REST document can be wrong for byte-identical
+        // bytes. `bytes` is only a cheap pre-download gate (Graph item size).
         if self.mime == "application/pdf" && !has_pdf_header(bytes) {
             return Err(Refusal::Mismatch("not a PDF"));
         }
@@ -369,6 +374,22 @@ mod tests {
         id.mime = "application/pdf".into();
         assert!(id.verify(&junk).is_ok());
         assert!(id.verify(b"\n%PDF-1.4 y").is_err());
+    }
+
+    #[test]
+    fn a_recorded_size_never_overrides_an_equal_hash() {
+        // A REST source lists size 0 until downloaded, so source_bytes can be 0
+        // or stale for byte-identical bytes: the hash alone proves the file.
+        let body = b"%PDF-1 identical";
+        for recorded in [json!(0), json!(9999), Value::Null] {
+            let attrs = json!({"content_hash": sha256_hex(body), "source_bytes": recorded});
+            let id = Identity::of_legacy_row(&attrs).unwrap();
+            assert!(id.verify(body).is_ok(), "{recorded}");
+            assert!(id.verify(b"%PDF-1 different").is_err());
+        }
+        // A zero size is "not recorded", not a gate.
+        let zero = json!({"content_hash": sha256_hex(body), "source_bytes": 0});
+        assert_eq!(Identity::of_legacy_row(&zero).unwrap().bytes, None);
     }
 
     #[test]
