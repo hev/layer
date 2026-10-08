@@ -12,6 +12,11 @@ pub const BYTES_ATTR: &str = "original_bytes";
 /// Written by the extract worker on every page row, before retention existed.
 pub const SHA_ATTR: &str = "original_sha256";
 
+/// Every page row has carried the SHA-256 of its original bytes as
+/// `content_hash` since the first extract release, long before
+/// `original_sha256` existed. Legacy rows identify their file by it.
+pub const LEGACY_HASH_ATTR: &str = "content_hash";
+
 /// Attributes a Function needs to resolve and verify an original.
 pub const INPUT_ATTRS: [&str; 8] = [
     SHA_ATTR,
@@ -23,6 +28,31 @@ pub const INPUT_ATTRS: [&str; 8] = [
     BLOB_ATTR,
     BYTES_ATTR,
 ];
+
+/// Candidate provider URLs for a legacy row: its `webUrl`, then every copy in
+/// its `locations` (content-deduplicated documents list each copy). Bounded.
+pub fn legacy_urls(attrs: &Value) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut add = |url: Option<&str>| {
+        if let Some(url) = url.filter(|u| u.starts_with("https://")) {
+            if !urls.iter().any(|seen| seen == url) && urls.len() < 5 {
+                urls.push(url.to_owned());
+            }
+        }
+    };
+    add(attrs.get("webUrl").and_then(Value::as_str));
+    let locations = match attrs.get("locations") {
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok(),
+        Some(other) => Some(other.clone()),
+        None => None,
+    };
+    if let Some(Value::Array(list)) = locations {
+        for location in &list {
+            add(location.get("webUrl").and_then(Value::as_str));
+        }
+    }
+    urls
+}
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -96,6 +126,27 @@ impl Identity {
             etag: string(attrs, "original_etag"),
             item: string(attrs, "original_item"),
             drive: string(attrs, "original_drive"),
+        })
+    }
+
+    /// The identity of a row indexed before `original_*` existed: the exact
+    /// bytes are named by `content_hash`; size is `source_bytes`. The provider
+    /// item is not recorded on such rows, so it is resolved from the row's
+    /// `webUrl` and proven by hashing what comes back.
+    pub fn of_legacy_row(attrs: &Value) -> Result<Self, Refusal> {
+        let sha256 = string(attrs, LEGACY_HASH_ATTR)
+            .filter(|sha| is_sha256(sha))
+            .map(|sha| sha.to_ascii_lowercase())
+            .ok_or(Refusal::NoHash)?;
+        Ok(Self {
+            sha256,
+            bytes: attrs.get("source_bytes").and_then(Value::as_u64),
+            // Unknown until the provider says; a PDF header is checked once it does.
+            mime: "application/octet-stream".into(),
+            version: None,
+            etag: None,
+            item: None,
+            drive: None,
         })
     }
 
@@ -182,6 +233,26 @@ mod tests {
         assert_eq!(p[BLOB_ATTR], format!("blob://ns/{sha}"));
         assert_eq!(p[BYTES_ATTR], 6);
         assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn legacy_rows_are_identified_by_content_hash_and_candidate_urls() {
+        let sha = sha256_hex(b"%PDF-1");
+        let attrs = json!({"content_hash": sha, "source_bytes": 6,
+            "webUrl": "https://a.example/x.pdf",
+            "locations": "[{\"webUrl\":\"https://a.example/x.pdf\"},{\"webUrl\":\"https://b.example/y.pdf\"},{\"webUrl\":\"http://insecure\"}]"});
+        let id = Identity::of_legacy_row(&attrs).unwrap();
+        assert_eq!((id.sha256.as_str(), id.bytes), (sha.as_str(), Some(6)));
+        assert!(id.verify(b"%PDF-1").is_ok());
+        assert_eq!(
+            legacy_urls(&attrs),
+            ["https://a.example/x.pdf", "https://b.example/y.pdf"]
+        );
+        assert_eq!(
+            Identity::of_legacy_row(&json!({"content_hash": "nope"})),
+            Err(Refusal::NoHash)
+        );
+        assert!(legacy_urls(&json!({})).is_empty());
     }
 
     #[test]
