@@ -112,6 +112,99 @@ fn named_write_ids(body: &Value) -> Vec<String> {
     ids
 }
 
+/// Says WHY the store refused a write, so a throttling or failing store can be told apart
+/// (rate limit, unindexed-data backpressure, overload, timeout, a request the store thinks
+/// is too large, an attribute conflict) without logging any rows. Only the store's own
+/// error text for 429, 5xx and request-size/conflict statuses (400, 409, 413, 422), capped
+/// at 160 characters with control characters removed, plus the row count of the request and
+/// how long the store took. Sampled to a few lines a minute so a burst cannot flood the log.
+fn log_store_pushback(
+    namespace: &str,
+    status: StatusCode,
+    body: &[u8],
+    rows: usize,
+    request_bytes: usize,
+    store_seconds: f64,
+) {
+    use std::sync::Mutex;
+    static WINDOW: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    let worth_logging = status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || matches!(status.as_u16(), 400 | 409 | 413 | 422);
+    if !worth_logging {
+        return;
+    }
+    {
+        let mut window = WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        match window.as_mut() {
+            Some((start, count)) if now.duration_since(*start).as_secs() < 60 => {
+                if *count >= 5 {
+                    return;
+                }
+                *count += 1;
+            }
+            _ => *window = Some((now, 1)),
+        }
+    }
+    let (class, message) = describe_store_error(body);
+    warn!(
+        namespace,
+        status = status.as_u16(),
+        class,
+        message = %message,
+        rows,
+        request_bytes,
+        store_seconds = format!("{store_seconds:.2}"),
+        "store refused a namespace write"
+    );
+}
+
+fn describe_store_error(body: &[u8]) -> (&'static str, String) {
+    let text = String::from_utf8_lossy(body);
+    let extracted = serde_json::from_str::<Value>(&text).ok().and_then(|json| {
+        json["error"]
+            .as_str()
+            .or_else(|| json["error"]["message"].as_str())
+            .or_else(|| json["message"].as_str())
+            .map(str::to_owned)
+    });
+    let message: String = extracted
+        .unwrap_or_else(|| text.into_owned())
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect();
+    let lower = message.to_lowercase();
+    let class = if lower.contains("unindexed")
+        || lower.contains("backpressure")
+        || lower.contains("wal")
+    {
+        "backpressure"
+    } else if lower.contains("too large") || lower.contains("exceeds") || lower.contains("max size")
+    {
+        "too_large"
+    } else if lower.contains("rate") || lower.contains("too many") || lower.contains("throttl") {
+        "rate_limit"
+    } else if lower.contains("overload") || lower.contains("capacity") || lower.contains("busy") {
+        "overloaded"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("schema") || lower.contains("attribute") || lower.contains("type") {
+        "schema"
+    } else if message.is_empty() {
+        "empty"
+    } else {
+        "other"
+    };
+    (class, message)
+}
+
 /// Records how one namespace write spent the namespace write mutex.
 struct WriteLockPhases {
     metrics: Arc<crate::metrics::LayerMetrics>,
@@ -383,6 +476,9 @@ pub(crate) async fn write_namespace(
             apply_prewrite_cache(&state, &namespace, &plan).await;
         }
 
+        // The store's embedding step refuses on size, not just rows, so the refusal log
+        // says how big the request was (a count; the rows themselves are never logged).
+        let request_bytes = body.to_string().len();
         let tpuf_start = Instant::now();
         let mut upstream = match state
             .turbopuffer()
@@ -493,6 +589,14 @@ pub(crate) async fn write_namespace(
                 total_start.elapsed().as_secs_f64(),
                 tpuf_seconds,
                 metric_batch_size,
+            );
+            log_store_pushback(
+                &namespace,
+                status,
+                &upstream.body,
+                metric_batch_size,
+                request_bytes,
+                tpuf_seconds,
             );
             return passthrough_response(upstream);
         }
@@ -1366,4 +1470,39 @@ fn passthrough_response(response: TurbopufferPassthroughResponse) -> Result<Resp
         .body(Body::from(response.body))
         .map(IntoResponse::into_response)
         .map_err(|e| AppError::Upstream(format!("failed to build passthrough response: {}", e)))
+}
+
+#[cfg(test)]
+mod store_error_tests {
+    use super::describe_store_error;
+
+    #[test]
+    fn a_store_refusal_is_classified_and_capped_without_echoing_rows() {
+        let (class, message) = describe_store_error(
+            br#"{"status":"error","error":"namespace has too much unindexed data"}"#,
+        );
+        assert_eq!(
+            (class, message.as_str()),
+            ("backpressure", "namespace has too much unindexed data")
+        );
+        assert_eq!(
+            describe_store_error(br#"{"error":"rate limit exceeded"}"#).0,
+            "rate_limit"
+        );
+        assert_eq!(
+            describe_store_error(br#"{"error":"request body too large"}"#).0,
+            "too_large"
+        );
+        assert_eq!(
+            describe_store_error(br#"{"error":{"message":"server overloaded"}}"#).0,
+            "overloaded"
+        );
+        assert_eq!(
+            describe_store_error(br#"{"error":"attribute type mismatch"}"#).0,
+            "schema"
+        );
+        assert_eq!(describe_store_error(b"").0, "empty");
+        let (_, long) = describe_store_error(format!("x\n{}", "y".repeat(500)).as_bytes());
+        assert!(long.chars().count() <= 160 && !long.contains('\n'));
+    }
 }
