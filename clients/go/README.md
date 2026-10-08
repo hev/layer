@@ -92,6 +92,7 @@ and pipeline/scan/warm-cache helper methods.
 - `PutPipelineDocumentChunks`
 - `PutPipelineDocumentRows`
 - `PutPipelineDocumentVectors`
+- `PutPipelineRows`
 - `PutSnapshotPolicy`
 - `Query`
 - `QueryAgent`

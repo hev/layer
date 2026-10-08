@@ -858,6 +858,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
                 put(routes::pipeline::write_rows),
             )
             .route(
+                "/v2/pipelines/{id}/rows",
+                put(routes::pipeline::write_rows_bulk),
+            )
+            .route(
                 "/v2/pipelines/{id}/documents/{doc_id}/vectors",
                 put(routes::pipeline::write_vectors),
             );

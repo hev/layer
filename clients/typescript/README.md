@@ -113,6 +113,7 @@ console.log(response.data.rows);
 - `putPipelineDocumentChunks`
 - `putPipelineDocumentRows`
 - `putPipelineDocumentVectors`
+- `putPipelineRows`
 - `putSnapshotPolicy`
 - `query`
 - `queryAgent`

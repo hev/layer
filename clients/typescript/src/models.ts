@@ -621,6 +621,13 @@ export interface TurbopufferMetadataPatch {
   pinning?: unknown;
 }
 
+export interface PutPipelineBulkRowsRequest {
+  [key: string]: unknown;
+  documents: Record<string, unknown>[];
+  schema?: Record<string, unknown>;
+  distance_metric?: string;
+}
+
 export interface PutPipelineRowsRequest {
   [key: string]: unknown;
   patch_condition?: unknown;

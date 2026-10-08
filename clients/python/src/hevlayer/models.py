@@ -546,6 +546,12 @@ class TurbopufferMetadataPatch(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     pinning: Any | None = None
 
+class PutPipelineBulkRowsRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    documents: list[dict[str, Any]]
+    schema: dict[str, Any] | None = None
+    distance_metric: str | None = None
+
 class PutPipelineRowsRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     patch_condition: Any | None = None

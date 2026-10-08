@@ -132,6 +132,7 @@ class HevlayerProtocol(Protocol):
     async def put_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, body: PutChunksRequest | dict[str, Any], *, with_perf: bool = False) -> StageDocumentResponse | LayerResponse[StageDocumentResponse]: ...
     async def put_pipeline_document_rows(self, pipeline_id: str, doc_id: str, body: PutPipelineRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
     async def put_pipeline_document_vectors(self, pipeline_id: str, doc_id: str, body: PutVectorsRequest | dict[str, Any], *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]: ...
+    async def put_pipeline_rows(self, pipeline_id: str, body: PutPipelineBulkRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
     async def put_snapshot_policy(self, namespace: str, body: SnapshotPolicy | dict[str, Any], *, with_perf: bool = False) -> SnapshotPolicy | LayerResponse[SnapshotPolicy]: ...
     async def query(self, body: FederatedQueryRequest | dict[str, Any], *, with_perf: bool = False) -> FederatedQueryResponse | LayerResponse[FederatedQueryResponse]: ...
     async def query_agent(self, name: str, body: AgentQueryRequest | dict[str, Any], *, with_perf: bool = False) -> AgentQueryResponse | LayerResponse[AgentQueryResponse]: ...
@@ -919,6 +920,15 @@ class AsyncHevlayer:
             "PUT",
             f"/v2/pipelines/{pipeline_id}/documents/{doc_id}/vectors",
             json=body, result_type=StatusResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def put_pipeline_rows(self, pipeline_id: str, body: PutPipelineBulkRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
+        return await self._request_json(
+            "PUT",
+            f"/v2/pipelines/{pipeline_id}/rows",
+            json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
 

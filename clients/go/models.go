@@ -540,6 +540,12 @@ type TurbopufferMetadataPatch struct {
 	Pinning interface{} `json:"pinning,omitempty"`
 }
 
+type PutPipelineBulkRowsRequest struct {
+	Documents []map[string]interface{} `json:"documents"`
+	Schema map[string]interface{} `json:"schema,omitempty"`
+	DistanceMetric string `json:"distance_metric,omitempty"`
+}
+
 type PutPipelineRowsRequest struct {
 	PatchCondition interface{} `json:"patch_condition,omitempty"`
 	PatchRows []map[string]interface{} `json:"patch_rows,omitempty"`

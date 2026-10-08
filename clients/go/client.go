@@ -2231,6 +2231,24 @@ func (client *Client) PutPipelineDocumentVectorsWithPerf(ctx context.Context, pi
 }
 
 
+func (client *Client) PutPipelineRows(ctx context.Context, pipelineID string, body *PutPipelineBulkRowsRequest, options ...RequestOption) (*TurbopufferWriteResponse, error) {
+	out := TurbopufferWriteResponse{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/rows", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PutPipelineRowsWithPerf(ctx context.Context, pipelineID string, body *PutPipelineBulkRowsRequest, options ...RequestOption) (*LayerResponse[TurbopufferWriteResponse], error) {
+	out := TurbopufferWriteResponse{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/rows", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[TurbopufferWriteResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) PutSnapshotPolicy(ctx context.Context, namespace string, body *SnapshotPolicy, options ...RequestOption) (*SnapshotPolicy, error) {
 	out := SnapshotPolicy{}
 	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/namespaces/%s/snapshot-policy", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {

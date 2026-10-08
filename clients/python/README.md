@@ -122,6 +122,7 @@ asyncio.run(main())
 - `put_pipeline_document_chunks`
 - `put_pipeline_document_rows`
 - `put_pipeline_document_vectors`
+- `put_pipeline_rows`
 - `put_snapshot_policy`
 - `query`
 - `query_agent`

@@ -1374,6 +1374,20 @@ export class Hevlayer {
   }
 
 
+  async putPipelineRows(pipelineId: string, body: Models.PutPipelineBulkRowsRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.TurbopufferWriteResponse>;
+  async putPipelineRows(pipelineId: string, body: Models.PutPipelineBulkRowsRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.TurbopufferWriteResponse>>;
+  async putPipelineRows(pipelineId: string, body: Models.PutPipelineBulkRowsRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>> {
+    return this.requestJson<Models.TurbopufferWriteResponse>({
+      method: "PUT",
+      path: "/v2/pipelines/" + encodeURIComponent(String(pipelineId)) + "/rows",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.TurbopufferWriteResponse | LayerResponse<Models.TurbopufferWriteResponse>>;
+  }
+
+
   async putSnapshotPolicy(namespace_: string, body: Models.SnapshotPolicy | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.SnapshotPolicy>;
   async putSnapshotPolicy(namespace_: string, body: Models.SnapshotPolicy | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.SnapshotPolicy>>;
   async putSnapshotPolicy(namespace_: string, body: Models.SnapshotPolicy | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.SnapshotPolicy | LayerResponse<Models.SnapshotPolicy>> {
