@@ -112,6 +112,26 @@ fn named_write_ids(body: &Value) -> Vec<String> {
     ids
 }
 
+/// Records how one namespace write spent the namespace write mutex.
+struct WriteLockPhases {
+    metrics: Arc<crate::metrics::LayerMetrics>,
+    namespace: String,
+    wait: f64,
+    held: Instant,
+    prewrite: Option<f64>,
+}
+
+impl Drop for WriteLockPhases {
+    fn drop(&mut self) {
+        self.metrics.observe_write_lock(
+            &self.namespace,
+            self.wait,
+            self.held.elapsed().as_secs_f64(),
+            self.prewrite,
+        );
+    }
+}
+
 /// POST /v2/namespaces/{namespace}
 ///
 /// Native Turbopuffer write bodies are the only public write surface. The
@@ -142,7 +162,17 @@ pub(crate) async fn write_namespace(
         .entry(namespace.clone())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone();
+    let waiting = Instant::now();
     let _reconcile_guard = reconcile_lock.lock().await;
+    // Dropped before the mutex guard: records wait, hold and the pre-write phase
+    // whichever way the write returns.
+    let mut phases = WriteLockPhases {
+        metrics: Arc::clone(&state.metrics),
+        namespace: namespace.clone(),
+        wait: waiting.elapsed().as_secs_f64(),
+        held: Instant::now(),
+        prewrite: None,
+    };
 
     // Branch and copy bodies are classified before anything can rewrite
     // them, and forwarded byte-for-byte on their own path (RFC 0124).
@@ -322,6 +352,7 @@ pub(crate) async fn write_namespace(
             return Ok(response);
         }
 
+        phases.prewrite = Some(phases.held.elapsed().as_secs_f64());
         let total_start = Instant::now();
         let mut tpuf_seconds = 0.0;
         let metric_batch_size = plan.metric_batch_size();

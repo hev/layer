@@ -250,6 +250,9 @@ pub struct LayerMetrics {
     upsert_duration: HistogramVec,
     upsert_tpuf: HistogramVec,
     upsert_overhead: HistogramVec,
+    write_lock_wait: HistogramVec,
+    write_lock_hold: HistogramVec,
+    write_prewrite: HistogramVec,
     upsert_batch_size: HistogramVec,
     head_duration: HistogramVec,
     list_duration: HistogramVec,
@@ -397,6 +400,27 @@ impl LayerMetrics {
             "layer_upsert_overhead_seconds",
             "Layer-side upsert overhead: total minus Turbopuffer time.",
             &["pipeline_id", "namespace", "status"],
+            seconds_buckets(),
+        );
+        let write_lock_wait = histogram(
+            &registry,
+            "layer_namespace_write_lock_wait_seconds",
+            "How long a write to a namespace waited for the namespace write mutex that serializes all writes to it.",
+            &["namespace"],
+            seconds_buckets(),
+        );
+        let write_lock_hold = histogram(
+            &registry,
+            "layer_namespace_write_lock_hold_seconds",
+            "How long a write held the namespace write mutex: everything from acquiring it to returning, including pre-write steps, the store upsert and post-write side effects.",
+            &["namespace"],
+            seconds_buckets(),
+        );
+        let write_prewrite = histogram(
+            &registry,
+            "layer_namespace_write_prewrite_seconds",
+            "Time inside the namespace write mutex before the timed store upsert starts: Function write guard, embed profile, namespace marker and schema reads.",
+            &["namespace"],
             seconds_buckets(),
         );
         let upsert_batch_size = histogram(
@@ -873,6 +897,9 @@ impl LayerMetrics {
             upsert_duration,
             upsert_tpuf,
             upsert_overhead,
+            write_lock_wait,
+            write_lock_hold,
+            write_prewrite,
             upsert_batch_size,
             head_duration,
             list_duration,
@@ -1372,6 +1399,23 @@ impl LayerMetrics {
             self.upsert_batch_size
                 .with_label_values(&[&pipeline_id, &namespace])
                 .observe(batch_size as f64);
+        }
+    }
+
+    /// Phases of one namespace write: waiting for the namespace write mutex,
+    /// holding it, and the pre-write part of the hold.
+    pub fn observe_write_lock(&self, namespace: &str, wait: f64, hold: f64, prewrite: Option<f64>) {
+        let namespace = self.labels.namespace(namespace);
+        self.write_lock_wait
+            .with_label_values(&[&namespace])
+            .observe(wait);
+        self.write_lock_hold
+            .with_label_values(&[&namespace])
+            .observe(hold);
+        if let Some(prewrite) = prewrite {
+            self.write_prewrite
+                .with_label_values(&[&namespace])
+                .observe(prewrite);
         }
     }
 
