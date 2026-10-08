@@ -17,6 +17,10 @@ pub trait SnapshotTrigger: Send + Sync {
     fn on_stable(&self, namespace: &str, watermark_ms: u64);
 }
 
+/// How long a namespace that 404ed is ignored by `register` before a config
+/// refresh may put it back in the poll set (one request, then ignored again).
+const ABSENT_RETRY: Duration = Duration::from_secs(300);
+
 /// Per-namespace consistency state.
 ///
 /// Two distinct facts are tracked:
@@ -34,6 +38,10 @@ pub struct ConsistencyWatcher {
     last_settle_counts: DashMap<String, u64>,
     registered: DashMap<String, ()>,
     last_polled: DashMap<String, Instant>,
+    /// Namespaces whose metadata poll returned 404, with when. `register` (the
+    /// Index CR refresh re-registers every CR namespace each cycle) ignores them
+    /// for `ABSENT_RETRY`; a write (`register_due`) clears the mark at once.
+    absent: DashMap<String, Instant>,
 }
 
 impl Default for ConsistencyWatcher {
@@ -51,10 +59,18 @@ impl ConsistencyWatcher {
             last_settle_counts: DashMap::new(),
             registered: DashMap::new(),
             last_polled: DashMap::new(),
+            absent: DashMap::new(),
         }
     }
 
     pub fn register(&self, namespace: &str) {
+        if self
+            .absent
+            .get(namespace)
+            .is_some_and(|at| at.elapsed() < ABSENT_RETRY)
+        {
+            return;
+        }
         self.registered.entry(namespace.to_string()).or_insert(());
     }
 
@@ -67,6 +83,7 @@ impl ConsistencyWatcher {
     }
 
     pub fn register_due(&self, namespace: &str) {
+        self.absent.remove(namespace);
         self.register(namespace);
         self.mark_due(namespace);
     }
@@ -251,6 +268,14 @@ impl ConsistencyWatcher {
                     );
                 }
             }
+            Err(e) if e.is_not_found() => {
+                // The namespace is gone upstream (deleted outside the gateway,
+                // or a scratch namespace cleaned up). Polling it again only
+                // adds a 404 per interval forever; a later write re-registers it.
+                self.forget_namespace(namespace);
+                self.absent.insert(namespace.to_string(), Instant::now());
+                debug!(namespace = %namespace, "namespace not found upstream; no longer polled");
+            }
             Err(e) => {
                 self.invalidate_pinning(namespace);
                 warn!(
@@ -342,6 +367,32 @@ mod tests {
         watcher.observe_pinning("ns", &status(serde_json::json!(1)));
         watcher.forget_namespace("ns");
         assert!(!watcher.is_pinned_ready("ns"));
+    }
+
+    #[tokio::test]
+    async fn a_namespace_deleted_upstream_stops_being_polled() {
+        let tpuf = MockTurbopufferClient::new();
+        let watcher = ConsistencyWatcher::new();
+        watcher.register("gone");
+        watcher.register("kept");
+        tpuf.set_stable("kept").await;
+        tpuf.arm_head_not_found("gone").await;
+
+        watcher.poll_once(&tpuf, Duration::ZERO).await;
+        assert_eq!(watcher.registered_namespaces(), vec!["kept".to_string()]);
+
+        // A transient non-404 failure keeps the namespace registered.
+        tpuf.arm_head_failure("kept", "metadata unavailable").await;
+        watcher.poll_once(&tpuf, Duration::ZERO).await;
+        assert_eq!(watcher.registered_namespaces(), vec!["kept".to_string()]);
+
+        // An Index CR refresh does not put it back inside the retry window...
+        watcher.register("gone");
+        assert_eq!(watcher.registered_namespaces(), vec!["kept".to_string()]);
+
+        // ...but a write registers it again at once.
+        watcher.register_due("gone");
+        assert_eq!(watcher.registered_namespaces().len(), 2);
     }
 
     #[tokio::test]
