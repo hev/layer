@@ -76,6 +76,15 @@ pub struct Bound {
 pub fn bind(namespace: &str, attrs: &Value) -> Result<Bound, AppError> {
     use layer_original::{Identity, Refusal};
     let identity = Identity::bound(namespace, attrs).map_err(|refusal| match refusal {
+        Refusal::NotRetained
+            if attrs.get("original_skipped").and_then(Value::as_str) == Some("oversize") =>
+        {
+            AppError::NotFound(
+                "the original is over the retention size limit and was skipped \
+                 (skipped-oversize); use its source link"
+                    .into(),
+            )
+        }
         Refusal::NotRetained => AppError::NotFound(
             "no original is retained for this document; use its source link".into(),
         ),
@@ -387,6 +396,19 @@ pub mod tests {
             verify(&bound, &not_pdf, 1 << 20),
             Err(AppError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn a_skipped_oversize_document_says_so_instead_of_pretending_nothing_was_tried() {
+        let skipped = json!({"original_skipped": "oversize", "original_skipped_bytes": 30_000_000});
+        match bind("docs", &skipped) {
+            Err(AppError::NotFound(message)) => assert!(message.contains("skipped-oversize")),
+            other => panic!("{other:?}"),
+        }
+        match bind("docs", &json!({})) {
+            Err(AppError::NotFound(message)) => assert!(!message.contains("skipped")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
