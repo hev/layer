@@ -77,6 +77,20 @@ spec:
           args:
             - "--config-file"
             - "/opt/aerospike/etc/aerospike.conf"
+          # Cold device/index loading must finish before liveness can restart asd.
+          # Keep this bounded: 60 failures at 10-second intervals (~10 minutes).
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  stats="$(asinfo -h 127.0.0.1 -p {{ .Values.documentCache.port }} -v namespace/{{ .Values.documentCache.namespace }})"
+                  echo "$stats" | grep -Eq '(^|;)stop_writes=false(;|$)|(^|;)stop-writes=false(;|$)'
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             exec:
               command:
@@ -88,6 +102,7 @@ spec:
                 - -v
                 - status
             initialDelaySeconds: 10
+            timeoutSeconds: 5
             periodSeconds: 10
           {{- if .Values.documentCache.autoRestartOnStopWrites }}
           livenessProbe:
@@ -100,6 +115,7 @@ spec:
                   stats="$(asinfo -h 127.0.0.1 -p {{ .Values.documentCache.port }} -v namespace/{{ .Values.documentCache.namespace }})"
                   echo "$stats" | grep -Eq '(^|;)stop_writes=false(;|$)|(^|;)stop-writes=false(;|$)'
             initialDelaySeconds: 30
+            timeoutSeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           {{- end }}
