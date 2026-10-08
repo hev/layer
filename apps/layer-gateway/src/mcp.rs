@@ -1483,7 +1483,30 @@ impl McpHandler {
                 "record `{id}` was not found or is no longer available ({status})"
             )));
         }
-        let attrs = body.get("attributes").unwrap_or(&body);
+        // The document cache can hold a partial row (an older Function patch cached
+        // only its own columns). The configured source link must not depend on it:
+        // when it is absent, read the store for the missing attributes. The binding
+        // and authorization above already used this row; the store only fills gaps.
+        let mut merged = body.get("attributes").unwrap_or(&body).clone();
+        if ns
+            .link
+            .as_deref()
+            .is_some_and(|field| merged.get(field).is_none())
+        {
+            if let Ok(found) = self
+                .state
+                .turbopuffer()
+                .fetch_many(&ns.name, std::slice::from_ref(&id))
+                .await
+            {
+                if let (Some(doc), Some(target)) = (found.get(&id), merged.as_object_mut()) {
+                    for (name, value) in &doc.attributes {
+                        target.entry(name.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+            }
+        }
+        let attrs = &merged;
         let bound = original::bind(&ns.name, attrs)?;
         let is_pdf = bound.mime == "application/pdf";
         let hard_limit = if pages.is_some() {
