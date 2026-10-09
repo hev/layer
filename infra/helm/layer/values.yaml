@@ -109,6 +109,27 @@ gateway:
     # surface. When enabled, postgres runs as a loopback-only sidecar and no
     # layer-postgres Service is rendered.
     embedded: true
+    # Used when embedded=false: the gateway reads its queue Postgres from this
+    # Secret key (a full postgres:// URL) instead of the loopback sidecar, so a
+    # gateway roll no longer restarts Postgres. Required when embedded=false.
+    external:
+      databaseUrlSecret:
+        name: ""
+        key: url
+      # Optional: render the queue Postgres as its own StatefulSet on the SAME
+      # node-local hostPath directory the embedded sidecar used (no data copy).
+      # Off by default. See docs/learnings/functions/gateway-roll-survival.md
+      # for the cutover, which is a manual, announced step.
+      standalone:
+        enabled: false
+        # Secret holding POSTGRES_PASSWORD for the gateway role (scram-sha-256).
+        passwordSecretName: ""
+        passwordSecretKey: password
+        # Directory under persistence.hostPath that holds PGDATA. The embedded
+        # sidecar used the pod name (subPathExpr $(POD_NAME)).
+        dataSubPath: layer-gateway-0
+        # kubernetes.io/hostname of the node whose hostPath holds the data.
+        nodeHostname: ""
     persistence:
       type: hostPath # hostPath or pvc
       hostPath: /mnt/nvme/layer-gateway-pg

@@ -1,0 +1,135 @@
+{{- if and (not .Values.gateway.queue.embedded) .Values.gateway.queue.external.standalone.enabled }}
+{{- if not (eq .Values.gateway.queue.persistence.type "hostPath") }}
+{{- fail "gateway.queue.external.standalone currently supports persistence.type=hostPath only (it reuses the embedded sidecar's data directory)" }}
+{{- end }}
+{{- $sa := .Values.gateway.queue.external.standalone }}
+{{- $name := printf "%s-queue-postgres" (include "layer.fullname" .) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: queue-postgres
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "layer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: queue-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: queue-postgres
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    port = 5432
+    unix_socket_directories = '/var/run/postgresql'
+    shared_buffers = '{{ .Values.gateway.queue.postgres.sharedBuffers }}'
+    max_connections = {{ .Values.gateway.queue.postgres.maxConnections }}
+    password_encryption = scram-sha-256
+  pg_hba.conf: |
+    local all {{ .Values.gateway.queue.postgres.user }} trust
+    host all {{ .Values.gateway.queue.postgres.user }} 127.0.0.1/32 trust
+    host all {{ .Values.gateway.queue.postgres.user }} 0.0.0.0/0 scram-sha-256
+    host all all 0.0.0.0/0 reject
+    host all all ::0/0 reject
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: queue-postgres
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: queue-postgres
+  template:
+    metadata:
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: queue-postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      {{- include "layer.priorityClassName" (dict "root" $ "tier" "gateway") | nindent 6 }}
+      # Same node pool as the gateway, so the node-local hostPath is the same directory.
+      # hostPath data exists on one node only: pin to the node that holds it, or
+      # Postgres would start on an empty directory elsewhere.
+      nodeSelector:
+        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        kubernetes.io/hostname: {{ required "gateway.queue.external.standalone.nodeHostname is required (the node whose hostPath holds the queue data)" $sa.nodeHostname | quote }}
+      tolerations:
+        {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ .Values.gateway.queue.postgres.image | quote }}
+          args:
+            - "-c"
+            - "config_file=/etc/layer-postgres/postgresql.conf"
+            - "-c"
+            - "hba_file=/etc/layer-postgres/pg_hba.conf"
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.gateway.queue.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.gateway.queue.postgres.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "gateway.queue.external.standalone.passwordSecretName is required" $sa.passwordSecretName | quote }}
+                  key: {{ $sa.passwordSecretKey | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: config
+              mountPath: /etc/layer-postgres/postgresql.conf
+              subPath: postgresql.conf
+            - name: config
+              mountPath: /etc/layer-postgres/pg_hba.conf
+              subPath: pg_hba.conf
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+              subPath: {{ $sa.dataSubPath | quote }}
+            - name: dshm
+              mountPath: /dev/shm
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", {{ .Values.gateway.queue.postgres.user | quote }}, "-d", {{ .Values.gateway.queue.postgres.database | quote }}]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", {{ .Values.gateway.queue.postgres.user | quote }}]
+            periodSeconds: 20
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: pg-data
+          hostPath:
+            path: {{ .Values.gateway.queue.persistence.hostPath | quote }}
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.gateway.queue.postgres.shmSize | quote }}
+{{- end }}
