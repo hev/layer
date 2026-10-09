@@ -263,9 +263,12 @@ spec:
             - containerPort: {{ .Values.gateway.port }}
               name: http
           env:
-            - name: LAYER_MCP_ENABLED
-              value: {{ .Values.gateway.mcp.enabled | quote }}
             {{- if .Values.gateway.mcp.enabled }}
+            # Rendered only when enabled: the gateway defaults to false, and an
+            # unconditional "false" here would flip an MCP seed applied with
+            # `kubectl set env` (docs/runbooks/mcp-server.md) on the next upgrade.
+            - name: LAYER_MCP_ENABLED
+              value: "true"
             - name: LAYER_MCP_ALLOWED_HOSTS
               value: {{ .Values.gateway.mcp.allowedHosts | quote }}
             - name: LAYER_MCP_JSON
