@@ -10,6 +10,16 @@
 {{- if and (not .Values.gateway.queue.embedded) (not .Values.gateway.queue.external.databaseUrlSecret.name) }}
 {{- fail "gateway.queue.embedded=false requires gateway.queue.external.databaseUrlSecret.name" }}
 {{- end }}
+{{- $surge := eq (default "statefulset" .Values.gateway.workload) "deployment" -}}
+{{- if not (has (default "statefulset" .Values.gateway.workload) (list "statefulset" "deployment")) }}
+{{- fail "gateway.workload must be statefulset or deployment" }}
+{{- end }}
+{{- if and $surge .Values.gateway.queue.embedded }}
+{{- fail "gateway.workload=deployment needs gateway.queue.embedded=false: the pod-local Postgres cannot run in two overlapping pods" }}
+{{- end }}
+{{- if and $surge .Values.metrics.enabled .Values.metrics.embedded (not .Values.metrics.externalEndpoint) }}
+{{- fail "gateway.workload=deployment needs metrics.embedded=false (or metrics.externalEndpoint): the vmsingle sidecar writes a per-pod directory, so every roll would start empty" }}
+{{- end }}
 {{- if not .Values.documentCache.enabled }}
 {{- fail "documentCache.enabled=true is required; legacy aerospike modes were removed" }}
 {{- end }}
@@ -23,7 +33,7 @@
 {{- $metricsEmbedded := and .Values.metrics.enabled .Values.metrics.embedded (not .Values.metrics.externalEndpoint) -}}
 {{- $indexNamespace := default .Release.Namespace (default .Values.operator.discovery.indexNamespace .Values.gateway.indexNamespace) -}}
 apiVersion: apps/v1
-kind: StatefulSet
+kind: {{ ternary "Deployment" "StatefulSet" $surge }}
 metadata:
   name: {{ include "layer.fullname" . }}-gateway
   namespace: {{ .Release.Namespace }}
@@ -31,7 +41,17 @@ metadata:
     {{- include "layer.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
+  {{- if $surge }}
+  # The new pod must be Ready before the old one drains: the Service always has
+  # an endpoint. Safe only with the queue Postgres outside the pod (checked above).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- else }}
   serviceName: {{ include "layer.fullname" . }}-gateway
+  {{- end }}
   replicas: {{ .Values.gateway.replicas }}
   selector:
     matchLabels:
