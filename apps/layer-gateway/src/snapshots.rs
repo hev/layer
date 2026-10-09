@@ -413,6 +413,26 @@ async fn reconcile_shared(
         }
         return Ok(None);
     }
+    // A scan of a namespace written in the last RECENT_WRITE_SKIP_MS would almost
+    // surely be discarded below ("namespace changed during reconcile") after being
+    // billed in full. For a capped namespace, skip it before any reservation. This
+    // only avoids spend: it proves nothing about freshness, leaves `as_of` and the
+    // cadence unchanged, and the post-scan discard still guards a write that lands
+    // after this check. Absent or unparseable evidence admits normally.
+    #[cfg(feature = "field-stats-capture")]
+    if state
+        .snapshot_budgets
+        .as_ref()
+        .is_some_and(|budgets| budgets.covers(namespace))
+        && written_within(&meta.raw, now_ms(), RECENT_WRITE_SKIP_MS)
+    {
+        info!(
+            namespace = %namespace,
+            window_ms = RECENT_WRITE_SKIP_MS,
+            "namespace written recently; skipping capped snapshot scan this interval"
+        );
+        return Ok(None);
+    }
     // A namespace with a reviewed snapshot budget scans only under the shared
     // spend ledger. Any refusal (uncovered projection, stale inputs, exhausted
     // window, no financial store) is an error here: no scan, and the previous
@@ -443,6 +463,26 @@ async fn reconcile_shared(
     )
     .await
     .map(Some)
+}
+
+/// A write this recent makes a capped scan likely to be discarded (see above).
+#[cfg(feature = "field-stats-capture")]
+pub(crate) const RECENT_WRITE_SKIP_MS: u64 = 15_000;
+
+/// True when the provider's own `last_write_at` is within `window_ms` before
+/// `now_ms` (a timestamp ahead of the clock counts as a write now). Missing or
+/// unparseable evidence is false, so the caller admits as before.
+#[cfg(feature = "field-stats-capture")]
+pub(crate) fn written_within(meta: &Value, now_ms: u64, window_ms: u64) -> bool {
+    let Some(at) = meta
+        .get("last_write_at")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    else {
+        return false;
+    };
+    let at_ms = u64::try_from(at.timestamp_millis()).unwrap_or(0);
+    now_ms.saturating_sub(at_ms) < window_ms
 }
 
 #[cfg(feature = "field-stats-capture")]
@@ -1211,6 +1251,28 @@ pub fn parse_snapshot_key_full(key: &str) -> Option<(String, u64, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "field-stats-capture")]
+    #[test]
+    fn written_within_uses_the_providers_last_write_and_fails_open() {
+        let at = |s: &str| serde_json::json!({"last_write_at": s});
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-09T10:00:30Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert!(written_within(&at("2026-10-09T10:00:20Z"), now, 15_000));
+        assert!(!written_within(&at("2026-10-09T10:00:15Z"), now, 15_000));
+        assert!(!written_within(&at("2026-10-09T09:00:00Z"), now, 15_000));
+        // A timestamp ahead of this clock is a write now; absent or malformed
+        // evidence never skips.
+        assert!(written_within(&at("2026-10-09T10:05:00Z"), now, 15_000));
+        assert!(!written_within(&serde_json::json!({}), now, 15_000));
+        assert!(!written_within(&at("not a time"), now, 15_000));
+        assert!(!written_within(
+            &serde_json::json!({"last_write_at": 5}),
+            now,
+            15_000
+        ));
+    }
+
     use super::*;
     use serde_json::json;
 
