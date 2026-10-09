@@ -19,6 +19,17 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/healthcheck-path: /ready
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    {{- with .Values.ingress.healthCheck }}
+    {{- if .intervalSeconds }}
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: {{ .intervalSeconds | quote }}
+    {{- end }}
+    {{- if .timeoutSeconds }}
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: {{ .timeoutSeconds | quote }}
+    {{- end }}
+    {{- if .healthyThresholdCount }}
+    alb.ingress.kubernetes.io/healthy-threshold-count: {{ .healthyThresholdCount | quote }}
+    {{- end }}
+    {{- end }}
 spec:
   ingressClassName: alb
   rules:

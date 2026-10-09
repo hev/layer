@@ -457,6 +457,14 @@ ingress:
   tags: "hev=public"
   # Order within the shared ALB IngressGroup. hev-shop web/api occupy 10/11/20.
   groupOrder: 30
+  # Target-group health check for the gateway. A single-replica roll leaves the
+  # ALB with no healthy target until the new pod passes this check; the
+  # controller defaults (15s interval, 2 healthy) added about 15s of 503 after
+  # the pod was Ready on 2026-10-09. Blank a field to keep the controller default.
+  healthCheck:
+    intervalSeconds: 5
+    timeoutSeconds: 2
+    healthyThresholdCount: 2
 
 dashboard:
   enabled: true
