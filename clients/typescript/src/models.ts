@@ -200,6 +200,9 @@ export interface UdfDiscoveryStatus {
 
 export interface UdfQueryBudget {
   [key: string]: unknown;
+  attempt_limit?: number;
+  attempt_run?: string;
+  discovery_once?: boolean;
   queries_per_item: number | null;
   provider_queries: number;
   rejected_queries: number;

@@ -8,8 +8,104 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 pub type Attributes = HashMap<String, Value>;
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HydrationAdmission {
+    pub run_id: String,
+    pub namespace_bytes: i64,
+    pub max_queries: i64,
+    pub max_queried_bytes: i64,
+    pub max_rows: i64,
+    pub max_storage_bytes: i64,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HydrationProgress {
+    pub run_id: String,
+    pub epoch: String,
+    pub revision: i64,
+    pub cursor: Option<String>,
+    pub complete: bool,
+    pub queries_reserved: i64,
+    pub bytes_reserved: i64,
+    pub rows: i64,
+    pub storage_bytes: i64,
+    pub observed_row_bytes: i64,
+    pub row_receipts: i64,
+    pub blocked: bool,
+}
+pub struct HydratedRow {
+    pub id: String,
+    pub key: String,
+    pub attributes: Option<Attributes>,
+}
 #[async_trait]
 pub trait DocumentReadCache: Send + Sync {
+    async fn reserve_hydration(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+        _admission: &HydrationAdmission,
+    ) -> Result<HydrationProgress, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "durable bulk hydration unavailable".into(),
+        ))
+    }
+    async fn publish_hydration(
+        &self,
+        _scope: &str,
+        _progress: &HydrationProgress,
+        _rows: &[HydratedRow],
+        _next: Option<&str>,
+        _queried_bytes: Option<u64>,
+    ) -> Result<HydrationProgress, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "durable bulk hydration unavailable".into(),
+        ))
+    }
+    async fn materialization_identity(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+    ) -> Result<Option<String>, TurbopufferError> {
+        Ok(None)
+    }
+    async fn materialized_page(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+        _identity: &str,
+        _cursor: Option<&str>,
+        _page_size: u32,
+    ) -> Result<crate::models::DocumentPage, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "local materialized page unavailable".into(),
+        ))
+    }
+    async fn materialized_rows(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+        _ids: &[String],
+    ) -> Result<Option<HashMap<String, Option<Attributes>>>, TurbopufferError> {
+        Ok(None)
+    }
+    async fn materialized_group(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+        _parent: &str,
+    ) -> Result<Option<Vec<String>>, TurbopufferError> {
+        Ok(None)
+    }
+    async fn materialized_write(
+        &self,
+        _scope: &str,
+        _version: &FenceVersion,
+        _rows: &[HydratedRow],
+        _complete: bool,
+    ) -> Result<(), TurbopufferError> {
+        Ok(())
+    }
     // None is a certified strong-read tombstone; a missing key is a cache miss.
     async fn get_many(
         &self,
@@ -92,6 +188,8 @@ pub struct FenceVersion {
 pub struct NamespaceIdentity {
     pub integer_ids: bool,
     pub generated: HashMap<String, String>,
+    #[serde(default)]
+    pub schema: Option<Value>,
 }
 #[async_trait]
 pub trait CacheFence: Send + Sync {
@@ -278,6 +376,13 @@ impl CacheSession {
             return Ok(HashMap::new());
         }
         self.protect(async {
+            if let Some(rows) = self
+                .backend
+                .materialized_rows(&self.scope, &self.fence.version(), ids)
+                .await?
+            {
+                return Ok(rows);
+            }
             let keys = self.keys(ids).await?;
             let physical: Vec<_> = keys.values().cloned().collect();
             let mut rows = self.backend.get_many(&self.scope, &physical).await?;
@@ -326,6 +431,13 @@ impl CacheSession {
             return Ok(None);
         }
         self.protect(async {
+            if let Some(ids) = self
+                .backend
+                .materialized_group(&self.scope, &self.fence.version(), parent)
+                .await?
+            {
+                return Ok(Some(ids));
+            }
             let key = self.group_key(parent);
             let mut rows = self
                 .backend
@@ -349,6 +461,101 @@ impl CacheSession {
                 self.group_key(parent),
                 Some(HashMap::from([("ids".into(), serde_json::json!(ids))])),
             )]),
+        ))
+        .await
+    }
+    pub async fn materialization_identity(&self) -> Result<Option<String>, TurbopufferError> {
+        if !self.fence.version().readable {
+            return Ok(None);
+        }
+        self.protect(
+            self.backend
+                .materialization_identity(&self.scope, &self.fence.version()),
+        )
+        .await
+    }
+    pub async fn materialized_page(
+        &self,
+        identity: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+    ) -> Result<crate::models::DocumentPage, TurbopufferError> {
+        if !self.fence.version().readable {
+            return Err(TurbopufferError::Other(
+                "local materialization authority unreadable".into(),
+            ));
+        }
+        self.protect(self.backend.materialized_page(
+            &self.scope,
+            &self.fence.version(),
+            identity,
+            cursor,
+            page_size,
+        ))
+        .await
+    }
+    pub async fn reserve_hydration(
+        &self,
+        admission: &HydrationAdmission,
+    ) -> Result<HydrationProgress, TurbopufferError> {
+        if !self.fence.version().readable {
+            return Err(TurbopufferError::Other(
+                "bulk hydration requires readable verified authority".into(),
+            ));
+        }
+        self.protect(
+            self.backend
+                .reserve_hydration(&self.scope, &self.fence.version(), admission),
+        )
+        .await
+    }
+    pub async fn publish_hydration(
+        &self,
+        progress: &HydrationProgress,
+        rows: &HashMap<String, Option<Attributes>>,
+        next: Option<&str>,
+        queried_bytes: Option<u64>,
+    ) -> Result<HydrationProgress, TurbopufferError> {
+        let keys = self.keys(&rows.keys().cloned().collect::<Vec<_>>()).await?;
+        let rows = rows
+            .iter()
+            .map(|(id, attributes)| HydratedRow {
+                id: id.clone(),
+                key: keys[id].clone(),
+                attributes: attributes.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.protect(self.backend.publish_hydration(
+            &self.scope,
+            progress,
+            &rows,
+            next,
+            queried_bytes,
+        ))
+        .await
+    }
+    pub async fn materialized_write(
+        &self,
+        ids: Option<&[String]>,
+        rows: &HashMap<String, Option<Attributes>>,
+    ) -> Result<(), TurbopufferError> {
+        let keys = self.keys(&rows.keys().cloned().collect::<Vec<_>>()).await?;
+        let complete = ids.is_some_and(|ids| {
+            ids.len() == rows.len() && ids.iter().all(|id| rows.contains_key(id))
+        });
+        let rows = rows
+            .iter()
+            .map(|(id, attributes)| HydratedRow {
+                id: id.clone(),
+                key: keys[id].clone(),
+                attributes: attributes.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.protect(self.backend.materialized_write(
+            &self.scope,
+            &self.fence.version(),
+            &rows,
+            complete,
         ))
         .await
     }

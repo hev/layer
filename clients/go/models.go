@@ -166,6 +166,9 @@ type UdfDiscoveryStatus struct {
 }
 
 type UdfQueryBudget struct {
+	AttemptLimit int64 `json:"attempt_limit,omitempty"`
+	AttemptRun string `json:"attempt_run,omitempty"`
+	DiscoveryOnce bool `json:"discovery_once,omitempty"`
 	QueriesPerItem *int64 `json:"queries_per_item"`
 	ProviderQueries int64 `json:"provider_queries"`
 	RejectedQueries int64 `json:"rejected_queries"`

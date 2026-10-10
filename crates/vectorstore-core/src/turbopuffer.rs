@@ -487,6 +487,25 @@ pub trait TurbopufferClient: Send + Sync {
         ids: &[String],
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError>;
 
+    /// Local, certified discovery only. Implementations must never dispatch provider IO.
+    async fn materialization_identity(
+        &self,
+        _namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        Ok(None)
+    }
+    async fn scan_materialized_page(
+        &self,
+        _namespace: &str,
+        _identity: &str,
+        _cursor: Option<&str>,
+        _page_size: u32,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        Err(TurbopufferError::Other(
+            "local materialization unavailable".into(),
+        ))
+    }
+
     /// Complete parent membership, with full attributes. Never return a
     /// truncated group: callers fan output back to every sibling.
     async fn fetch_siblings(
@@ -966,6 +985,25 @@ impl TurbopufferClient for RoutingTurbopufferClient {
             .await
     }
 
+    async fn materialization_identity(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .materialization_identity(namespace)
+            .await
+    }
+    async fn scan_materialized_page(
+        &self,
+        namespace: &str,
+        identity: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .scan_materialized_page(namespace, identity, cursor, page_size)
+            .await
+    }
     async fn fetch_siblings(
         &self,
         namespace: &str,
@@ -1138,6 +1176,92 @@ impl HttpTurbopufferClient {
             boundary,
         })
     }
+    /// One financially admitted 10k-row page. The original shared authority
+    /// fences every page and its durable publication; no unverified scan can
+    /// certify a namespace. Repeating a completed run performs no provider IO.
+    pub async fn bulk_hydrate_page(
+        &self,
+        namespace: &str,
+        admission: &crate::document_cache::HydrationAdmission,
+    ) -> Result<crate::document_cache::HydrationProgress, TurbopufferError> {
+        let session = self.shared_session(namespace).await?.ok_or_else(|| {
+            TurbopufferError::Other("bulk hydration requires certified shared authority".into())
+        })?;
+        session
+            .protect(async {
+                let mut progress = session.reserve_hydration(admission).await?;
+                if progress.complete {
+                    return Ok(progress);
+                }
+                let uncached = self.uncached();
+                let cached_identity = session.schema().await?;
+                let identity = if progress.cursor.is_none() && progress.rows == 0 {
+                    let meta = uncached.head_namespace_for_strong_scan(namespace).await?;
+                    if meta
+                        .approx_logical_bytes
+                        .is_none_or(|bytes| bytes > admission.namespace_bytes as u64)
+                    {
+                        return Err(TurbopufferError::Other(
+                            "namespace bytes exceed hydration admission or are unknown".into(),
+                        ));
+                    }
+                    let identity = crate::document_cache::NamespaceIdentity {
+                        integer_ids: uncached.prepared_integer_ids(namespace)?,
+                        generated: generated_columns(&meta.raw["schema"]),
+                        schema: Some(meta.raw["schema"].clone()),
+                    };
+                    if cached_identity.as_ref().is_some_and(|old| {
+                        old.integer_ids != identity.integer_ids
+                            || old.generated != identity.generated
+                    }) {
+                        return Err(TurbopufferError::Other(
+                            "namespace schema differs from fenced identity".into(),
+                        ));
+                    }
+                    session.put_schema(&identity).await?;
+                    progress = session.reserve_hydration(admission).await?;
+                    identity
+                } else {
+                    cached_identity.ok_or_else(|| {
+                        TurbopufferError::Other(
+                            "hydration lost its certified namespace identity".into(),
+                        )
+                    })?
+                };
+                uncached.id_types.write().unwrap().insert(
+                    namespace.into(),
+                    (std::time::Instant::now(), identity.integer_ids),
+                );
+                let billing = Arc::new(std::sync::Mutex::new(None));
+                let captured = billing.clone();
+                let observer: ReadBillingObserver = Arc::new(move |_, receipt| {
+                    *captured.lock().unwrap() = receipt
+                        .get("billable_logical_bytes_queried")
+                        .and_then(Value::as_u64);
+                });
+                let page = scope_read_billing(
+                    observer,
+                    scope_prepared_scan_metadata(uncached.scan_page_strong(
+                        namespace,
+                        progress.cursor.as_deref(),
+                        10_000,
+                        None,
+                        None,
+                    )),
+                )
+                .await?;
+                let queried_bytes = *billing.lock().unwrap();
+                let rows = page
+                    .documents
+                    .into_iter()
+                    .map(|row| (row.id, Some(row.attributes)))
+                    .collect();
+                session
+                    .publish_hydration(&progress, &rows, page.next_cursor.as_deref(), queried_bytes)
+                    .await
+            })
+            .await
+    }
     fn uncached(&self) -> Self {
         Self {
             client: self.client.clone(),
@@ -1225,6 +1349,7 @@ impl HttpTurbopufferClient {
                             .put_schema(&crate::document_cache::NamespaceIdentity {
                                 integer_ids,
                                 generated,
+                                schema: None,
                             })
                             .await;
                     }
@@ -1300,8 +1425,14 @@ impl HttpTurbopufferClient {
                 ));
             };
             let identity = session.schema().await?;
+            let stable_schema = body.get("schema").is_none_or(|schema| {
+                identity
+                    .as_ref()
+                    .and_then(|i| i.schema.as_ref())
+                    .is_some_and(|known| schema_declaration_matches(schema, known))
+            });
             let mut normalized = body.clone();
-            if canonical_write_effects(body).is_some() && body.get("schema").is_none() {
+            if canonical_write_effects(body).is_some() && stable_schema {
                 let identity=identity.as_ref().ok_or_else(||TurbopufferError::Other("namespace identity uncertain; strong canonical hydration required before typed mutation".into()))?;
                 normalize_source_ids(&mut normalized, identity.integer_ids)?;
             }
@@ -1314,18 +1445,14 @@ impl HttpTurbopufferClient {
                 Some(ids) => session.get_many(ids).await.unwrap_or_default(),
                 None => HashMap::new(),
             };
-            let generated = if body.get("schema").is_some() {
+            let generated = if !stable_schema {
                 None
             } else {
                 identity.map(|identity| identity.generated)
             };
             session
                 .fence
-                .begin_write(if body.get("schema").is_some() {
-                    None
-                } else {
-                    ids.as_deref()
-                })
+                .begin_write(if !stable_schema { None } else { ids.as_deref() })
                 .await?;
             let url = format!("{}/v2/namespaces/{}", self.base_url, namespace);
             let response = session
@@ -1383,7 +1510,12 @@ impl HttpTurbopufferClient {
                 }
                 // Publication failure leaves pending durable; it cannot be
                 // silently healed by this or a later successful mutation.
-                if session.put_many(&after, true).await.is_ok() {
+                if session.put_many(&after, true).await.is_ok()
+                    && session
+                        .materialized_write(ids.as_deref(), &after)
+                        .await
+                        .is_ok()
+                {
                     // Preserve the known provider outcome and its single billing
                     // observer. Cache/coordinator failures leave pending durable.
                     let _ = session.fence.complete_write().await;
@@ -1682,6 +1814,19 @@ fn normalize_source_ids(body: &mut Value, integer: bool) -> Result<(), Turbopuff
     Ok(())
 }
 
+// Repeating existing schema declarations does not change namespace incarnation.
+// New/changed declarations remain epoch mutations; never infer their effect on
+// untouched rows from a successful source response.
+fn schema_declaration_matches(declared: &Value, known: &Value) -> bool {
+    match (declared, known) {
+        (Value::Object(declared), Value::Object(known)) => declared.iter().all(|(key, value)| {
+            known
+                .get(key)
+                .is_some_and(|old| schema_declaration_matches(value, old))
+        }),
+        _ => declared == known,
+    }
+}
 fn generated_columns(schema: &Value) -> HashMap<String, String> {
     schema
         .as_object()
@@ -3162,6 +3307,27 @@ impl TurbopufferClient for HttpTurbopufferClient {
         Ok(found)
     }
 
+    async fn materialization_identity(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, TurbopufferError> {
+        match self.shared_session(namespace).await? {
+            Some(session) => session.materialization_identity().await,
+            None => Ok(None),
+        }
+    }
+    async fn scan_materialized_page(
+        &self,
+        namespace: &str,
+        identity: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+    ) -> Result<DocumentPage, TurbopufferError> {
+        let session = self.shared_session(namespace).await?.ok_or_else(|| {
+            TurbopufferError::Other("local materialization requires certified authority".into())
+        })?;
+        session.materialized_page(identity, cursor, page_size).await
+    }
     async fn fetch_siblings(
         &self,
         namespace: &str,

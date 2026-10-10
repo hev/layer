@@ -125,6 +125,7 @@ pub struct AppState {
     pub aerospike_set_prefix: String,
     pub pipeline_store: Option<Arc<dyn PipelineStore>>,
     pub udf_store: Option<Arc<dyn UdfStore>>,
+    pub function_layer_only_namespaces: std::collections::HashSet<String>,
     pub write_trigger: Option<Arc<dyn WriteTrigger>>,
     pub metrics_backend_url: Option<String>,
     pub aws_cost_config: cost::AwsCostConfig,

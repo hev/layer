@@ -1777,6 +1777,19 @@ spec:
         properties:
           spec:
             properties:
+              attemptLimit:
+                description: Durable claim-attempt ceiling for this named measurement run. No refunds.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              attemptRun:
+                nullable: true
+                type: string
+              discoveryOnce:
+                default: false
+                description: Traverse once per definition; gateway write triggers maintain the queue.
+                type: boolean
               filter:
                 x-kubernetes-preserve-unknown-fields: true
               groupByParent:

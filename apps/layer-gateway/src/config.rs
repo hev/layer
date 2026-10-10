@@ -41,6 +41,8 @@ pub struct Config {
     pub keys_auth_rate_limit_per_min: u32,
     pub port: u16,
     pub database_url: Option<String>,
+    /// Namespaces whose Function paths must never dispatch provider reads.
+    pub function_layer_only_namespaces: std::collections::HashSet<String>,
     /// Bulk pipeline work is capped separately so it cannot consume the
     /// connections reserved for Function control-plane and metrics requests.
     pub database_data_pool_max_connections: u32,
@@ -207,6 +209,13 @@ impl Config {
                 .parse()
                 .expect("PORT must be a valid u16"),
             database_url: env::var("DATABASE_URL").ok(),
+            function_layer_only_namespaces: env::var("LAYER_FUNCTION_LAYER_ONLY_NAMESPACES")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|namespace| !namespace.is_empty())
+                .map(str::to_owned)
+                .collect(),
             database_data_pool_max_connections: env::var("LAYER_QUEUE_DATA_POOL_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())

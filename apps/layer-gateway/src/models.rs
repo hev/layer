@@ -149,6 +149,14 @@ pub struct UdfSpec {
     pub inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queries_per_item: Option<u32>,
+    /// Durable claim-attempt ceiling for this named measurement run. No refunds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_run: Option<String>,
+    /// Traverse once per definition; gateway write triggers maintain the queue.
+    #[serde(default)]
+    pub discovery_once: bool,
     #[serde(default = "default_udf_version")]
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

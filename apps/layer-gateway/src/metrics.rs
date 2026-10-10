@@ -2363,6 +2363,23 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         result
     }
 
+    async fn materialization_identity(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<String>, crate::clients::turbopuffer::TurbopufferError> {
+        self.inner.materialization_identity(namespace).await
+    }
+    async fn scan_materialized_page(
+        &self,
+        namespace: &str,
+        identity: &str,
+        cursor: Option<&str>,
+        page_size: u32,
+    ) -> Result<crate::models::DocumentPage, crate::clients::turbopuffer::TurbopufferError> {
+        self.inner
+            .scan_materialized_page(namespace, identity, cursor, page_size)
+            .await
+    }
     async fn fetch_siblings(
         &self,
         namespace: &str,

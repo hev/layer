@@ -171,6 +171,9 @@ class UdfDiscoveryStatus(BaseModel):
 
 class UdfQueryBudget(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    attempt_limit: int | None = None
+    attempt_run: str | None = None
+    discovery_once: bool | None = False
     queries_per_item: int | None
     provider_queries: int
     rejected_queries: int

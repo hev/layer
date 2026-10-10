@@ -343,6 +343,7 @@ pub async fn run_with_options(options: ServerOptions) {
         pipeline_store: None,
         udf_store: None,
         write_trigger: None,
+        function_layer_only_namespaces: config.function_layer_only_namespaces,
         metrics_backend_url: config
             .metrics_backend_url
             .map(|url| url.trim_end_matches('/').to_string()),
