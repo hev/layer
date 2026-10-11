@@ -241,6 +241,60 @@
             }
           ],
           "host": "mcp.hevlayer.com"
+        },
+        "story": {
+          "namespaces": [
+            {
+              "name": "pov-bcc-story-pages",
+              "toolName": "story_documents",
+              "description": "Story Renovations documents, full pages (PDF). Each hit carries the ids of its job: ki_lead_id, ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN). Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
+              "collapse": {
+                "by": "document"
+              },
+              "filters": [
+                "company",
+                "job",
+                "division",
+                "region",
+                "doc_type",
+                "ki_lead_id",
+                "ki_job_number",
+                "ki_client_id",
+                "cost_code_ki",
+                "cost_code_final15",
+                "cost_code_catalog45"
+              ],
+              "link": "webUrl",
+              "pageLink": true,
+              "originals": {
+                "maxBytes": 700000,
+                "maxPages": 3,
+                "maxWidth": 1100
+              }
+            },
+            {
+              "name": "pov-bcc-photos",
+              "toolName": "story_photos",
+              "description": "Story Renovations photos. Each hit carries the ids of its job: ki_lead_id, ki_project_id (contract ids), ki_job_number and ki_job_number_prefixed (YY-NNN and DDYY-NNN). Cost codes, one field per catalog, none picked or reconciled: cost_code_ki (what KI booked, on the invoice or on the matched job), cost_code_final15 (Story's FINAL 1.5 code through the data model's crosswalk) and cost_code_catalog45 (the 45-code catalog suggestion); each has a _label array of '<code> <description>'.",
+              "filters": [
+                "job",
+                "folder_1",
+                "folder_2",
+                "job_stage",
+                "region",
+                "ki_lead_id",
+                "ki_job_number",
+                "ki_client_id",
+                "cost_code_ki",
+                "cost_code_final15"
+              ],
+              "where": {
+                "company": "story"
+              },
+              "link": "webUrl"
+            }
+          ],
+          "host": "mcp.hevlayer.com"
         }
       }
     }

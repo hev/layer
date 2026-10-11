@@ -52,6 +52,10 @@ pub struct McpNamespace {
     pub tool_name: Option<String>,
     pub description: Option<String>,
     pub filters: Option<Vec<String>>,
+    /// Attribute -> exact value ANDed into every search, get, aggregate and
+    /// fetch_original on this tool. Clients cannot see, widen or override it.
+    #[serde(default, rename = "where")]
+    pub pinned: Option<BTreeMap<String, Value>>,
     pub link: Option<String>,
     /// Also show each page row's `page` as a PDF page-anchored copy of `link`.
     #[serde(default)]
@@ -64,6 +68,20 @@ pub struct McpNamespace {
 }
 
 impl McpNamespace {
+    /// The pinned filter as a store predicate, if the namespace has one.
+    fn pin(&self) -> Option<Value> {
+        let pinned = self.pinned.as_ref().filter(|p| !p.is_empty())?;
+        let mut predicates: Vec<Value> = pinned
+            .iter()
+            .map(|(name, value)| json!([name, "Eq", value]))
+            .collect();
+        Some(if predicates.len() == 1 {
+            predicates.remove(0)
+        } else {
+            json!(["And", predicates])
+        })
+    }
+
     fn tool_name(&self) -> String {
         self.tool_name.clone().unwrap_or_else(|| {
             self.name
@@ -224,6 +242,19 @@ pub fn registry_from_json(raw: Option<&str>) -> Result<Arc<McpRegistry>, AppErro
             }
             if let Some(originals) = &ns.originals {
                 originals.validate()?;
+            }
+            if let Some(pinned) = &ns.pinned {
+                if pinned.is_empty()
+                    || pinned.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || name.starts_with("_hevlayer_")
+                            || !(value.is_string() || value.is_boolean() || value.is_number())
+                    })
+                {
+                    return Err(invalid(
+                        "MCP where must pin one or more attributes to a string, boolean or number",
+                    ));
+                }
             }
             if let Some(filters) = &ns.filters {
                 let mut seen = HashSet::new();
@@ -801,6 +832,8 @@ impl McpHandler {
             Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
             _ => return Err(invalid("id must be a nonempty string or unsigned integer").into()),
         };
+        self.require_in_pin(ns, &headers, &id).await?;
+        let id_for_pin = id.clone();
         let response = crate::routes::fetch::fetch_document(
             State(self.state.clone()),
             Path((ns.name.clone(), id)),
@@ -812,6 +845,7 @@ impl McpHandler {
         .await?
         .into_response();
         let body = decode_response(response).await?;
+        self.check_pin(ns, &id_for_pin, body.get("attributes").unwrap_or(&body))?;
         let mut text = render(&body, ns.link.as_deref(), ns.page_link);
         if ns.originals.is_some()
             && body
@@ -826,12 +860,65 @@ impl McpHandler {
         Ok(result)
     }
 
+    /// A pinned tool serves a record by id only when the pin matches it. A
+    /// record outside the pin is reported exactly like a missing one.
+    async fn require_in_pin(
+        &self,
+        ns: &McpNamespace,
+        headers: &HeaderMap,
+        id: &str,
+    ) -> Result<(), AppError> {
+        if ns.pin().is_none() {
+            return Ok(());
+        }
+        // Validates the pinned attributes against the live schema.
+        self.schema(ns).await?;
+        let found = self
+            .query_body(
+                ns,
+                headers,
+                json!({"rank_by":["id","asc"],"top_k":1,"include_attributes":false,
+                       "filters":["id","In",[id]]}),
+            )
+            .await?;
+        let listed = found["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["id"]
+                    .as_str()
+                    .map_or(row["id"].to_string(), str::to_owned)
+                    == id
+            })
+        });
+        if listed {
+            Ok(())
+        } else {
+            Err(pinned_out(id))
+        }
+    }
+
+    /// The fetched record itself must carry the pinned values. A partial cached
+    /// row without the attribute leaves the decision to the id lookup above.
+    fn check_pin(&self, ns: &McpNamespace, id: &str, attrs: &Value) -> Result<(), AppError> {
+        for (name, want) in ns.pinned.iter().flatten() {
+            if attrs.get(name).is_some_and(|have| have != want) {
+                return Err(pinned_out(id));
+            }
+        }
+        Ok(())
+    }
+
     async fn query_body(
         &self,
         ns: &McpNamespace,
         headers: &HeaderMap,
-        body: Value,
+        mut body: Value,
     ) -> Result<Value, AppError> {
+        if let Some(pin) = ns.pin() {
+            body["filters"] = match body.get("filters").filter(|f| !f.is_null()) {
+                Some(filters) => json!(["And", [filters, pin]]),
+                None => pin,
+            };
+        }
         let response = crate::routes::query::query(
             State(self.state.clone()),
             Path(ns.name.clone()),
@@ -1420,6 +1507,12 @@ impl PageCursor {
     }
 }
 
+fn pinned_out(id: &str) -> AppError {
+    AppError::NotFound(format!(
+        "record `{id}` was not found or is no longer available"
+    ))
+}
+
 /// Identifies the search a cursor continues: namespace, ranking, filters and
 /// grouping. `limit` is left out, so page size can change between pages.
 fn page_fingerprint(ns: &McpNamespace, rank_by: &Value, filters: Option<&Value>) -> String {
@@ -1462,6 +1555,7 @@ impl McpHandler {
                 .parse()
                 .map_err(|_| invalid("invalid MCP history tag"))?,
         );
+        self.require_in_pin(ns, &headers, &id).await?;
         let response = crate::routes::fetch::fetch_document(
             State(self.state.clone()),
             Path((ns.name.clone(), id.clone())),
@@ -1507,6 +1601,7 @@ impl McpHandler {
             }
         }
         let attrs = &merged;
+        self.check_pin(ns, &id, attrs)?;
         let bound = original::bind(&ns.name, attrs)?;
         let is_pdf = bound.mime == "application/pdf";
         let hard_limit = if pages.is_some() {
@@ -1636,6 +1731,7 @@ impl NamespaceSchema {
             .and_then(Value::as_object)
             .ok_or_else(|| invalid("namespace has no attribute schema"))?;
         let mut filters = BTreeMap::new();
+        let mut all_filterable = BTreeMap::new();
         let mut text = Vec::new();
         let mut embed = Vec::new();
         for (name, attr) in attrs {
@@ -1670,12 +1766,29 @@ impl NamespaceSchema {
                 Some("datetime" | "date") => FilterType::Date,
                 _ => continue,
             };
+            all_filterable.insert(name.clone(), ty.clone());
             if ns
                 .filters
                 .as_ref()
                 .is_none_or(|allowed| allowed.contains(name))
             {
                 filters.insert(name.clone(), ty);
+            }
+        }
+        if let Some(pinned) = &ns.pinned {
+            for (name, value) in pinned {
+                let ok = match all_filterable.get(name) {
+                    Some(FilterType::String) => value.is_string(),
+                    Some(FilterType::Boolean) => value.is_boolean(),
+                    Some(FilterType::Integer) => value.is_i64() || value.is_u64(),
+                    Some(FilterType::Number) => value.is_number(),
+                    _ => false,
+                };
+                if !ok {
+                    return Err(invalid(format!("MCP where `{name}` is missing, not filterable, or its value does not match the attribute type")));
+                }
+                // The client sees only what it can still choose.
+                filters.remove(name);
             }
         }
         if let Some(allowed) = &ns.filters {
@@ -2036,6 +2149,19 @@ mod tests {
                 .count()
                 == 3
         );
+        let story = &registry.servers["story"];
+        assert_eq!(story.namespaces.len(), 2);
+        assert!(story.namespaces.len() <= PER_NAMESPACE_TOOL_THRESHOLD);
+        let photos = story
+            .namespaces
+            .iter()
+            .find(|n| n.name == "pov-bcc-photos")
+            .unwrap();
+        assert_eq!(photos.pin(), Some(json!(["company", "Eq", "story"])));
+        assert!(photos
+            .filters
+            .as_ref()
+            .is_some_and(|f| !f.iter().any(|f| f == "company")));
     }
 
     fn ns() -> McpNamespace {
@@ -2044,6 +2170,7 @@ mod tests {
             tool_name: None,
             description: None,
             filters: None,
+            pinned: None,
             link: None,
             page_link: false,
             originals: None,
