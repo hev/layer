@@ -157,6 +157,8 @@ pub struct UdfSpec {
     /// Traverse once per definition; gateway write triggers maintain the queue.
     #[serde(default)]
     pub discovery_once: bool,
+    #[serde(default)]
+    pub backfill: bool,
     #[serde(default = "default_udf_version")]
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1327,6 +1329,10 @@ pub struct GetUdfResponse {
 pub struct UdfStatusResponse {
     #[cfg(feature = "pro")]
     pub query_budget: crate::udf::UdfQueryBudgetStatus,
+    /// Present for `spec.backfill` Functions once the first page was scanned.
+    #[cfg(feature = "pro")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<UdfBackfillStatusResponse>,
     pub udf_id: String,
     pub paused: bool,
     pub active_namespaces: Vec<String>,
@@ -1337,6 +1343,18 @@ pub struct UdfStatusResponse {
     pub failed_count: u64,
     pub indexed_rate_per_min: f64,
     pub rate_window_seconds: u64,
+}
+
+/// Progress of a bulk Function backfill. Billing comes from the provider's
+/// response receipts for the backfill's own paged scans.
+#[cfg(feature = "pro")]
+#[derive(Debug, Serialize)]
+pub struct UdfBackfillStatusResponse {
+    #[serde(flatten)]
+    pub status: crate::udf::UdfBackfillStatus,
+    /// Scanned rows that are no longer queued or failed.
+    pub rows_done: u64,
+    pub billed_queried_bytes_per_row: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]

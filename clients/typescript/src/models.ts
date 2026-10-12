@@ -178,6 +178,7 @@ export interface GetUdfResponse {
 export interface UdfStatus {
   [key: string]: unknown;
   query_budget?: UdfQueryBudget;
+  backfill?: UdfBackfillStatus;
   udf_id: string;
   paused: boolean;
   active_namespaces: string[];
@@ -196,6 +197,19 @@ export interface UdfDiscoveryStatus {
   pause_reason?: string | null;
   sweeps_completed: number;
   last_completed_at: string | null;
+}
+
+export interface UdfBackfillStatus {
+  [key: string]: unknown;
+  version: string;
+  scan_complete: boolean;
+  pages: number;
+  rows_scanned: number;
+  queries: number;
+  queried_bytes: number;
+  returned_bytes: number;
+  rows_done: number;
+  billed_queried_bytes_per_row?: number | null;
 }
 
 export interface UdfQueryBudget {
@@ -234,6 +248,7 @@ export interface UdfSpec {
   target_namespaces?: string[];
   queries_per_item?: number;
   inputs?: string[];
+  backfill?: boolean;
   version?: string;
   filter?: TurbopufferFilter;
   worker: UdfWorkerSpec;

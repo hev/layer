@@ -289,7 +289,7 @@
                 "cost_code_final15"
               ],
               "where": {
-                "company": "story"
+                "company": "Story"
               },
               "link": "webUrl"
             }

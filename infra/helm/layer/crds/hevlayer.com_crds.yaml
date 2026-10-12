@@ -1786,6 +1786,12 @@ spec:
               attemptRun:
                 nullable: true
                 type: string
+              backfill:
+                default: false
+                description: |-
+                  One-off bulk run over existing rows: discovery pages carry the inputs, so
+                  claim and completion make no provider reads. Requires `triggers: [discovery]`.
+                type: boolean
               discoveryOnce:
                 default: false
                 description: Traverse once per definition; gateway write triggers maintain the queue.

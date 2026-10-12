@@ -146,6 +146,7 @@ type GetUdfResponse struct {
 
 type UdfStatus struct {
 	QueryBudget UdfQueryBudget `json:"query_budget,omitempty"`
+	Backfill UdfBackfillStatus `json:"backfill,omitempty"`
 	UdfID string `json:"udf_id"`
 	Paused bool `json:"paused"`
 	ActiveNamespaces []string `json:"active_namespaces"`
@@ -163,6 +164,18 @@ type UdfDiscoveryStatus struct {
 	PauseReason string `json:"pause_reason,omitempty"`
 	SweepsCompleted int64 `json:"sweeps_completed"`
 	LastCompletedAt *string `json:"last_completed_at"`
+}
+
+type UdfBackfillStatus struct {
+	Version string `json:"version"`
+	ScanComplete bool `json:"scan_complete"`
+	Pages int64 `json:"pages"`
+	RowsScanned int64 `json:"rows_scanned"`
+	Queries int64 `json:"queries"`
+	QueriedBytes int64 `json:"queried_bytes"`
+	ReturnedBytes int64 `json:"returned_bytes"`
+	RowsDone int64 `json:"rows_done"`
+	BilledQueriedBytesPerRow float64 `json:"billed_queried_bytes_per_row,omitempty"`
 }
 
 type UdfQueryBudget struct {
@@ -197,6 +210,7 @@ type UdfSpec struct {
 	TargetNamespaces []string `json:"target_namespaces,omitempty"`
 	QueriesPerItem int64 `json:"queries_per_item,omitempty"`
 	Inputs []string `json:"inputs,omitempty"`
+	Backfill bool `json:"backfill,omitempty"`
 	Version string `json:"version,omitempty"`
 	Filter interface{} `json:"filter,omitempty"`
 	Worker UdfWorkerSpec `json:"worker"`

@@ -3163,6 +3163,67 @@ impl UdfStore for MetricsUdfStore {
     ) -> Result<crate::udf::UdfQueryBudgetStatus, crate::udf::UdfStoreError> {
         self.inner.query_budget_status(udf_id).await
     }
+    async fn backfill_store_rows(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        namespace: &str,
+        rows: &[crate::udf::UdfBackfillRow],
+    ) -> Result<(), UdfStoreError> {
+        let start = Instant::now();
+        let result = self.inner.backfill_store_rows(lease, namespace, rows).await;
+        self.metrics.observe_pg_query(
+            "backfill_store_rows",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
+    async fn backfill_record_usage(
+        &self,
+        udf_id: &str,
+        version: &str,
+        usage: crate::udf::UdfBackfillUsage,
+    ) -> Result<(), UdfStoreError> {
+        self.inner
+            .backfill_record_usage(udf_id, version, usage)
+            .await
+    }
+    async fn backfill_rows(
+        &self,
+        udf_id: &str,
+        version: &str,
+        namespace: &str,
+        ids: &[String],
+    ) -> Result<Vec<crate::udf::UdfBackfillRow>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .backfill_rows(udf_id, version, namespace, ids)
+            .await;
+        self.metrics
+            .observe_pg_query("backfill_rows", udf_pg_status(&result), elapsed(start));
+        result
+    }
+    async fn backfill_siblings(
+        &self,
+        udf_id: &str,
+        version: &str,
+        namespace: &str,
+        parent_id: &str,
+    ) -> Result<Vec<String>, UdfStoreError> {
+        self.inner
+            .backfill_siblings(udf_id, version, namespace, parent_id)
+            .await
+    }
+    async fn backfill_status(
+        &self,
+        udf_id: &str,
+    ) -> Result<Option<crate::udf::UdfBackfillStatus>, UdfStoreError> {
+        self.inner.backfill_status(udf_id).await
+    }
+    async fn backfill_release_drained(&self, udf_id: &str) -> Result<u64, UdfStoreError> {
+        self.inner.backfill_release_drained(udf_id).await
+    }
     async fn create_udf(
         &self,
         id: &str,

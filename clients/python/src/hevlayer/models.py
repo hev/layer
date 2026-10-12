@@ -151,6 +151,7 @@ class GetUdfResponse(BaseModel):
 class UdfStatus(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     query_budget: UdfQueryBudget | None = None
+    backfill: UdfBackfillStatus | None = None
     udf_id: str
     paused: bool
     active_namespaces: list[str]
@@ -168,6 +169,18 @@ class UdfDiscoveryStatus(BaseModel):
     pause_reason: str | None = None
     sweeps_completed: int
     last_completed_at: str | None
+
+class UdfBackfillStatus(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    version: str
+    scan_complete: bool
+    pages: int
+    rows_scanned: int
+    queries: int
+    queried_bytes: int
+    returned_bytes: int
+    rows_done: int
+    billed_queried_bytes_per_row: float | None = None
 
 class UdfQueryBudget(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -202,6 +215,7 @@ class UdfSpec(BaseModel):
     target_namespaces: list[str] | None = []
     queries_per_item: int | None = None
     inputs: list[str] | None = []
+    backfill: bool | None = False
     version: str | None = "v1"
     filter: Any | None = None
     worker: UdfWorkerSpec

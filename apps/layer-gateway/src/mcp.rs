@@ -2157,7 +2157,7 @@ mod tests {
             .iter()
             .find(|n| n.name == "pov-bcc-photos")
             .unwrap();
-        assert_eq!(photos.pin(), Some(json!(["company", "Eq", "story"])));
+        assert_eq!(photos.pin(), Some(json!(["company", "Eq", "Story"])));
         assert!(photos
             .filters
             .as_ref()
