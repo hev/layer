@@ -214,9 +214,6 @@ export interface UdfBackfillStatus {
 
 export interface UdfQueryBudget {
   [key: string]: unknown;
-  attempt_limit?: number;
-  attempt_run?: string;
-  discovery_once?: boolean;
   queries_per_item: number | null;
   provider_queries: number;
   rejected_queries: number;
@@ -248,6 +245,9 @@ export interface UdfSpec {
   target_namespaces?: string[];
   queries_per_item?: number;
   inputs?: string[];
+  attempt_limit?: number;
+  attempt_run?: string;
+  discovery_once?: boolean;
   backfill?: boolean;
   version?: string;
   filter?: TurbopufferFilter;

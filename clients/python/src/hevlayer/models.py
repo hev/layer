@@ -184,9 +184,6 @@ class UdfBackfillStatus(BaseModel):
 
 class UdfQueryBudget(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-    attempt_limit: int | None = None
-    attempt_run: str | None = None
-    discovery_once: bool | None = False
     queries_per_item: int | None
     provider_queries: int
     rejected_queries: int
@@ -215,6 +212,9 @@ class UdfSpec(BaseModel):
     target_namespaces: list[str] | None = []
     queries_per_item: int | None = None
     inputs: list[str] | None = []
+    attempt_limit: int | None = None
+    attempt_run: str | None = None
+    discovery_once: bool | None = False
     backfill: bool | None = False
     version: str | None = "v1"
     filter: Any | None = None
