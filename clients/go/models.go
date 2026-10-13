@@ -175,6 +175,12 @@ type UdfBackfillStatus struct {
 	QueriedBytes int64 `json:"queried_bytes"`
 	ReturnedBytes int64 `json:"returned_bytes"`
 	RowsDone int64 `json:"rows_done"`
+	HeldPending int64 `json:"held_pending"`
+	HeldProcessing int64 `json:"held_processing"`
+	HeldFailed int64 `json:"held_failed"`
+	LegacyPending int64 `json:"legacy_pending"`
+	LegacyProcessing int64 `json:"legacy_processing"`
+	LegacyFailed int64 `json:"legacy_failed"`
 	BilledQueriedBytesPerRow float64 `json:"billed_queried_bytes_per_row,omitempty"`
 }
 

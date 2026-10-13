@@ -209,6 +209,12 @@ export interface UdfBackfillStatus {
   queried_bytes: number;
   returned_bytes: number;
   rows_done: number;
+  held_pending: number;
+  held_processing: number;
+  held_failed: number;
+  legacy_pending: number;
+  legacy_processing: number;
+  legacy_failed: number;
   billed_queried_bytes_per_row?: number | null;
 }
 

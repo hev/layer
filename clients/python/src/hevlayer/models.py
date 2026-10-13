@@ -180,6 +180,12 @@ class UdfBackfillStatus(BaseModel):
     queried_bytes: int
     returned_bytes: int
     rows_done: int
+    held_pending: int
+    held_processing: int
+    held_failed: int
+    legacy_pending: int
+    legacy_processing: int
+    legacy_failed: int
     billed_queried_bytes_per_row: float | None = None
 
 class UdfQueryBudget(BaseModel):
