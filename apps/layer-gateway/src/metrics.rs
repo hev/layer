@@ -3222,11 +3222,21 @@ impl UdfStore for MetricsUdfStore {
         inputs: &[(String, String)],
         eligible: &[String],
         rows_scanned: u64,
+        checkpoint: &crate::udf::UdfDiscoveryCheckpoint,
+        cursor: Option<&str>,
     ) -> Result<u64, UdfStoreError> {
         let start = Instant::now();
         let result = self
             .inner
-            .backfill_enqueue_page(lease, namespace, inputs, eligible, rows_scanned)
+            .backfill_enqueue_page(
+                lease,
+                namespace,
+                inputs,
+                eligible,
+                rows_scanned,
+                checkpoint,
+                cursor,
+            )
             .await;
         self.metrics.observe_pg_query(
             "backfill_enqueue_page",
