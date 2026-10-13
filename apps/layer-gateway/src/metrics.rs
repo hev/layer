@@ -3225,6 +3225,41 @@ impl UdfStore for MetricsUdfStore {
             .backfill_siblings(udf_id, version, namespace, parent_id)
             .await
     }
+    async fn backfill_store_groups(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        namespace: &str,
+        parents: &[String],
+        rows: &[crate::udf::UdfBackfillRow],
+    ) -> Result<(), UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .backfill_store_groups(lease, namespace, parents, rows)
+            .await;
+        self.metrics.observe_pg_query(
+            "backfill_store_groups",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
+    async fn backfill_group(
+        &self,
+        udf_id: &str,
+        version: &str,
+        namespace: &str,
+        parent_id: &str,
+    ) -> Result<Option<Vec<crate::udf::UdfBackfillRow>>, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .backfill_group(udf_id, version, namespace, parent_id)
+            .await;
+        self.metrics
+            .observe_pg_query("backfill_group", udf_pg_status(&result), elapsed(start));
+        result
+    }
     async fn backfill_status(
         &self,
         udf_id: &str,

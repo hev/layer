@@ -207,6 +207,7 @@ export interface UdfBackfillStatus {
   rows_scanned: number;
   queries: number;
   metadata_requests: number;
+  group_queries: number;
   queried_bytes: number;
   returned_bytes: number;
   rows_done: number;

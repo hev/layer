@@ -178,6 +178,7 @@ class UdfBackfillStatus(BaseModel):
     rows_scanned: int
     queries: int
     metadata_requests: int
+    group_queries: int
     queried_bytes: int
     returned_bytes: int
     rows_done: int

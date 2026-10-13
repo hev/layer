@@ -3593,6 +3593,7 @@ pub(crate) fn parse_metadata_body(body: Value) -> NamespaceMeta {
 pub struct MockTurbopufferClient {
     metadata_requests: AtomicUsize,
     fetch_many_requests: AtomicUsize,
+    fetch_requests: AtomicUsize,
     docs: tokio::sync::RwLock<HashMap<String, HashMap<String, DocumentResponse>>>,
     /// Per-namespace per-id vector, populated by `upsert`. `fetch_vector`
     /// reads here. Stored separately from `docs` because `DocumentResponse`
@@ -3636,6 +3637,7 @@ pub struct MockTurbopufferClient {
     native_wire_override: std::sync::atomic::AtomicBool,
     missing_include_attributes: tokio::sync::RwLock<HashMap<String, HashSet<String>>>,
     scan_page_delay: tokio::sync::RwLock<Option<Duration>>,
+    scan_cursors: tokio::sync::RwLock<Vec<Option<String>>>,
     scan_page_active: AtomicUsize,
     scan_page_max_active: AtomicUsize,
     ranked_query_delay: tokio::sync::RwLock<Option<Duration>>,
@@ -3696,6 +3698,7 @@ impl MockTurbopufferClient {
         Self {
             metadata_requests: AtomicUsize::new(0),
             fetch_many_requests: AtomicUsize::new(0),
+            fetch_requests: AtomicUsize::new(0),
             docs: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
             status: tokio::sync::RwLock::new(HashMap::new()),
@@ -3717,6 +3720,7 @@ impl MockTurbopufferClient {
             native_wire_override: std::sync::atomic::AtomicBool::new(false),
             missing_include_attributes: tokio::sync::RwLock::new(HashMap::new()),
             scan_page_delay: tokio::sync::RwLock::new(None),
+            scan_cursors: tokio::sync::RwLock::new(Vec::new()),
             scan_page_active: AtomicUsize::new(0),
             scan_page_max_active: AtomicUsize::new(0),
             ranked_query_delay: tokio::sync::RwLock::new(None),
@@ -3769,6 +3773,10 @@ impl MockTurbopufferClient {
     pub fn fetch_many_request_count(&self) -> usize {
         self.fetch_many_requests.load(AtomicOrdering::SeqCst)
     }
+    /// Single-row `fetch` calls.
+    pub fn fetch_request_count(&self) -> usize {
+        self.fetch_requests.load(AtomicOrdering::SeqCst)
+    }
     pub fn metadata_request_count(&self) -> usize {
         self.metadata_requests.load(AtomicOrdering::SeqCst)
     }
@@ -3794,6 +3802,11 @@ impl MockTurbopufferClient {
 
     pub async fn scan_filters(&self) -> Vec<Option<Value>> {
         self.scan_filters.read().await.clone()
+    }
+
+    /// The cursor each `scan_page` call started from, in call order.
+    pub async fn scan_cursors(&self) -> Vec<Option<String>> {
+        self.scan_cursors.read().await.clone()
     }
 
     pub async fn scan_include_attributes(&self) -> Vec<Option<Vec<String>>> {
@@ -4466,6 +4479,7 @@ impl TurbopufferClient for MockTurbopufferClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.fetch_requests.fetch_add(1, AtomicOrdering::SeqCst);
         let store = self.docs.read().await;
         Ok(store.get(namespace).and_then(|ns| ns.get(id)).cloned())
     }
@@ -4508,6 +4522,10 @@ impl TurbopufferClient for MockTurbopufferClient {
     ) -> Result<DocumentPage, TurbopufferError> {
         let _guard = enter_counter(&self.scan_page_active, &self.scan_page_max_active);
         reserve_provider_query(namespace, 1).await?;
+        self.scan_cursors
+            .write()
+            .await
+            .push(cursor.map(str::to_string));
         if let Some(delay) = *self.scan_page_delay.read().await {
             tokio::time::sleep(delay).await;
         }
