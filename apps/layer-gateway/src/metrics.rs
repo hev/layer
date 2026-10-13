@@ -3215,6 +3215,26 @@ impl UdfStore for MetricsUdfStore {
             .backfill_record_usage(udf_id, version, usage)
             .await
     }
+    async fn backfill_enqueue_page(
+        &self,
+        lease: &crate::udf::UdfDiscoveryLease,
+        namespace: &str,
+        inputs: &[(String, String)],
+        eligible: &[String],
+        rows_scanned: u64,
+    ) -> Result<u64, UdfStoreError> {
+        let start = Instant::now();
+        let result = self
+            .inner
+            .backfill_enqueue_page(lease, namespace, inputs, eligible, rows_scanned)
+            .await;
+        self.metrics.observe_pg_query(
+            "backfill_enqueue_page",
+            udf_pg_status(&result),
+            elapsed(start),
+        );
+        result
+    }
     async fn backfill_rows(
         &self,
         udf_id: &str,
