@@ -110,6 +110,16 @@ impl BillingCaller {
             snapshot: false,
         }
     }
+    /// A Function worker's own gateway calls (blob and row reads, claims),
+    /// labelled from its self-declared `x-hevlayer-function` header so they
+    /// separate from other traffic on a shared key. Label only: grants nothing.
+    pub fn function_worker(name: &str) -> Self {
+        Self {
+            kind: "function_worker",
+            name: name.into(),
+            snapshot: false,
+        }
+    }
     pub fn snapshot() -> Self {
         Self {
             kind: "system",

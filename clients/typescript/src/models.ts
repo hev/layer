@@ -206,6 +206,7 @@ export interface UdfBackfillStatus {
   pages: number;
   rows_scanned: number;
   queries: number;
+  metadata_requests: number;
   queried_bytes: number;
   returned_bytes: number;
   rows_done: number;
@@ -380,6 +381,7 @@ export interface UdfClaimedItem {
   prepared_receipt?: UdfPreparedReceipt;
   input_revision?: number;
   input: Record<string, unknown>;
+  input_snapshot?: boolean;
   pages?: UdfClaimedPage[];
 }
 

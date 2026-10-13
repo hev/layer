@@ -48,6 +48,21 @@ pub fn scope<F: std::future::Future>(
 ) -> impl std::future::Future<Output = F::Output> {
     OBSERVER.scope(observer, Box::pin(work))
 }
+/// Like [`scope`], but the enclosing observer still sees every event: a nested
+/// counter must not hide receipts from an outer evidence scope.
+pub fn scope_composed<F: std::future::Future>(
+    observer: ReadReceiptObserver,
+    work: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let composed: ReadReceiptObserver = match OBSERVER.try_with(Clone::clone) {
+        Ok(parent) => Arc::new(move |event: ReadReceipt| {
+            parent(event.clone());
+            observer(event);
+        }),
+        Err(_) => observer,
+    };
+    OBSERVER.scope(composed, Box::pin(work))
+}
 pub(super) struct Pending {
     observer: Option<ReadReceiptObserver>,
     event: ReadReceipt,

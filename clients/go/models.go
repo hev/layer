@@ -172,6 +172,7 @@ type UdfBackfillStatus struct {
 	Pages int64 `json:"pages"`
 	RowsScanned int64 `json:"rows_scanned"`
 	Queries int64 `json:"queries"`
+	MetadataRequests int64 `json:"metadata_requests"`
 	QueriedBytes int64 `json:"queried_bytes"`
 	ReturnedBytes int64 `json:"returned_bytes"`
 	RowsDone int64 `json:"rows_done"`
@@ -329,6 +330,7 @@ type UdfClaimedItem struct {
 	PreparedReceipt UdfPreparedReceipt `json:"prepared_receipt,omitempty"`
 	InputRevision int64 `json:"input_revision,omitempty"`
 	Input map[string]interface{} `json:"input"`
+	InputSnapshot bool `json:"input_snapshot,omitempty"`
 	Pages []UdfClaimedPage `json:"pages,omitempty"`
 }
 

@@ -1415,6 +1415,10 @@ pub struct UdfClaimedItem {
     pub namespace: String,
     pub id: String,
     pub input: HashMap<String, Value>,
+    /// True when `input` comes from a backfill's bulk scan: it is the row as
+    /// scanned, so a worker must not re-read the row from the store.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_snapshot: bool,
     /// Every page of the document when the Function groups by parent id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<UdfClaimedPage>,

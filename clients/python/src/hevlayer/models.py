@@ -177,6 +177,7 @@ class UdfBackfillStatus(BaseModel):
     pages: int
     rows_scanned: int
     queries: int
+    metadata_requests: int
     queried_bytes: int
     returned_bytes: int
     rows_done: int
@@ -334,6 +335,7 @@ class UdfClaimedItem(BaseModel):
     prepared_receipt: UdfPreparedReceipt | None = None
     input_revision: int | None = None
     input: dict[str, Any]
+    input_snapshot: bool | None = False
     pages: list[UdfClaimedPage] | None = None
 
 class UdfClaimedPage(BaseModel):
