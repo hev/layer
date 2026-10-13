@@ -62,6 +62,28 @@ fn encode_blob_value(bytes: &[u8]) -> Value {
     Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// One page of a namespace's blob set, read with a single store query.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct BlobPage {
+    /// `(sha256, bytes)` in ascending sha256 order.
+    pub blobs: Vec<(String, Vec<u8>)>,
+    /// The last sha256 on a full page; `None` once the set is exhausted.
+    pub next_cursor: Option<String>,
+    pub billable_bytes_queried: u64,
+    pub billable_bytes_returned: u64,
+}
+
+/// A billed byte count from a query response's `billing` object, under
+/// either of the names turbopuffer reports.
+fn billed_bytes(response: &Value, name: &str) -> u64 {
+    let billing = response.get("billing");
+    billing
+        .and_then(|b| b.get(format!("billable_logical_bytes_{name}")))
+        .or_else(|| billing.and_then(|b| b.get(format!("billable_bytes_{name}"))))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 fn turbopuffer_coverage(
     feature: crate::capabilities::WireFeature,
 ) -> crate::capabilities::Coverage {
@@ -364,6 +386,18 @@ pub trait TurbopufferClient: Send + Sync {
         _namespace: &str,
         _sha256: &str,
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        Err(blob_rejection(self.capabilities().kind))
+    }
+
+    /// One page of the blob set for `namespace`, sha256 ascending after
+    /// `after`. One store query per page, however many blobs it returns; an
+    /// empty page when the store never held a blob for `namespace`.
+    async fn scan_blobs(
+        &self,
+        _namespace: &str,
+        _after: Option<&str>,
+        _page_size: u32,
+    ) -> Result<BlobPage, TurbopufferError> {
         Err(blob_rejection(self.capabilities().kind))
     }
 
@@ -829,6 +863,17 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .get_blob(namespace, sha256)
+            .await
+    }
+
+    async fn scan_blobs(
+        &self,
+        namespace: &str,
+        after: Option<&str>,
+        page_size: u32,
+    ) -> Result<BlobPage, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .scan_blobs(namespace, after, page_size)
             .await
     }
 
@@ -2437,6 +2482,68 @@ mod strong_scan_contract_tests {
     }
 
     #[tokio::test]
+    async fn scan_blobs_pages_the_blob_set_in_one_query_and_reports_billing() {
+        use axum::{routing::post, Json, Router};
+        use base64::Engine as _;
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let seen = bodies.clone();
+        let app = Router::new().route(
+            "/v2/namespaces/docs__hevlayer_blobs/query",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    let data = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+                    Json(serde_json::json!({
+                        "rows": [{"id": "aa", "data": data(b"one")}, {"id": "bb", "data": data(b"two")}],
+                        "billing": {"billable_logical_bytes_queried": 4096, "billable_logical_bytes_returned": 6}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = HttpTurbopufferClient::new("fixture", &format!("http://{address}"));
+
+        let page = client.scan_blobs("docs", Some("a0"), 2).await.unwrap();
+        assert_eq!(
+            page,
+            BlobPage {
+                blobs: vec![
+                    ("aa".into(), b"one".to_vec()),
+                    ("bb".into(), b"two".to_vec())
+                ],
+                next_cursor: Some("bb".into()),
+                billable_bytes_queried: 4096,
+                billable_bytes_returned: 6,
+            }
+        );
+        // A short page is the last one.
+        assert_eq!(
+            client
+                .scan_blobs("docs", None, 3)
+                .await
+                .unwrap()
+                .next_cursor,
+            None
+        );
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(
+            bodies[0],
+            serde_json::json!({
+                "rank_by": ["id", "asc"],
+                "top_k": 2,
+                "include_attributes": ["data"],
+                "filters": ["id", "Gt", "a0"],
+            })
+        );
+        assert!(bodies[1].get("filters").is_none());
+        assert!(client.scan_blobs("docs", None, 10_001).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn nested_scan_billing_preserves_parent_and_consumer_receipts() {
         let parent = Arc::new(AtomicUsize::new(0));
         let child = Arc::new(AtomicUsize::new(0));
@@ -2669,6 +2776,69 @@ impl TurbopufferClient for HttpTurbopufferClient {
             })
             .map(|row| decode_blob_value(row.get(BLOB_DATA_ATTRIBUTE).unwrap_or(&Value::Null)))
             .transpose()
+    }
+
+    async fn scan_blobs(
+        &self,
+        namespace: &str,
+        after: Option<&str>,
+        page_size: u32,
+    ) -> Result<BlobPage, TurbopufferError> {
+        if !(1..=10_000).contains(&page_size) {
+            return Err(TurbopufferError::Other(
+                "blob scan page size must be 1..=10000".into(),
+            ));
+        }
+        let mut body = serde_json::json!({
+            "rank_by": ["id", "asc"],
+            "top_k": page_size,
+            "include_attributes": [BLOB_DATA_ATTRIBUTE],
+        });
+        if let Some(after) = after {
+            body["filters"] = serde_json::json!(["id", "Gt", after]);
+        }
+        let blob_set = blob_set_namespace(namespace);
+        reserve_provider_query(namespace, 1).await?;
+        let url = format!("{}/v2/namespaces/{}/query", self.base_url, blob_set);
+        let request = self.authorize(self.client.post(&url).json(&body))?;
+        let mut receipt = receipts::Pending::new(&blob_set, receipts::ReadKind::Scan);
+        let resp = receipt.send(request).await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(BlobPage::default());
+        }
+        if !resp.status().is_success() {
+            return Err(TurbopufferError::from_response(resp).await);
+        }
+        let resp_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| TurbopufferError::Other(e.to_string()))?;
+        receipt.billing(&resp_body);
+        receipt.finished_json_success();
+        observe_projected_billing(&blob_set, &resp_body);
+        let blobs = resp_body
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|row| {
+                let sha256 = row.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    TurbopufferError::Other("blob row has no string id".to_string())
+                })?;
+                let bytes =
+                    decode_blob_value(row.get(BLOB_DATA_ATTRIBUTE).unwrap_or(&Value::Null))?;
+                Ok((sha256.to_string(), bytes))
+            })
+            .collect::<Result<Vec<_>, TurbopufferError>>()?;
+        Ok(BlobPage {
+            next_cursor: (blobs.len() == page_size as usize)
+                .then(|| blobs.last().map(|(sha256, _)| sha256.clone()))
+                .flatten(),
+            blobs,
+            billable_bytes_queried: billed_bytes(&resp_body, "queried"),
+            billable_bytes_returned: billed_bytes(&resp_body, "returned"),
+        })
     }
 
     async fn passthrough(
@@ -3593,6 +3763,8 @@ pub(crate) fn parse_metadata_body(body: Value) -> NamespaceMeta {
 pub struct MockTurbopufferClient {
     metadata_requests: AtomicUsize,
     fetch_many_requests: AtomicUsize,
+    /// Store queries against blob sets: `get_blob` reads and `scan_blobs` pages.
+    blob_queries: AtomicUsize,
     fetch_requests: AtomicUsize,
     docs: tokio::sync::RwLock<HashMap<String, HashMap<String, DocumentResponse>>>,
     /// Per-namespace per-id vector, populated by `upsert`. `fetch_vector`
@@ -3698,6 +3870,7 @@ impl MockTurbopufferClient {
         Self {
             metadata_requests: AtomicUsize::new(0),
             fetch_many_requests: AtomicUsize::new(0),
+            blob_queries: AtomicUsize::new(0),
             fetch_requests: AtomicUsize::new(0),
             docs: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
@@ -3768,6 +3941,11 @@ impl MockTurbopufferClient {
             .write()
             .await
             .insert(namespace.to_string(), body);
+    }
+
+    /// Store queries against blob sets so far (`get_blob` and `scan_blobs`).
+    pub fn blob_query_count(&self) -> usize {
+        self.blob_queries.load(AtomicOrdering::SeqCst)
     }
 
     pub fn fetch_many_request_count(&self) -> usize {
@@ -4028,6 +4206,7 @@ impl TurbopufferClient for MockTurbopufferClient {
         namespace: &str,
         sha256: &str,
     ) -> Result<Option<Vec<u8>>, TurbopufferError> {
+        self.blob_queries.fetch_add(1, AtomicOrdering::SeqCst);
         self.docs
             .read()
             .await
@@ -4041,6 +4220,50 @@ impl TurbopufferClient for MockTurbopufferClient {
                 )
             })
             .transpose()
+    }
+
+    /// Pages the blob set as the HTTP client does, one counted query per
+    /// page, reporting the `scan_billing` override when one is set.
+    async fn scan_blobs(
+        &self,
+        namespace: &str,
+        after: Option<&str>,
+        page_size: u32,
+    ) -> Result<BlobPage, TurbopufferError> {
+        self.blob_queries.fetch_add(1, AtomicOrdering::SeqCst);
+        let docs = self.docs.read().await;
+        let Some(blob_set) = docs.get(&blob_set_namespace(namespace)) else {
+            return Ok(BlobPage::default());
+        };
+        let mut ids: Vec<&String> = blob_set
+            .keys()
+            .filter(|id| after.is_none_or(|after| id.as_str() > after))
+            .collect();
+        ids.sort();
+        ids.truncate(page_size as usize);
+        let blobs = ids
+            .into_iter()
+            .map(|id| {
+                let value = blob_set[id]
+                    .attributes
+                    .get(BLOB_DATA_ATTRIBUTE)
+                    .unwrap_or(&Value::Null);
+                Ok((id.clone(), decode_blob_value(value)?))
+            })
+            .collect::<Result<Vec<_>, TurbopufferError>>()?;
+        let (queried, returned) = self
+            .scan_billing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_default();
+        Ok(BlobPage {
+            next_cursor: (blobs.len() == page_size as usize)
+                .then(|| blobs.last().map(|(sha256, _)| sha256.clone()))
+                .flatten(),
+            blobs,
+            billable_bytes_queried: queried,
+            billable_bytes_returned: returned,
+        })
     }
 
     async fn passthrough(

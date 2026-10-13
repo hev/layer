@@ -195,6 +195,9 @@ pub struct AppState {
     /// Blob routes are always mounted; the bytes live in the namespace's store
     /// or S3 (RFC 0123). Without the cache, reads go straight to that backend.
     pub blob_cache_enabled: bool,
+    /// Where blobs a native store could hold live instead: S3 or the store
+    /// (`LAYER_BLOB_STORAGE`, `Index.spec.blobs.storage`; LYR-313).
+    pub blob_placement: Arc<routes::blobs::BlobPlacement>,
     /// Whether managed-platform routes are mounted in this gateway composition.
     ///
     /// These surfaces are Pro in the open-core split: retained history/activity,
@@ -1045,6 +1048,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         .route(
             "/v1/namespaces/{namespace}/blobs/{sha256}",
             get(routes::blobs::get_blob),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/blobs/move_to_s3",
+            post(routes::blobs::move_blobs_to_s3),
         )
         .route(
             "/v1/namespaces/{namespace}/metadata",

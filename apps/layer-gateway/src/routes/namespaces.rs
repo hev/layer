@@ -262,6 +262,9 @@ pub(crate) async fn reset_namespace_layer_state(
         let mut keys = vec![
             crate::lineage::lineage_key(namespace),
             crate::routes::collapse::marker_key(namespace),
+            // A finished blob move under this name says nothing about a
+            // namespace that reuses it.
+            crate::routes::blobs::blob_move_state_key(namespace),
         ];
         #[cfg(feature = "pro")]
         keys.push(crate::field_stats::s3_key(namespace));
@@ -344,6 +347,7 @@ pub(crate) fn purge_in_memory_namespace_state(state: &AppState, namespace: &str)
     state.field_stats_coverage.remove(namespace);
     state.snapshot_inflight.remove(namespace);
     state.sharded_namespaces.remove(namespace);
+    state.blob_placement.forget_moved(namespace);
     state.namespace_list_cache.clear();
 }
 

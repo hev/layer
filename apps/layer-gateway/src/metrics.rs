@@ -2087,6 +2087,23 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         .await
     }
 
+    async fn scan_blobs(
+        &self,
+        namespace: &str,
+        after: Option<&str>,
+        page_size: u32,
+    ) -> Result<vectorstore_core::turbopuffer::BlobPage, TurbopufferError> {
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Scan, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.scan_blobs(namespace, after, page_size),
+        )
+        .await
+    }
+
     async fn embedding_profiles(&self, namespace: &str) -> Result<Option<Value>, TurbopufferError> {
         self.inner.embedding_profiles(namespace).await
     }

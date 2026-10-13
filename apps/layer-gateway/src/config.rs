@@ -18,6 +18,9 @@ pub struct Config {
     pub s3_bucket: Option<String>,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
+    /// `LAYER_BLOB_STORAGE`: `auto` (S3 for turbopuffer namespaces when S3 is
+    /// configured), `s3` or `store`.
+    pub blob_storage: crate::routes::blobs::BlobStoragePreference,
     /// Enables Kubernetes Index CR deletion when a namespace is hard-deleted.
     pub index_gc_enabled: bool,
     /// Enables gateway reads of Index CR policy such as snapshot facet fields.
@@ -193,6 +196,7 @@ impl Config {
             s3_bucket: env::var("S3_BUCKET").ok().and_then(trimmed_non_empty),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT").ok(),
+            blob_storage: blob_storage_preference(env::var("LAYER_BLOB_STORAGE").ok().as_deref()),
             index_gc_enabled: env::var("LAYER_INDEX_GC_ENABLED")
                 .ok()
                 .and_then(|s| s.parse::<bool>().ok())
@@ -546,6 +550,19 @@ fn default_telemetry_state_path() -> Option<PathBuf> {
         .ok()
         .and_then(trimmed_non_empty)
         .map(|home| PathBuf::from(home).join(".local/state/hevlayer/gateway-telemetry.json"))
+}
+
+fn blob_storage_preference(value: Option<&str>) -> crate::routes::blobs::BlobStoragePreference {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Default::default();
+    };
+    crate::routes::blobs::BlobStoragePreference::parse(value).unwrap_or_else(|| {
+        tracing::warn!(
+            value,
+            "LAYER_BLOB_STORAGE must be auto, s3 or store; using auto"
+        );
+        Default::default()
+    })
 }
 
 fn trimmed_non_empty(value: String) -> Option<String> {

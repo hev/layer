@@ -379,6 +379,9 @@ pub async fn run_with_options(options: ServerOptions) {
         snapshot_retention: Arc::new(RwLock::new(HashMap::new())),
         blob_reference_attributes: Arc::new(RwLock::new(HashMap::new())),
         blob_cache_enabled: false,
+        blob_placement: Arc::new(crate::routes::blobs::BlobPlacement::new(
+            config.blob_storage,
+        )),
         managed_platform_enabled: false,
         namespace_store_refs,
         embedding_profiles: Arc::new(RwLock::new(HashMap::new())),

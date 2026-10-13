@@ -1329,6 +1329,17 @@ spec:
                     items:
                       type: string
                     type: array
+                  storage:
+                    description: |-
+                      Where the gateway keeps this namespace's blobs: `s3`, or `store` for
+                      the store's native bytes. Unset or `auto` follows `LAYER_BLOB_STORAGE`.
+                    enum:
+                    - auto
+                    - s3
+                    - store
+                    - null
+                    nullable: true
+                    type: string
                 type: object
               cache:
                 nullable: true

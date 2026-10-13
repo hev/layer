@@ -45,6 +45,8 @@ pub struct IndexConfig {
     pub snapshot_interval_ms: HashMap<String, u64>,
     pub snapshot_retention: HashMap<String, Retention>,
     pub blob_reference_attributes: HashMap<String, Vec<String>>,
+    /// `Index.spec.blobs.storage`: S3 or the store, over `LAYER_BLOB_STORAGE`.
+    pub blob_storage: HashMap<String, crate::routes::blobs::BlobStoragePreference>,
     pub namespace_store_refs: HashMap<String, String>,
     pub embedding_profiles: HashMap<String, EmbeddingProfile>,
     pub display: HashMap<String, IndexDisplay>,
@@ -189,6 +191,7 @@ impl IndexConfigSource for StaticIndexConfigSource {
             snapshot_interval_ms: HashMap::new(),
             snapshot_retention: HashMap::new(),
             blob_reference_attributes: HashMap::new(),
+            blob_storage: HashMap::new(),
             namespace_store_refs: HashMap::new(),
             embedding_profiles: HashMap::new(),
             display: HashMap::new(),
@@ -229,6 +232,7 @@ pub async fn refresh_index_config_once(
     state.replace_snapshot_interval_ms(config.snapshot_interval_ms);
     state.replace_snapshot_retention(config.snapshot_retention);
     state.replace_blob_reference_attributes(config.blob_reference_attributes);
+    state.blob_placement.replace_overrides(config.blob_storage);
     state.replace_namespace_store_refs(config.namespace_store_refs);
     state.replace_embedding_profiles(config.embedding_profiles);
     state.replace_index_display(config.display);
