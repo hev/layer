@@ -950,6 +950,17 @@ impl McpHandler {
         headers: &HeaderMap,
         page: &mut [Value],
     ) -> Result<(), AppError> {
+        self.fill_selected_attributes(ns, headers, page, json!(true))
+            .await
+    }
+
+    async fn fill_selected_attributes(
+        &self,
+        ns: &McpNamespace,
+        headers: &HeaderMap,
+        page: &mut [Value],
+        attributes: Value,
+    ) -> Result<(), AppError> {
         let row_of = |item: &Value| -> Value {
             if ns.collapse.is_some() {
                 item["best"].clone()
@@ -965,7 +976,7 @@ impl McpHandler {
             .query_body(
                 ns,
                 headers,
-                json!({"rank_by":["id","asc"],"top_k":ids.len(),"include_attributes":true,
+                json!({"rank_by":["id","asc"],"top_k":ids.len(),"include_attributes":attributes,
                        "filters":["id","In",ids]}),
             )
             .await?;
@@ -1021,7 +1032,12 @@ impl McpHandler {
         };
         let filters = schema.filters(arguments.remove("filters"))?;
         let rank_by = schema.rank_by(&query)?;
-        let fingerprint = page_fingerprint(ns, &rank_by, filters.as_ref());
+        let pagination_order = if schema.labels.is_empty() {
+            rank_by.clone()
+        } else {
+            json!({"rank":rank_by,"labels":schema.labels,"label_window":LABEL_WINDOW,"label_policy":1})
+        };
+        let fingerprint = page_fingerprint(ns, &pagination_order, filters.as_ref());
         let (as_of, offset, known_total) = match arguments.remove("cursor") {
             None => (crate::consistency::now_ms(), 0, None),
             Some(Value::String(cursor)) if !cursor.is_empty() => {
@@ -1065,11 +1081,24 @@ impl McpHandler {
         } else {
             "rows"
         };
-        let ranked = body
+        let mut ranked = body
             .get_mut(key)
             .and_then(Value::as_array_mut)
             .map(std::mem::take)
             .unwrap_or_default();
+        // A page body may be image-only while its title names the drawing.
+        // Read labels only for a fixed bounded prefix, on every cursor page.
+        if !schema.labels.is_empty() {
+            let count = ranked.len().min(LABEL_WINDOW);
+            self.fill_selected_attributes(ns, &headers, &mut ranked[..count], json!(schema.labels))
+                .await?;
+            rank_mcp_labels(
+                &mut ranked[..count],
+                &schema.labels,
+                &query,
+                ns.collapse.is_some(),
+            );
+        }
         let (total, exact) = match known_total {
             Some(total) => (total.count, total.exact),
             None => (ranked.len() as u64, (ranked.len() as u64) < MAX_WINDOW),
@@ -1115,6 +1144,37 @@ impl McpHandler {
         result.content = vec![ContentBlock::text(text)];
         Ok(result)
     }
+}
+
+/// Promote strong title matches within the fixed candidate prefix. Stable ties
+/// keep the store's ranking; title-only matches never introduce new documents.
+fn rank_mcp_labels(rows: &mut [Value], labels: &[String], query: &str, collapsed: bool) {
+    let words = crate::routes::hybrid_text::tokenize_query_input(query).tokens;
+    rows.sort_by_cached_key(|item| {
+        let row = if collapsed { &item["best"] } else { item };
+        let title = labels
+            .iter()
+            .filter_map(|label| row[label].as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let title: String = title
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect();
+        let terms = crate::routes::hybrid_text::tokenize_query_input(&title).tokens;
+        let mut matched = vec![false; words.len()];
+        for (i, word) in words.iter().enumerate() {
+            if terms.contains(word) {
+                matched[i] = true;
+            }
+            if i + 1 < words.len() && terms.contains(&format!("{}{}", word, words[i + 1])) {
+                matched[i] = true;
+                matched[i + 1] = true;
+            }
+        }
+        let score = matched.iter().filter(|v| **v).count();
+        std::cmp::Reverse(if score >= 3 { score } else { 0 })
+    });
 }
 
 /// One requested aggregate: its result name and what it computes.
@@ -1454,6 +1514,7 @@ const AGGREGATE_COST: &str = "The store bills each query at the namespace's size
 
 /// Deepest rank a cursor can reach, and the most matches counted.
 const MAX_WINDOW: u64 = 1000;
+const LABEL_WINDOW: usize = 50;
 
 #[derive(serde::Serialize, Deserialize)]
 struct PageTotal {
@@ -1732,6 +1793,7 @@ struct NamespaceSchema {
     text: Option<String>,
     fuzzy: bool,
     embed: Option<String>,
+    labels: Vec<String>,
     /// Rows carry the gateway's write stamp, so a page walk can pin a snapshot.
     stamped: bool,
 }
@@ -1834,6 +1896,17 @@ impl NamespaceSchema {
             fuzzy,
             text,
             embed: choose(embed),
+            labels: ["title", "name", "filename"]
+                .into_iter()
+                .filter(|name| {
+                    attrs
+                        .get(*name)
+                        .and_then(|v| v.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("string")
+                })
+                .map(str::to_owned)
+                .collect(),
             stamped: attrs.contains_key(crate::clients::turbopuffer::UPSERTED_AT_ATTR),
         })
     }
@@ -2376,14 +2449,47 @@ mod tests {
     }
 
     #[test]
+    fn title_matching_keeps_compound_words_and_stable_ties() {
+        let mut rows = vec![
+            json!({"id":"notes","name":"2017-12-07 REFERENCE STRUCTURAL NOTES.pdf"}),
+            json!({"id":"finish","name":"Cedar Hall Finish Presentation.pdf"}),
+            json!({"id":"revised","name":"21.11.09_Cedar Hall_Revised Floorplan.pdf"}),
+            json!({"id":"same-score","name":"Cedar Hall revised floorplan copy.pdf"}),
+        ];
+        rank_mcp_labels(
+            &mut rows,
+            &["name".into()],
+            "Cedar Hall office revised floor plan drawings",
+            false,
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["revised", "same-score", "notes", "finish"]
+        );
+        let mut groups = vec![
+            json!({"best":{"id":"missing"}}),
+            json!({"best":{"id":"hit","name":"Cedar Hall revised floorplan"}}),
+        ];
+        rank_mcp_labels(
+            &mut groups,
+            &["name".into()],
+            "Cedar Hall revised floor plan",
+            true,
+        );
+        assert_eq!(groups[0]["best"]["id"], "hit");
+    }
+
+    #[test]
     fn long_mcp_questions_keep_lexical_job_names() {
         let schema = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"body":{"type":"string","full_text_search":true,"embed":{"model":"test"}}}})).unwrap();
-        let query = "Peaker Remodel prime change order exterior and closet";
+        let query = "Cedar Remodel prime change order exterior and closet";
         let rank = schema.rank_by(query).unwrap();
         assert_eq!(rank[3]["route"], "fused");
         assert_eq!(rank[3]["fuzziness"], 0);
         assert_eq!(rank[3]["vector"], json!(["Embed", query, {"field":"body"}]));
-        assert!(schema.rank_by("Peaker change order").unwrap()[3]
+        assert!(schema.rank_by("Cedar change order").unwrap()[3]
             .get("route")
             .is_none());
     }
