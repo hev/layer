@@ -1035,7 +1035,7 @@ impl McpHandler {
         let pagination_order = if schema.labels.is_empty() {
             rank_by.clone()
         } else {
-            json!({"rank":rank_by,"labels":schema.labels,"label_window":LABEL_WINDOW,"label_policy":1})
+            json!({"rank":rank_by,"labels":schema.labels,"label_window":LABEL_WINDOW,"label_policy":2})
         };
         let fingerprint = page_fingerprint(ns, &pagination_order, filters.as_ref());
         let (as_of, offset, known_total) = match arguments.remove("cursor") {
@@ -1146,12 +1146,19 @@ impl McpHandler {
     }
 }
 
-/// Promote strong title matches within the fixed candidate prefix. Stable ties
-/// keep the store's ranking; title-only matches never introduce new documents.
+/// Add bounded title evidence to the store's relevance. Stable ties keep
+/// the original order; a label match cannot replace the retrieval signal.
 fn rank_mcp_labels(rows: &mut [Value], labels: &[String], query: &str, collapsed: bool) {
     let words = crate::routes::hybrid_text::tokenize_query_input(query).tokens;
-    rows.sort_by_cached_key(|item| {
-        let row = if collapsed { &item["best"] } else { item };
+    let strongest = rows
+        .iter()
+        .map(|item| {
+            let row = if collapsed { &item["best"] } else { item };
+            mcp_store_relevance(row)
+        })
+        .fold(0.0, f64::max);
+    for item in rows.iter_mut() {
+        let row = if collapsed { &mut item["best"] } else { item };
         let title = labels
             .iter()
             .filter_map(|label| row[label].as_str())
@@ -1172,9 +1179,31 @@ fn rank_mcp_labels(rows: &mut [Value], labels: &[String], query: &str, collapsed
                 matched[i + 1] = true;
             }
         }
-        let score = matched.iter().filter(|v| **v).count();
-        std::cmp::Reverse(if score >= 3 { score } else { 0 })
+        let coverage = matched.iter().filter(|v| **v).count() as f64 / words.len().max(1) as f64;
+        let relevance = if strongest > 0.0 {
+            mcp_store_relevance(row) / strongest
+        } else {
+            0.0
+        };
+        row["$mcp_score"] = json!(relevance + 0.25 * coverage);
+    }
+    rows.sort_by(|a, b| {
+        let score = |item: &Value| {
+            let row = if collapsed { &item["best"] } else { item };
+            row["$mcp_score"].as_f64().unwrap_or_default()
+        };
+        score(b).total_cmp(&score(a))
     });
+}
+
+fn mcp_store_relevance(row: &Value) -> f64 {
+    if let Some(score) = row["$score"].as_f64().filter(|v| v.is_finite()) {
+        score.max(0.0)
+    } else if let Some(distance) = row["$dist"].as_f64().filter(|v| v.is_finite()) {
+        1.0 / (1.0 + distance.max(0.0))
+    } else {
+        0.0
+    }
 }
 
 /// One requested aggregate: its result name and what it computes.
@@ -2451,10 +2480,10 @@ mod tests {
     #[test]
     fn title_matching_keeps_compound_words_and_stable_ties() {
         let mut rows = vec![
-            json!({"id":"notes","name":"2017-12-07 REFERENCE STRUCTURAL NOTES.pdf"}),
-            json!({"id":"finish","name":"Cedar Hall Finish Presentation.pdf"}),
-            json!({"id":"revised","name":"21.11.09_Cedar Hall_Revised Floorplan.pdf"}),
-            json!({"id":"same-score","name":"Cedar Hall revised floorplan copy.pdf"}),
+            json!({"id":"notes","name":"2017-12-07 REFERENCE STRUCTURAL NOTES.pdf","$score":0.0479}),
+            json!({"id":"finish","name":"Cedar Hall Finish Presentation.pdf","$score":0.043}),
+            json!({"id":"revised","name":"21.11.09_Cedar Hall_Revised Floorplan.pdf","$score":0.04455}),
+            json!({"id":"same-score","name":"Cedar Hall revised floorplan copy.pdf","$score":0.04455}),
         ];
         rank_mcp_labels(
             &mut rows,
@@ -2479,6 +2508,32 @@ mod tests {
             true,
         );
         assert_eq!(groups[0]["best"]["id"], "hit");
+    }
+
+    #[test]
+    fn title_evidence_preserves_a_strong_specific_retrieval_match() {
+        let mut rows = vec![
+            json!({"id":"exact","name":"Prime Change_02.pdf","$score":0.0984}),
+            json!({"id":"generic","name":"Prime Change_Exterior Upgrades.pdf","$score":0.0744}),
+            json!({"id":"other-work","name":"Cedar Remodel Sub CO1 Sawcutting and Patchback Change Order.pdf","$score":0.0528}),
+        ];
+        rank_mcp_labels(
+            &mut rows,
+            &["name".into()],
+            "Cedar Remodel prime change order exterior and closet",
+            false,
+        );
+        assert_eq!(rows[0]["id"], "exact");
+        assert_eq!(rows[0]["$score"], 0.0984);
+        assert!(rows
+            .windows(2)
+            .all(|w| w[0]["$mcp_score"].as_f64().unwrap() >= w[1]["$mcp_score"].as_f64().unwrap()));
+        let mut images = vec![
+            json!({"id":"near","$dist":0.1}),
+            json!({"id":"far","$dist":0.9}),
+        ];
+        rank_mcp_labels(&mut images, &["name".into()], "ceiling drawing", false);
+        assert_eq!(images[0]["id"], "near");
     }
 
     #[test]
