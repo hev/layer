@@ -447,6 +447,8 @@ impl ServerHandler for McpHandler {
             }
             return Ok(ListToolsResult {
                 tools,
+                ttl_ms: Some(0),
+                cache_scope: Some(CacheScope::Private),
                 ..Default::default()
             });
         }
@@ -469,6 +471,8 @@ impl ServerHandler for McpHandler {
         }
         Ok(ListToolsResult {
             tools,
+            ttl_ms: Some(0),
+            cache_scope: Some(CacheScope::Private),
             ..Default::default()
         })
     }
@@ -1602,7 +1606,18 @@ impl McpHandler {
         }
         let attrs = &merged;
         self.check_pin(ns, &id, attrs)?;
-        let bound = original::bind(&ns.name, attrs)?;
+        let source = ns
+            .link
+            .as_deref()
+            .and_then(|field| attrs.get(field))
+            .and_then(Value::as_str);
+        let with_source = |error| match (error, source) {
+            (AppError::NotFound(message), Some(url)) => {
+                AppError::NotFound(format!("{message}\nSource link: {url}"))
+            }
+            (error, _) => error,
+        };
+        let bound = original::bind(&ns.name, attrs).map_err(with_source)?;
         let is_pdf = bound.mime == "application/pdf";
         let hard_limit = if pages.is_some() {
             10 * 1024 * 1024
@@ -1619,16 +1634,13 @@ impl McpHandler {
         {
             return Err(invalid("this record's pages come from a converted copy; page images of the original are not available"));
         }
-        let file = original::load(&self.state, &ns.name, &bound, hard_limit).await?;
+        let file = original::load(&self.state, &ns.name, &bound, hard_limit)
+            .await
+            .map_err(with_source)?;
         let name = attrs
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or("original.pdf");
-        let source = ns
-            .link
-            .as_deref()
-            .and_then(|field| attrs.get(field))
-            .and_then(Value::as_str);
         let page_number = attrs.get("page").and_then(Value::as_u64);
         let mut text = format!(
             "Original file `{name}` ({} bytes, sha256 {})",
