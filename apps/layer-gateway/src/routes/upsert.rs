@@ -87,6 +87,33 @@ struct AffectedIds {
     deleted: HashSet<String>,
 }
 
+/// The attributes a patch-only write sets: a body of `patch_columns` and/or
+/// `patch_rows` (plus `distance_metric`) and nothing else. Any other write
+/// returns `None`, and the write path observes as for a full write.
+#[cfg_attr(not(feature = "pro"), allow(dead_code))]
+fn patch_only_attributes(body: &Value) -> Option<HashSet<String>> {
+    let object = body.as_object()?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "patch_columns" | "patch_rows" | "distance_metric"
+        )
+    }) {
+        return None;
+    }
+    let mut attributes = HashSet::new();
+    if let Some(columns) = object.get("patch_columns") {
+        attributes.extend(columns.as_object()?.keys().cloned());
+    }
+    if let Some(rows) = object.get("patch_rows") {
+        for row in rows.as_array()? {
+            attributes.extend(row.as_object()?.keys().cloned());
+        }
+    }
+    attributes.remove("id");
+    (!attributes.is_empty()).then_some(attributes)
+}
+
 fn named_write_ids(body: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     for key in ["upsert_rows", "patch_rows"] {
@@ -281,12 +308,24 @@ pub(crate) async fn write_namespace(
         .await;
     }
     let source_ids = named_write_ids(&body);
+    // A patch tells the write path which attributes it sets, so Functions it
+    // cannot concern make it read nothing. Staged pipeline writes may expand.
+    #[cfg(feature = "pro")]
+    let patch_attributes = (!staged_rows)
+        .then(|| patch_only_attributes(&body))
+        .flatten();
     let _function_guard = if let Some(trigger) = state.write_trigger.as_ref() {
-        Some(
-            trigger
-                .prepare_write(Arc::clone(&state), &namespace, &source_ids)
-                .await?,
+        #[cfg(feature = "pro")]
+        let guard = crate::routes::udf::scope_write_patch(
+            patch_attributes.clone(),
+            trigger.prepare_write(Arc::clone(&state), &namespace, &source_ids),
         )
+        .await?;
+        #[cfg(not(feature = "pro"))]
+        let guard = trigger
+            .prepare_write(Arc::clone(&state), &namespace, &source_ids)
+            .await?;
+        Some(guard)
     } else {
         None
     };
@@ -668,7 +707,11 @@ pub(crate) async fn write_namespace(
     });
     #[cfg(feature = "pro")]
     {
-        crate::routes::udf::budget_source_write(&state, &namespace, &source_ids, work).await?
+        crate::routes::udf::scope_write_patch(
+            patch_attributes,
+            crate::routes::udf::budget_source_write(&state, &namespace, &source_ids, work),
+        )
+        .await?
     }
     #[cfg(not(feature = "pro"))]
     {
