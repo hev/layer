@@ -69,6 +69,11 @@ pub(crate) fn stage<F: std::future::Future>(
 ) -> impl std::future::Future<Output = F::Output> {
     STAGE.scope(stage, Box::pin(work))
 }
+/// The receipt stage of the current Function work (`lookup`, `claim`,
+/// `write_trigger`, ...), or `other`.
+pub(crate) fn current_stage() -> &'static str {
+    STAGE.try_with(|stage| *stage).unwrap_or("other")
+}
 pub(crate) fn with_owners<'a, F: std::future::Future + 'a>(
     owners: &'a [(UdfResource, Vec<UdfItemKey>)],
     work: F,

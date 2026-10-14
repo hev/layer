@@ -3766,6 +3766,7 @@ pub struct MockTurbopufferClient {
     /// Store queries against blob sets: `get_blob` reads and `scan_blobs` pages.
     blob_queries: AtomicUsize,
     fetch_requests: AtomicUsize,
+    reserve_fetches: std::sync::atomic::AtomicBool,
     docs: tokio::sync::RwLock<HashMap<String, HashMap<String, DocumentResponse>>>,
     /// Per-namespace per-id vector, populated by `upsert`. `fetch_vector`
     /// reads here. Stored separately from `docs` because `DocumentResponse`
@@ -3872,6 +3873,7 @@ impl MockTurbopufferClient {
             fetch_many_requests: AtomicUsize::new(0),
             blob_queries: AtomicUsize::new(0),
             fetch_requests: AtomicUsize::new(0),
+            reserve_fetches: std::sync::atomic::AtomicBool::new(false),
             docs: tokio::sync::RwLock::new(HashMap::new()),
             vectors: tokio::sync::RwLock::new(HashMap::new()),
             status: tokio::sync::RwLock::new(HashMap::new()),
@@ -3954,6 +3956,11 @@ impl MockTurbopufferClient {
     /// Single-row `fetch` calls.
     pub fn fetch_request_count(&self) -> usize {
         self.fetch_requests.load(AtomicOrdering::SeqCst)
+    }
+    /// Make `fetch` and `fetch_many` admit through the ambient query permit, as
+    /// the HTTP client does on a cache miss. Off by default.
+    pub fn set_reserve_fetches(&self, reserve: bool) {
+        self.reserve_fetches.store(reserve, AtomicOrdering::SeqCst);
     }
     pub fn metadata_request_count(&self) -> usize {
         self.metadata_requests.load(AtomicOrdering::SeqCst)
@@ -4703,6 +4710,9 @@ impl TurbopufferClient for MockTurbopufferClient {
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
         self.fetch_requests.fetch_add(1, AtomicOrdering::SeqCst);
+        if self.reserve_fetches.load(AtomicOrdering::SeqCst) {
+            reserve_provider_query(namespace, 1).await?;
+        }
         let store = self.docs.read().await;
         Ok(store.get(namespace).and_then(|ns| ns.get(id)).cloned())
     }
@@ -4714,6 +4724,9 @@ impl TurbopufferClient for MockTurbopufferClient {
     ) -> Result<HashMap<String, DocumentResponse>, TurbopufferError> {
         self.fetch_many_requests
             .fetch_add(1, AtomicOrdering::SeqCst);
+        if self.reserve_fetches.load(AtomicOrdering::SeqCst) {
+            reserve_provider_query(namespace, 1).await?;
+        }
         let store = self.docs.read().await;
         let mut result = HashMap::new();
         if let Some(ns) = store.get(namespace) {

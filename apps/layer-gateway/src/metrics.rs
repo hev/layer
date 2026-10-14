@@ -294,6 +294,8 @@ pub struct LayerMetrics {
     tpuf_billable_bytes_queried_total: IntCounterVec,
     tpuf_billable_bytes_returned_total: IntCounterVec,
     tpuf_logical_bytes: IntGaugeVec,
+    function_provider_queries_total: IntCounterVec,
+    function_billable_bytes_queried_total: IntCounterVec,
 
     stage_duration: HistogramVec,
     stage_transitions_total: IntCounterVec,
@@ -618,6 +620,18 @@ impl LayerMetrics {
                 "caller",
             ],
         );
+        let function_provider_queries_total = counter(
+            &registry,
+            "hevlayer_function_provider_queries_total",
+            "Physical provider queries made on behalf of a Function's items, once per Function per query, by stage (lookup, claim, completion, discovery, write_trigger, other). A read that serves several Functions counts for each.",
+            &["function", "stage"],
+        );
+        let function_billable_bytes_queried_total = counter(
+            &registry,
+            "hevlayer_function_billable_bytes_queried_total",
+            "Turbopuffer billable logical bytes queried by provider reads made on behalf of a Function's items, by stage. A read that serves several Functions counts for each.",
+            &["function", "stage"],
+        );
         let tpuf_billable_bytes_returned_total = counter(
             &registry,
             "hevlayer_tpuf_billable_bytes_returned_total",
@@ -941,6 +955,8 @@ impl LayerMetrics {
             tpuf_billable_bytes_queried_total,
             tpuf_billable_bytes_returned_total,
             tpuf_logical_bytes,
+            function_provider_queries_total,
+            function_billable_bytes_queried_total,
             stage_duration,
             stage_transitions_total,
             fetch_duration,
@@ -1372,6 +1388,32 @@ impl LayerMetrics {
         if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_returned") {
             self.tpuf_billable_bytes_returned_total
                 .with_label_values(&[&namespace, &store_kind, operation, kind, name])
+                .inc_by(bytes);
+        }
+    }
+
+    /// Provider queries made on behalf of one Function's items. Function ids
+    /// are bounded by the registered Functions; an oversized id is `other`.
+    pub fn observe_function_provider_queries(&self, function: &str, stage: &str, queries: u32) {
+        let function = if function.is_empty() || function.len() > 128 {
+            "other"
+        } else {
+            function
+        };
+        self.function_provider_queries_total
+            .with_label_values(&[function, stage])
+            .inc_by(u64::from(queries));
+    }
+
+    pub fn observe_function_queried_bytes(&self, function: &str, stage: &str, billing: &Value) {
+        let function = if function.is_empty() || function.len() > 128 {
+            "other"
+        } else {
+            function
+        };
+        if let Some(bytes) = billing_u64(billing, "billable_logical_bytes_queried") {
+            self.function_billable_bytes_queried_total
+                .with_label_values(&[function, stage])
                 .inc_by(bytes);
         }
     }
