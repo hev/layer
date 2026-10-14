@@ -1851,6 +1851,17 @@ impl NamespaceSchema {
         match (&self.text, &self.embed) {
             (Some(text), Some(embed)) => {
                 let mut options = json!({"vector":["Embed",query,{"field":embed}]});
+                // Natural-language MCP questions can contain exact job names.
+                // Keep their lexical evidence when Auto would choose only ANN.
+                let tokens = crate::routes::hybrid_text::tokenize_query_input(query)
+                    .tokens
+                    .len();
+                if matches!(
+                    crate::routes::query_router::route_for_tokens(tokens),
+                    crate::routes::query_router::Route::Semantic
+                ) {
+                    options["route"] = json!("fused");
+                }
                 if !self.fuzzy { options["fuzziness"] = json!(0); }
                 Ok(json!([text, "Auto", query, options]))
             },
@@ -2362,6 +2373,19 @@ mod tests {
         let ambiguous = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"a":{"type":"string","full_text_search":true},"b":{"type":"string","full_text_search":true}}})).unwrap();
         assert!(ambiguous.rank_by("q").is_err());
         assert!(ambiguous.search_kind().is_err());
+    }
+
+    #[test]
+    fn long_mcp_questions_keep_lexical_job_names() {
+        let schema = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"body":{"type":"string","full_text_search":true,"embed":{"model":"test"}}}})).unwrap();
+        let query = "Peaker Remodel prime change order exterior and closet";
+        let rank = schema.rank_by(query).unwrap();
+        assert_eq!(rank[3]["route"], "fused");
+        assert_eq!(rank[3]["fuzziness"], 0);
+        assert_eq!(rank[3]["vector"], json!(["Embed", query, {"field":"body"}]));
+        assert!(schema.rank_by("Peaker change order").unwrap()[3]
+            .get("route")
+            .is_none());
     }
 
     #[test]
