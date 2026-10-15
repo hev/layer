@@ -102,6 +102,9 @@ impl McpNamespace {
 pub const PER_NAMESPACE_TOOL_THRESHOLD: usize = 8;
 pub const MAX_SERVER_NAMESPACES: usize = 512;
 
+const SEARCH_SCOPE_GUIDANCE: &str = "Query text ranks content; it does not constrain attribute values. For a job, project, company or document-type constraint, use the declared typed filters with exact stored values. If an identifier is unknown, search its name alone and inspect matching records, or aggregate the declared field's values; do not guess. Do not present unfiltered hits as matches for a requested project, or substitute other projects when a scoped search is empty.";
+const SEARCH_QUERY_DESCRIPTION: &str = "Text to rank. Naming a project here does not filter its attributes; resolve its stored identifier and pass the appropriate typed filters.";
+
 impl McpServer {
     fn generic_tools(&self) -> bool {
         self.generic_tools || self.namespaces.len() > PER_NAMESPACE_TOOL_THRESHOLD
@@ -119,7 +122,7 @@ fn discovery_tool() -> Tool {
 fn generic_tools() -> Vec<Tool> {
     let search = json!({"type":"object","properties":{
         "namespace":{"type":"string","minLength":1},
-        "query":{"type":"string","minLength":1},
+        "query":{"type":"string","minLength":1,"description":SEARCH_QUERY_DESCRIPTION},
         "filters":{"type":"object","description":"Use the chosen namespace's typed filters from list_namespaces. Strings/booleans take exact values; numbers take min/max; dates take after/before."},
         "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
         "cursor":{"type":"string","minLength":1,"description":"The next_cursor from the previous page of the same query. Omit for the first page."}
@@ -138,8 +141,15 @@ fn generic_tools() -> Vec<Tool> {
     [("search", "Search one readable namespace. Call list_namespaces for namespace names and filter types. Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.", search),
      ("get", "Fetch one record by id from a readable namespace. Call list_namespaces for namespace names.", get),
      ("aggregate", AGGREGATE_DESCRIPTION, aggregate)]
-        .into_iter().map(|(name, description, schema)| Tool::new(name, description, schema.as_object().unwrap().clone())
-            .with_annotations(ToolAnnotations::new().read_only(true))).collect()
+        .into_iter().map(|(name, description, schema)| {
+            let description = if name == "search" {
+                format!("{description} {SEARCH_SCOPE_GUIDANCE}")
+            } else {
+                description.to_owned()
+            };
+            Tool::new(name, description, schema.as_object().unwrap().clone())
+                .with_annotations(ToolAnnotations::new().read_only(true))
+        }).collect()
 }
 
 fn fetch_original_description() -> &'static str {
@@ -838,7 +848,7 @@ impl McpHandler {
         };
         self.require_in_pin(ns, &headers, &id).await?;
         let id_for_pin = id.clone();
-        let body = if ns.originals.is_some() {
+        let mut body = if ns.originals.is_some() {
             self.current_original_record(ns, &id_for_pin, &headers)
                 .await?
         } else {
@@ -855,6 +865,7 @@ impl McpHandler {
             decode_response(response).await?
         };
         self.check_pin(ns, &id_for_pin, body.get("attributes").unwrap_or(&body))?;
+        body["links"] = json!(result_links(&body, ns.link.as_deref(), ns.page_link));
         let mut text = render(&body, ns.link.as_deref(), ns.page_link);
         if ns.originals.is_some()
             && body
@@ -1073,7 +1084,8 @@ impl McpHandler {
                 .filter(|n| (1..=50).contains(n))
                 .ok_or_else(|| invalid("limit must be an integer from 1 to 50"))?,
         };
-        let filters = schema.filters(arguments.remove("filters"))?;
+        let requested_filters = arguments.remove("filters");
+        let filters = schema.filters(requested_filters.clone())?;
         let rank_by = schema.rank_by(&query)?;
         let pagination_order = if schema.labels.is_empty() {
             rank_by.clone()
@@ -1171,7 +1183,17 @@ impl McpHandler {
         body["next_cursor"] = json!(next_cursor);
         body["offset"] = json!(offset);
         body["snapshot"] = json!(schema.stamped);
+        body["links"] = json!(result_links(&body, ns.link.as_deref(), ns.page_link));
+        let applied_filters = requested_filters.unwrap_or_else(|| json!({}));
+        body["applied_filters"] = applied_filters.clone();
         let mut text = render(&body, ns.link.as_deref(), ns.page_link);
+        if applied_filters.as_object().is_some_and(Map::is_empty) {
+            text.push_str("\nRequested attribute filters: none. Query text does not constrain attribute values; use typed filters for a project-specific request.");
+        } else {
+            text.push_str(&format!(
+                "\nRequested attribute filters: {applied_filters}."
+            ));
+        }
         text.push_str(&format!(
             "\nShowing {}-{} of {}{}.",
             offset + 1.min(returned as u64),
@@ -1993,12 +2015,14 @@ impl NamespaceSchema {
             }
         );
         let mut search_description = description.clone();
+        search_description.push(' ');
+        search_description.push_str(SEARCH_SCOPE_GUIDANCE);
         if ns.collapse.is_some() {
             search_description.push_str(" Returns distinct groups with one best matching row per group; limit counts groups. Use get with the best row id for details.");
         }
         search_description.push_str(" Returns total and next_cursor; pass next_cursor as cursor, with the same query and filters, for the next page.");
         let search_schema = json!({"type":"object","properties":{
-            "query":{"type":"string","minLength":1},
+            "query":{"type":"string","minLength":1,"description":SEARCH_QUERY_DESCRIPTION},
             "filters":{"type":"object","properties":properties.clone(),"additionalProperties":false},
             "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
             "cursor":{"type":"string","minLength":1,"description":"The next_cursor from the previous page of the same query. Omit for the first page."}
@@ -2203,9 +2227,9 @@ fn other_copies(attrs: &Value) -> Option<String> {
     (links.len() > 1).then(|| links.join("; "))
 }
 
-fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
+fn result_hits(body: &Value) -> Vec<&Value> {
     let rows = body.get("rows").and_then(Value::as_array);
-    let hits: Vec<&Value> = if let Some(groups) = body
+    if let Some(groups) = body
         .get("groups")
         .and_then(Value::as_array)
         .filter(|_| body.get("id").is_none())
@@ -2217,7 +2241,54 @@ fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
     } else {
         rows.map(|rows| rows.iter().collect())
             .unwrap_or_else(|| vec![body])
-    };
+    }
+}
+
+fn pdf_page_link(attrs: &Value, url: &str, enabled: bool) -> Option<String> {
+    if !enabled || url.contains('#') {
+        return None;
+    }
+    let page = attrs.get("page")?.as_u64().filter(|page| *page > 0)?;
+    let mime = attrs.get("original_mime").and_then(Value::as_str);
+    let basis = attrs.get("page_basis").and_then(Value::as_str);
+    if mime.is_some_and(|mime| mime != "application/pdf")
+        || basis.is_some_and(|basis| basis != "original_pdf")
+    {
+        return None;
+    }
+    // Legacy rows may lack the source MIME/basis. Only a PDF URL is evidence
+    // in that case; a page number alone can come from an Office conversion.
+    if mime.is_none()
+        && basis.is_none()
+        && !url
+            .split('?')
+            .next()
+            .unwrap_or(url)
+            .to_ascii_lowercase()
+            .ends_with(".pdf")
+    {
+        return None;
+    }
+    Some(format!("{url}#page={page}"))
+}
+
+fn result_links(body: &Value, link: Option<&str>, page_link: bool) -> Vec<Value> {
+    result_hits(body)
+        .into_iter()
+        .filter_map(|hit| {
+            let attrs = hit.get("attributes").unwrap_or(hit);
+            let url = attrs.get(link?)?.as_str()?;
+            Some(json!({
+                "id":hit.get("id").unwrap_or(&Value::Null),
+                "sourceLink":url,
+                "pageLink":pdf_page_link(attrs, url, page_link)
+            }))
+        })
+        .collect()
+}
+
+fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
+    let hits = result_hits(body);
     let mut text = format!("{} record(s)", hits.len());
     for hit in hits {
         let id = hit.get("id").unwrap_or(&Value::Null);
@@ -2234,9 +2305,9 @@ fn render(body: &Value, link: Option<&str>, page_link: bool) -> String {
             .and_then(Value::as_str)
         {
             text.push_str(&format!(" — {url}"));
-            let page = attrs.get("page").and_then(Value::as_u64);
-            if let (true, Some(page), false) = (page_link, page, url.contains('#')) {
-                text.push_str(&format!(" (page {page}: {url}#page={page})"));
+            if let Some(page_url) = pdf_page_link(attrs, url, page_link) {
+                let page = attrs["page"].as_u64().unwrap();
+                text.push_str(&format!(" (page {page}: {page_url})"));
             }
         }
         if let Some(copies) = other_copies(attrs) {
@@ -2378,6 +2449,34 @@ mod tests {
         assert!(text.contains("— https://example.test/a.pdf [also: clouddrive https://example.test/a.pdf; rest rest://ki/17.pdf]"));
         let single = json!({"id":"d#p1","attributes":{"text":"t","locations":json!([{"webUrl":"https://example.test/a.pdf"}]).to_string()}});
         assert!(!render(&single, None, false).contains("also"));
+    }
+
+    #[test]
+    fn structured_links_keep_pdf_pages_without_retention_and_reject_conversions() {
+        let body = json!({"rows":[
+            {"id":"pdf#p2","page":2,"webUrl":"https://example.test/plan.pdf",
+             "original_mime":"application/pdf","page_basis":"original_pdf"},
+            {"id":"office#p2","page":2,"webUrl":"https://example.test/view?file=plan.docx",
+             "original_mime":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+             "page_basis":"converted_pdf"},
+            {"id":"conflict#p2","page":2,"webUrl":"https://example.test/converted.pdf",
+             "original_mime":"application/pdf","page_basis":"converted_pdf"},
+            {"id":"unknown#p2","page":2,"webUrl":"https://example.test/sheet.csv"}
+        ]});
+        let links = result_links(&body, Some("webUrl"), true);
+        assert_eq!(links.len(), 4);
+        assert_eq!(links[0]["id"], "pdf#p2");
+        assert_eq!(links[0]["pageLink"], "https://example.test/plan.pdf#page=2");
+        for link in &links[1..] {
+            assert!(link["pageLink"].is_null(), "{link}");
+            assert!(link["sourceLink"].is_string());
+        }
+        let text = render(&body, Some("webUrl"), true);
+        assert!(text.contains("plan.pdf#page=2"));
+        assert!(!text.contains("plan.docx#page=") && !text.contains("converted.pdf#page="));
+        let grouped = json!({"groups":[{"best":body["rows"][0]}]});
+        assert_eq!(result_links(&grouped, Some("webUrl"), true), links[..1]);
+        assert!(result_links(&body, None, true).is_empty());
     }
 
     #[test]
