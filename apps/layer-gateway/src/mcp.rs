@@ -838,17 +838,22 @@ impl McpHandler {
         };
         self.require_in_pin(ns, &headers, &id).await?;
         let id_for_pin = id.clone();
-        let response = crate::routes::fetch::fetch_document(
-            State(self.state.clone()),
-            Path((ns.name.clone(), id)),
-            Query(crate::routes::fetch::FetchQueryParams {
-                include_attributes: None,
-            }),
-            headers,
-        )
-        .await?
-        .into_response();
-        let body = decode_response(response).await?;
+        let body = if ns.originals.is_some() {
+            self.current_original_record(ns, &id_for_pin, &headers)
+                .await?
+        } else {
+            let response = crate::routes::fetch::fetch_document(
+                State(self.state.clone()),
+                Path((ns.name.clone(), id)),
+                Query(crate::routes::fetch::FetchQueryParams {
+                    include_attributes: None,
+                }),
+                headers,
+            )
+            .await?
+            .into_response();
+            decode_response(response).await?
+        };
         self.check_pin(ns, &id_for_pin, body.get("attributes").unwrap_or(&body))?;
         let mut text = render(&body, ns.link.as_deref(), ns.page_link);
         if ns.originals.is_some()
@@ -862,6 +867,44 @@ impl McpHandler {
         let mut result = CallToolResult::structured(body);
         result.content = vec![ContentBlock::text(text)];
         Ok(result)
+    }
+
+    /// Retention can change after a Function completion while the document cache
+    /// still holds an older full row. Never bind originals from that snapshot.
+    async fn current_original_record(
+        &self,
+        ns: &McpNamespace,
+        id: &str,
+        headers: &HeaderMap,
+    ) -> Result<Value, AppError> {
+        let started = std::time::Instant::now();
+        let trace_id = crate::history::trace_id_from_headers(headers);
+        let tags = crate::history::tags_from_headers(headers).map_err(AppError::Validation)?;
+        let doc = self
+            .state
+            .turbopuffer()
+            .fetch(&ns.name, id)
+            .await
+            .map_err(|error| {
+                AppError::from_turbopuffer(error, "Current original metadata fetch failed")
+            })?
+            .ok_or_else(|| AppError::NotFound(format!("record `{id}` was not found")))?;
+        self.state.metrics.observe_fetch(
+            "get_doc",
+            &ns.name,
+            crate::metrics::CACHE_MISS,
+            started.elapsed().as_secs_f64(),
+        );
+        crate::routes::fetch::spawn_clickstream_event(
+            &self.state,
+            trace_id.as_deref(),
+            &ns.name,
+            id,
+            &tags,
+            "single",
+            "upstream",
+        );
+        Ok(json!({"id": id, "attributes": doc.attributes}))
     }
 
     /// A pinned tool serves a record by id only when the pin matches it. A
@@ -1650,51 +1693,8 @@ impl McpHandler {
                 .map_err(|_| invalid("invalid MCP history tag"))?,
         );
         self.require_in_pin(ns, &headers, &id).await?;
-        let response = crate::routes::fetch::fetch_document(
-            State(self.state.clone()),
-            Path((ns.name.clone(), id.clone())),
-            Query(crate::routes::fetch::FetchQueryParams {
-                include_attributes: None,
-            }),
-            headers,
-        )
-        .await?
-        .into_response();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
-            .await
-            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
-        let body: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| AppError::ServiceUnavailable(e.to_string()))?;
-        if !status.is_success() {
-            return Err(AppError::NotFound(format!(
-                "record `{id}` was not found or is no longer available ({status})"
-            )));
-        }
-        // The document cache can hold a partial row (an older Function patch cached
-        // only its own columns). The configured source link must not depend on it:
-        // when it is absent, read the store for the missing attributes. The binding
-        // and authorization above already used this row; the store only fills gaps.
-        let mut merged = body.get("attributes").unwrap_or(&body).clone();
-        if ns
-            .link
-            .as_deref()
-            .is_some_and(|field| merged.get(field).is_none())
-        {
-            if let Ok(found) = self
-                .state
-                .turbopuffer()
-                .fetch_many(&ns.name, std::slice::from_ref(&id))
-                .await
-            {
-                if let (Some(doc), Some(target)) = (found.get(&id), merged.as_object_mut()) {
-                    for (name, value) in &doc.attributes {
-                        target.entry(name.clone()).or_insert_with(|| value.clone());
-                    }
-                }
-            }
-        }
-        let attrs = &merged;
+        let body = self.current_original_record(ns, &id, &headers).await?;
+        let attrs = body.get("attributes").unwrap_or(&body);
         self.check_pin(ns, &id, attrs)?;
         let source = ns
             .link
@@ -1704,6 +1704,9 @@ impl McpHandler {
         let with_source = |error| match (error, source) {
             (AppError::NotFound(message), Some(url)) => {
                 AppError::NotFound(format!("{message}\nSource link: {url}"))
+            }
+            (AppError::PayloadTooLarge(message), Some(url)) => {
+                AppError::PayloadTooLarge(format!("{message}\nSource link: {url}"))
             }
             (error, _) => error,
         };

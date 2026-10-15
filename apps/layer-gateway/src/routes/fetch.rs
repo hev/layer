@@ -459,7 +459,7 @@ pub async fn fetch_many_documents(
     ))
 }
 
-fn spawn_clickstream_event(
+pub(crate) fn spawn_clickstream_event(
     state: &Arc<AppState>,
     trace_id: Option<&str>,
     namespace: &str,
