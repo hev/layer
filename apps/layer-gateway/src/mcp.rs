@@ -102,7 +102,7 @@ impl McpNamespace {
 pub const PER_NAMESPACE_TOOL_THRESHOLD: usize = 8;
 pub const MAX_SERVER_NAMESPACES: usize = 512;
 
-const SEARCH_SCOPE_GUIDANCE: &str = "Query text ranks content; it does not constrain attribute values. For a job, project, company or document-type constraint, use the declared typed filters with exact stored values. If an identifier is unknown, search its name alone and inspect matching records, or aggregate the declared field's values; do not guess. Do not present unfiltered hits as matches for a requested project, or substitute other projects when a scoped search is empty.";
+const SEARCH_SCOPE_GUIDANCE: &str = "Query text ranks content; it does not constrain attribute values. For a job, project, company or document-type constraint, use the declared typed filters with exact stored values. If an identifier is unknown, search its name alone and inspect matching records, or aggregate the declared field's values; do not guess. If an optional document-type filter returns no hits, retry without only that type filter while retaining the exact job, project, company and other constraints; classification may be incomplete. Report the relaxed type filter and inspect content before claiming a match. Keep an explicitly requested exact-classification constraint. Do not present unfiltered hits as matches for a requested project, or substitute other projects when a scoped search is empty.";
 const SEARCH_QUERY_DESCRIPTION: &str = "Text to rank. Naming a project here does not filter its attributes; resolve its stored identifier and pass the appropriate typed filters.";
 
 impl McpServer {
@@ -1977,18 +1977,10 @@ impl NamespaceSchema {
     fn rank_by(&self, query: &str) -> Result<Value, AppError> {
         match (&self.text, &self.embed) {
             (Some(text), Some(embed)) => {
-                let mut options = json!({"vector":["Embed",query,{"field":embed}]});
-                // Natural-language MCP questions can contain exact job names.
-                // Keep their lexical evidence when Auto would choose only ANN.
-                let tokens = crate::routes::hybrid_text::tokenize_query_input(query)
-                    .tokens
-                    .len();
-                if matches!(
-                    crate::routes::query_router::route_for_tokens(tokens),
-                    crate::routes::query_router::Route::Semantic
-                ) {
-                    options["route"] = json!("fused");
-                }
+                // Sparse extracted text can miss a short lexical query even
+                // when its page embedding matches. Conversely, long questions
+                // still need exact lexical names. Keep both retrieval paths.
+                let mut options = json!({"vector":["Embed",query,{"field":embed}],"route":"fused"});
                 if !self.fuzzy { options["fuzziness"] = json!(0); }
                 Ok(json!([text, "Auto", query, options]))
             },
@@ -2520,7 +2512,7 @@ mod tests {
         assert_eq!(schema.search_kind().unwrap(), "Auto");
         assert_eq!(
             schema.rank_by("q").unwrap(),
-            json!(["text","Auto","q",{"vector":["Embed","q",{"field":"text"}]}])
+            json!(["text","Auto","q",{"vector":["Embed","q",{"field":"text"}],"route":"fused"}])
         );
         let filters = schema
             .filters(Some(json!({"company":"story","job":"J1","division":"05","region":"r","doc_type":"permit"})))
@@ -2572,7 +2564,7 @@ mod tests {
         assert_eq!(both.search_kind().unwrap(), "Auto");
         assert_eq!(
             both.rank_by("q").unwrap(),
-            json!(["body","Auto","q",{"vector":["Embed","q",{"field":"body"}],"fuzziness":0}])
+            json!(["body","Auto","q",{"vector":["Embed","q",{"field":"body"}],"route":"fused","fuzziness":0}])
         );
         let ambiguous = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"a":{"type":"string","full_text_search":true},"b":{"type":"string","full_text_search":true}}})).unwrap();
         assert!(ambiguous.rank_by("q").is_err());
@@ -2639,16 +2631,23 @@ mod tests {
     }
 
     #[test]
-    fn long_mcp_questions_keep_lexical_job_names() {
+    fn mcp_questions_keep_semantic_recall_and_lexical_names_at_every_length() {
         let schema = NamespaceSchema::from_metadata(&ns(), &json!({"schema":{"body":{"type":"string","full_text_search":true,"embed":{"model":"test"}}}})).unwrap();
-        let query = "Cedar Remodel prime change order exterior and closet";
-        let rank = schema.rank_by(query).unwrap();
-        assert_eq!(rank[3]["route"], "fused");
-        assert_eq!(rank[3]["fuzziness"], 0);
-        assert_eq!(rank[3]["vector"], json!(["Embed", query, {"field":"body"}]));
-        assert!(schema.rank_by("Cedar change order").unwrap()[3]
-            .get("route")
-            .is_none());
+        // The two-word case regressed on a signed page whose extracted body
+        // contained only a signature/date. Longer questions must retain lexical
+        // evidence as well; neither branch may silently become single-path.
+        for query in [
+            "change order",
+            "CO #",
+            "additional cost",
+            "revised contract sum",
+            "Cedar Remodel prime change order exterior and closet",
+        ] {
+            let rank = schema.rank_by(query).unwrap();
+            assert_eq!(rank[3]["route"], "fused", "{query}");
+            assert_eq!(rank[3]["fuzziness"], 0);
+            assert_eq!(rank[3]["vector"], json!(["Embed", query, {"field":"body"}]));
+        }
     }
 
     #[test]
