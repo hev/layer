@@ -132,10 +132,33 @@ pub fn verify(bound: &Bound, bytes: &[u8], limit: u64) -> Result<(), AppError> {
             "version mismatch: the retained original {why}; re-sync the source before relying on it"
         )));
     }
-    if bound.validate_typed_png && layer_original::format::inspect(bytes).mime != Some("image/png")
-    {
+    let format = layer_original::format::inspect(bytes);
+    if format.empty {
+        return Err(AppError::Conflict(
+            "retained original is empty; original retention remains unresolved".into(),
+        ));
+    }
+    if bound.validate_typed_png && format.mime != Some("image/png") {
         return Err(AppError::Conflict(
             "retained typed original is not a valid supported PNG".into(),
+        ));
+    }
+    if format.all_zero
+        || format.corrupt_png
+        || (format.error_response
+            && matches!(
+                bound.mime.as_str(),
+                "application/pdf" | "image/png" | "application/octet-stream"
+            ))
+    {
+        return Err(AppError::Conflict(
+            "retained original has established format corruption or an error-response signature"
+                .into(),
+        ));
+    }
+    if bound.mime == "application/pdf" && format.mime != Some("application/pdf") {
+        return Err(AppError::Conflict(
+            "retained typed original is not a plain PDF".into(),
         ));
     }
     if bytes.len() as u64 > limit {
@@ -153,6 +176,18 @@ pub async fn load(
     hard_limit: u64,
 ) -> Result<Vec<u8>, AppError> {
     check_declared_size(bound, hard_limit)?;
+    let key = layer_original::catalog::corruption_key(namespace, &bound.sha256)
+        .ok_or_else(|| AppError::Forbidden("invalid original assessment binding".into()))?;
+    if state
+        .s3
+        .get(&key)
+        .await
+        .map_err(|e| AppError::from_s3(e, "read original format assessment"))?
+        .is_some()
+    {
+        return Err(AppError::Conflict("retained bytes have an established corruption reassessment; original retention is unresolved".into()));
+    }
+
     let bytes = crate::routes::blobs::read_durable_blob(state, namespace, &bound.sha256)
         .await?
         .ok_or_else(|| {
@@ -358,15 +393,44 @@ pub async fn catalog_record(
 ) -> Result<Value, AppError> {
     let key = layer_original::catalog::source_key(namespace, id)
         .ok_or_else(|| AppError::Validation("invalid original catalog id".into()))?;
-    let entry = catalog_entry(state, namespace, &key)
-        .await?
+    let bytes = state
+        .s3
+        .get(&key)
+        .await
+        .map_err(|e| AppError::from_s3(e, "read original snapshot catalog"))?
         .ok_or_else(|| AppError::NotFound("original catalog reference is missing".into()))?;
-    if entry.id() != id {
-        return Err(AppError::Forbidden(
-            "original catalog reference identity mismatched".into(),
+    if bytes.len() > 64 * 1024 {
+        return Err(AppError::Conflict(
+            "original catalog record exceeds its metadata limit".into(),
         ));
     }
-    Ok(serde_json::json!({"id":id,"attributes":entry.attrs()}))
+    let schema: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::Conflict("original catalog record is invalid".into()))?;
+    let attrs = if schema["schema"] == 2 {
+        let snapshot: layer_original::catalog::Snapshot = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::Conflict("original snapshot record is invalid".into()))?;
+        if !snapshot.validate(namespace) || snapshot.id() != id {
+            return Err(AppError::Forbidden(
+                "original snapshot identity mismatched".into(),
+            ));
+        }
+        snapshot.attrs()
+    } else {
+        let entry: layer_original::catalog::Entry = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::Conflict("original catalog record is invalid".into()))?;
+        if !entry.validate(namespace) {
+            return Err(AppError::Forbidden(
+                "original catalog record does not bind this namespace".into(),
+            ));
+        }
+        if entry.id() != id {
+            return Err(AppError::Forbidden(
+                "original catalog reference identity mismatched".into(),
+            ));
+        }
+        entry.attrs()
+    };
+    Ok(serde_json::json!({"id":id,"attributes":attrs}))
 }
 /// Lazily complete an already authorized row's missing retained reference. The
 /// row must name exact bytes or an exact drive/item/version; no live provider
@@ -406,6 +470,7 @@ pub async fn catalog_fallback(
         "original_sha256",
         "original_bytes",
         "original_mime",
+        "original_format_validation",
     ] {
         // The authorized row supplies its own citations and source/business
         // provenance. A hash alias may name an identical copy in another scope;

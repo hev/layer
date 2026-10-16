@@ -1809,12 +1809,24 @@ impl McpHandler {
                     .unwrap_or("unknown")
             ));
         }
+        if attrs["original_format_validation"] == "unverified" {
+            text.push_str("\nSource bytes retained exactly; format validation unverified. Actual format and source-format mismatch are unknown.");
+        }
+        if attrs["original_retention_basis"] == "inventorySnapshot" {
+            text.push_str("\nRetained inventory snapshot; source unavailable at the recorded observations. Deletion status unknown. Source link is an inventory citation, not a live source check.");
+        }
         let mut structured = json!({
             "id": id, "namespace": ns.name, "name": name, "mimeType": bound.mime,
             "bytes": file.len(), "sha256": bound.sha256, "version": bound.version,
             "sourceLink": source,
+            "retentionBasis": attrs.get("original_retention_basis"),
+            "sourceAvailability": attrs.get("original_source_availability"),
+            "sourceObservations": attrs.get("original_source_observations"),
+            "deletionStatus": attrs.get("original_deletion_status"),
+            "citationBasis": attrs.get("original_citation_basis"),
             "declaredMimeType": attrs.get("original_declared_mime"),
             "sourceFormatMismatch": attrs.get("original_source_format_mismatch"),
+            "formatValidation": attrs.get("original_format_validation"),
             "sourceIdentity": {"drive":attrs.get("original_drive"),"item":attrs.get("original_item"),"version":attrs.get("original_version"),"etag":attrs.get("original_etag")},
             "pageLink": match (ns.page_link && is_pdf, source, page_number) {
                 (true, Some(url), Some(page)) if !url.contains('#') => json!(format!("{url}#page={page}")),

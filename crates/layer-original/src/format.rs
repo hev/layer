@@ -37,15 +37,22 @@ pub struct Inspector {
     png: Option<Png>,
     error: bool,
     quick_xor: QuickXor,
+    nonzero: bool,
+    seen: bool,
 }
 pub struct Format {
     pub mime: Option<&'static str>,
     pub quick_xor: String,
     pub corrupt_png: bool,
+    pub all_zero: bool,
+    pub empty: bool,
+    pub error_response: bool,
 }
 impl Inspector {
     pub fn update(&mut self, bytes: &[u8]) {
         self.quick_xor.update(bytes);
+        self.seen |= !bytes.is_empty();
+        self.nonzero |= bytes.iter().any(|b| *b != 0);
         // Keep the PDF sniffing window fixed, including for arbitrary chunks.
         let n = bytes.len().min(1029usize.saturating_sub(self.header.len()));
         self.header.extend_from_slice(&bytes[..n]);
@@ -78,12 +85,70 @@ impl Inspector {
             .png
             .as_ref()
             .is_some_and(|p| !p.unsupported && (self.error || !p.done));
+        let error_response = is_error_response(&self.header);
         Format {
-            mime,
+            error_response,
+            all_zero: self.seen && !self.nonzero,
+            empty: !self.seen,
+            // A serialized wrapper's nested PDF magic is not a plain PDF.
+            // This exclusion does not validate or assign a type to the wrapper.
+            mime: if error_response || self.header.starts_with(b"rtfd\0\0\0\0") {
+                None
+            } else {
+                mime
+            },
             corrupt_png,
             quick_xor: self.quick_xor.finish(),
         }
     }
+}
+
+/// Sniff only; never normalize retained bytes. The header is capped at1029B.
+/// BOMs/ASCII whitespace cannot disguise an upstream HTML/JSON response.
+fn is_error_response(header: &[u8]) -> bool {
+    let header = header.trim_ascii_start();
+    let text = if header.starts_with(&[0xff, 0xfe, 0, 0]) || header.starts_with(&[0, 0, 0xfe, 0xff])
+    {
+        let little = header[0] == 0xff;
+        header[4..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| {
+                let bytes = [p[0], p[1], p[2], p[3]];
+                char::from_u32(if little {
+                    u32::from_le_bytes(bytes)
+                } else {
+                    u32::from_be_bytes(bytes)
+                })
+                .unwrap_or('\u{fffd}')
+            })
+            .collect::<String>()
+    } else if header.starts_with(&[0xff, 0xfe]) || header.starts_with(&[0xfe, 0xff]) {
+        let little = header[0] == 0xff;
+        let units = header[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| {
+                if little {
+                    u16::from_le_bytes([p[0], p[1]])
+                } else {
+                    u16::from_be_bytes([p[0], p[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(header).into_owned()
+    };
+    let text = text
+        .trim_start_matches(|c: char| c == '\u{feff}' || c.is_ascii_whitespace())
+        .to_ascii_lowercase();
+    text.starts_with("<!doctype html")
+        || text.starts_with("<html")
+        || text.starts_with('{')
+        || text.starts_with('[')
 }
 
 struct Png {
@@ -364,6 +429,96 @@ pub fn inspect(bytes: &[u8]) -> Format {
 mod tests {
     use super::*;
     const PNG: &[u8] = include_bytes!("../tests/fixtures/rgba.png");
+    #[test]
+    fn wrapped_pdf_magic_is_unclassified_without_claiming_wrapper_validity() {
+        let bytes = b"rtfd\0\0\0\0unassessed wrapper containing %PDF-1.4 nested bytes";
+        assert!(crate::has_pdf_header(bytes));
+        let format = inspect(bytes);
+        assert_eq!(format.mime, None);
+        assert!(!format.corrupt_png);
+        assert!(!format.error_response);
+    }
+    #[test]
+    fn all_zero_requires_entire_nonempty_stream() {
+        let zeros = vec![0; 151687];
+        for chunk in [1, 65536] {
+            let mut inspector = Inspector::default();
+            for part in zeros.chunks(chunk) {
+                inspector.update(part);
+            }
+            assert!(inspector.finish().all_zero);
+        }
+        assert!(!inspect(&[]).all_zero);
+        assert!(inspect(&[]).empty);
+        let mut empty = Inspector::default();
+        empty.update(&[]);
+        assert!(empty.finish().empty);
+        let mut nonzero = zeros;
+        *nonzero.last_mut().unwrap() = 1;
+        assert!(!inspect(&nonzero).all_zero);
+        assert!(!inspect(&nonzero).empty);
+        assert_eq!(inspect(&nonzero).mime, None);
+    }
+    #[test]
+    fn bom_error_responses_never_become_pdf_or_opaque_even_with_embedded_pdf_magic() {
+        for text in [
+            " \r\n<html>error %PDF-1.4</html>",
+            "\t{\"error\":\"%PDF-1.4\"}",
+            " [\"%PDF-1.4\"]",
+        ] {
+            let mut variants = vec![text.as_bytes().to_vec()];
+            variants.push([b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat());
+            variants.push([b" \xef\xbb\xbf\xef\xbb\xbf".as_slice(), text.as_bytes()].concat());
+            for little in [true, false] {
+                let mut bytes = if little {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                };
+                for u in text.encode_utf16() {
+                    bytes.extend_from_slice(&if little {
+                        u.to_le_bytes()
+                    } else {
+                        u.to_be_bytes()
+                    });
+                }
+                variants.push(bytes);
+                let mut bytes = if little {
+                    vec![0xff, 0xfe, 0, 0]
+                } else {
+                    vec![0, 0, 0xfe, 0xff]
+                };
+                for c in text.chars() {
+                    bytes.extend_from_slice(&if little {
+                        (c as u32).to_le_bytes()
+                    } else {
+                        (c as u32).to_be_bytes()
+                    });
+                }
+                variants.push(bytes);
+            }
+            for bytes in variants {
+                for chunk in [1, 3, 64 * 1024] {
+                    let mut inspector = Inspector::default();
+                    for part in bytes.chunks(chunk) {
+                        inspector.update(part);
+                    }
+                    let format = inspector.finish();
+                    assert!(format.error_response, "{bytes:?}");
+                    assert_eq!(format.mime, None);
+                    let mut xor = QuickXor::default();
+                    xor.update(&bytes);
+                    assert_eq!(format.quick_xor, xor.finish());
+                }
+            }
+        }
+    }
+    #[test]
+    fn error_response_with_embedded_pdf_signature_is_not_a_pdf() {
+        let format = inspect(b"<html>upstream error %PDF-1.4 not a document</html>");
+        assert!(format.error_response);
+        assert_eq!(format.mime, None);
+    }
     #[test]
     fn quick_xor_reference_vectors_and_chunk_boundaries() {
         let bytes: Vec<u8> = (0..=255).collect();

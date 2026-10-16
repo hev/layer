@@ -20,6 +20,8 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_mime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_validation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_format_mismatch: Option<bool>,
     pub name: String,
     pub path: String,
@@ -36,6 +38,19 @@ pub fn source_id(namespace: &str, warehouse: &str, drive: &str, item: &str) -> S
 pub fn source_key(namespace: &str, id: &str) -> Option<String> {
     let suffix = id.strip_prefix(PREFIX)?;
     is_sha256(suffix).then(|| format!("original-catalog/{namespace}/sources/{suffix}.json"))
+}
+/// Append-only established-corruption assessment, scoped to exact retained bytes.
+pub fn corruption_key(namespace: &str, sha: &str) -> Option<String> {
+    (!namespace.is_empty()
+        && !namespace.contains('/')
+        && !matches!(namespace, "." | "..")
+        && is_sha256(sha))
+    .then(|| {
+        format!(
+            "original-catalog/{namespace}/corruptions/{}.json",
+            sha.to_ascii_lowercase()
+        )
+    })
 }
 pub fn hash_key(namespace: &str, sha: &str) -> Option<String> {
     is_sha256(sha).then(|| {
@@ -57,7 +72,18 @@ impl Entry {
     }
     pub fn validate(&self, namespace: &str) -> bool {
         let citation = url::Url::parse(&self.web_url).ok();
-        self.schema == 1
+        ((self.schema == 1
+            && self.format_validation.is_none()
+            && (self.mime == "application/pdf"
+                || (self.mime == "image/png" && self.source_format_mismatch == Some(true))))
+            || (self.schema == 3
+                && self.mime == "application/octet-stream"
+                && self.format_validation.as_deref() == Some("unverified")
+                && self.source_format_mismatch.is_none()
+                && self
+                    .version
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with("quickXor:") && v.len() > 9)))
             && self.namespace == namespace
             && !namespace.is_empty()
             && !namespace.contains('/')
@@ -68,8 +94,6 @@ impl Entry {
             && !self.etag.is_empty()
             && is_sha256(&self.sha256)
             && self.bytes > 0
-            && (self.mime == "application/pdf"
-                || (self.mime == "image/png" && self.source_format_mismatch == Some(true)))
             && citation.is_some_and(|u| {
                 u.scheme() == "https"
                     && u.username().is_empty()
@@ -94,6 +118,9 @@ impl Entry {
         );
         attrs.insert("original_bytes".into(), json!(self.bytes));
         attrs.insert("original_mime".into(), json!(self.mime));
+        if let Some(validation) = &self.format_validation {
+            attrs.insert("original_format_validation".into(), json!(validation));
+        }
         if let Some(mime) = &self.declared_mime {
             attrs.insert("original_declared_mime".into(), json!(mime));
         }
@@ -179,6 +206,85 @@ pub fn row_key(namespace: &str, attrs: &Value) -> Option<String> {
         Some(version_key(namespace, drive, item, etag, true))
     }
 }
+/// Schema 2 is deliberately separate: schema 1 readers must reject it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Snapshot {
+    pub schema: u32,
+    pub original: Entry,
+    pub warehouse_origin: String,
+    pub inventory_binding: String,
+    pub inventory_generation: String,
+    pub provider_checksum: String,
+    pub verification_receipt: String,
+    pub observations: [UnavailableObservation; 2],
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnavailableObservation {
+    pub status: u16,
+    pub observed_unix_seconds: u64,
+}
+impl Snapshot {
+    /// JSON array tuple, versioned discriminator, fixed field order, UTF-8.
+    /// No timestamp, attempt ID, mutable alias or caller-provided key authority.
+    pub fn id(&self) -> String {
+        format!(
+            "{PREFIX}{}",
+            sha256_hex(
+                &serde_json::to_vec(&(
+                    "layer-original-snapshot-v2",
+                    &self.original.namespace,
+                    &self.warehouse_origin,
+                    &self.inventory_binding,
+                    &self.inventory_generation,
+                    &self.original.drive,
+                    &self.original.item,
+                    &self.original.etag,
+                    &self.original.version,
+                    &self.provider_checksum,
+                    self.original.bytes,
+                    &self.original.sha256,
+                ))
+                .expect("snapshot identity")
+            )
+        )
+    }
+    pub fn validate(&self, namespace: &str) -> bool {
+        self.schema == 2
+            && self.original.validate(namespace)
+            && is_sha256(&self.warehouse_origin)
+            && is_sha256(&self.inventory_binding)
+            && !self.inventory_generation.is_empty()
+            && !self.provider_checksum.is_empty()
+            && self.original.version.as_deref()
+                == Some(&format!("quickXor:{}", self.provider_checksum))
+            && is_sha256(&self.verification_receipt)
+            && self
+                .observations
+                .iter()
+                .all(|o| matches!(o.status, 404 | 410) && o.observed_unix_seconds > 0)
+            && self.observations[0].observed_unix_seconds
+                <= self.observations[1].observed_unix_seconds
+    }
+    /// A concurrent winner may have earlier observations, but cannot change
+    /// frozen metadata, proof identity or source binding.
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        let mut comparable = other.clone();
+        comparable.observations = self.observations.clone();
+        comparable.verification_receipt = self.verification_receipt.clone();
+        comparable == *self
+    }
+    pub fn attrs(&self) -> Value {
+        let mut attrs = self.original.attrs();
+        attrs["original_retention_basis"] = json!("inventorySnapshot");
+        attrs["original_source_availability"] = json!("unavailable");
+        attrs["original_source_observations"] = json!(self.observations);
+        attrs["original_deletion_status"] = json!("unknown");
+        attrs["original_citation_basis"] = json!("inventoryObservation");
+        attrs
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,11 +301,34 @@ mod tests {
             bytes: 5,
             mime: "application/pdf".into(),
             declared_mime: None,
+            format_validation: None,
             source_format_mismatch: None,
             name: "test.pdf".into(),
             path: "/test.pdf".into(),
             web_url: "https://example.test/test.pdf".into(),
         }
+    }
+    #[test]
+    fn unclassified_schema_is_explicit_fail_closed_and_does_not_invent_mismatch() {
+        let mut e = entry();
+        e.schema = 3;
+        e.mime = "application/octet-stream".into();
+        e.format_validation = Some("unverified".into());
+        e.source_format_mismatch = None;
+        e.version = Some("quickXor:provider".into());
+        assert!(e.validate("docs"));
+        assert!(!e.validate("other"));
+        assert_eq!(e.attrs()["original_format_validation"], "unverified");
+        assert!(e.attrs()["original_source_format_mismatch"].is_null());
+        let mut old = e.clone();
+        old.schema = 1;
+        assert!(!old.validate("docs"));
+        let mut lie = e.clone();
+        lie.source_format_mismatch = Some(false);
+        assert!(!lie.validate("docs"));
+        let mut missing = e.clone();
+        missing.format_validation = None;
+        assert!(!missing.validate("docs"));
     }
     #[test]
     fn typed_catalog_preserves_actual_and_declared_mime_and_reads_legacy_v1() {
@@ -252,5 +381,66 @@ mod tests {
         assert!(!e.matches_row(&old));
         assert!(!e.matches_row(&json!({"original_drive":"d","original_item":"i"})));
         assert!(row_key("docs", &json!({"webUrl":"https://example.test/test.pdf"})).is_none());
+    }
+    #[test]
+    fn snapshot_id_is_canonical_versioned_and_excludes_observation_times_but_binds_origin_revision()
+    {
+        let mut original = entry();
+        original.version = Some("quickXor:checksum".into());
+        let snapshot = Snapshot {
+            schema: 2,
+            original,
+            warehouse_origin: "b".repeat(64),
+            inventory_binding: "c".repeat(64),
+            inventory_generation: "generation".into(),
+            provider_checksum: "checksum".into(),
+            verification_receipt: "d".repeat(64),
+            observations: [
+                UnavailableObservation {
+                    status: 404,
+                    observed_unix_seconds: 1,
+                },
+                UnavailableObservation {
+                    status: 410,
+                    observed_unix_seconds: 2,
+                },
+            ],
+        };
+        assert!(snapshot.validate("docs"));
+        assert!(!snapshot.validate("other"));
+        let mut later = snapshot.clone();
+        later.observations[1].observed_unix_seconds = 3;
+        later.verification_receipt = "e".repeat(64);
+        assert_eq!(later.id(), snapshot.id());
+        assert!(snapshot.same_snapshot(&later));
+        for field in [
+            "warehouse",
+            "binding",
+            "generation",
+            "etag",
+            "version",
+            "bytes",
+            "sha",
+            "drive",
+            "item",
+            "namespace",
+        ] {
+            let mut changed = snapshot.clone();
+            match field {
+                "warehouse" => changed.warehouse_origin = "a".repeat(64),
+                "binding" => changed.inventory_binding = "a".repeat(64),
+                "generation" => changed.inventory_generation = "other".into(),
+                "etag" => changed.original.etag = "other".into(),
+                "version" => changed.original.version = Some("other".into()),
+                "bytes" => changed.original.bytes += 1,
+                "sha" => changed.original.sha256 = "b".repeat(64),
+                "drive" => changed.original.drive = "other".into(),
+                "item" => changed.original.item = "other".into(),
+                "namespace" => changed.original.namespace = "other".into(),
+                _ => unreachable!(),
+            }
+            assert_ne!(changed.id(), snapshot.id(), "{field}");
+        }
+        assert!(serde_json::from_slice::<Entry>(&serde_json::to_vec(&snapshot).unwrap()).is_err());
     }
 }
