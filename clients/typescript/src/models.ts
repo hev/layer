@@ -664,6 +664,60 @@ export interface PutPipelineRowsRequest {
   distance_metric?: "cosine_distance" | "euclidean_squared";
 }
 
+export interface RecordVersionOptions {
+  [key: string]: unknown;
+  versioning?: Record<string, unknown>;
+  version_id?: string;
+}
+
+export interface RecordVersionReceipt {
+  [key: string]: unknown;
+  id: string;
+  version_id: string;
+  active: boolean;
+}
+
+export interface RecordVersion {
+  [key: string]: unknown;
+  id: string;
+  version_id: string;
+  row: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RecordVersionList {
+  [key: string]: unknown;
+  versions: RecordVersion[];
+  active_version_id: string | null;
+  next_cursor: string | null;
+}
+
+export interface RecordActivationRequest {
+  [key: string]: unknown;
+  version_id: string;
+  expected_current_version: string | null;
+}
+
+export interface RecordActivationResult {
+  [key: string]: unknown;
+  id: string;
+  active_version_id: string;
+}
+
+export interface RecordActivation {
+  [key: string]: unknown;
+  sequence: number;
+  previous_version_id: string | null;
+  version_id: string | null;
+  created_at: string;
+}
+
+export interface RecordActivationList {
+  [key: string]: unknown;
+  activations: RecordActivation[];
+  next_cursor: string | null;
+}
+
 export type TurbopufferWriteRequest = Record<string, unknown>;
 
 export interface TurbopufferBranchFromRequest {
@@ -678,6 +732,7 @@ export interface TurbopufferCopyFromRequest {
 
 export interface TurbopufferWriteResponse {
   [key: string]: unknown;
+  versions?: RecordVersionReceipt[];
   status: string;
   message: string;
   rows_affected: number;

@@ -394,6 +394,44 @@ func (params *ListNamespacesParams) query() (url.Values, error) {
 	return query, nil
 }
 
+type ListRecordActivationsParams struct {
+	After string `json:"after,omitempty"`
+	Limit int64 `json:"limit,omitempty"`
+}
+
+func (params *ListRecordActivationsParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "after", params.After); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "limit", params.Limit); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type ListRecordVersionsParams struct {
+	After string `json:"after,omitempty"`
+	Limit int64 `json:"limit,omitempty"`
+}
+
+func (params *ListRecordVersionsParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "after", params.After); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "limit", params.Limit); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
 type ListSearchHistoryParams struct {
 	Tag []string `json:"tag,omitempty"`
 	From string `json:"from,omitempty"`
@@ -612,6 +650,24 @@ func (params *WarmCacheParams) query() (url.Values, error) {
 	}
 	return query, nil
 }
+
+func (client *Client) ActivateRecordVersion(ctx context.Context, namespace string, iD string, body *RecordActivationRequest, options ...RequestOption) (*RecordActivationResult, error) {
+	out := RecordActivationResult{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/records/%s/activate", url.PathEscape(namespace), url.PathEscape(iD)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ActivateRecordVersionWithPerf(ctx context.Context, namespace string, iD string, body *RecordActivationRequest, options ...RequestOption) (*LayerResponse[RecordActivationResult], error) {
+	out := RecordActivationResult{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/records/%s/activate", url.PathEscape(namespace), url.PathEscape(iD)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[RecordActivationResult]{Data: out, Perf: *perf}, nil
+}
+
 
 func (client *Client) AuthenticateKey(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*AuthenticateKeyResponse, error) {
 	out := AuthenticateKeyResponse{}
@@ -1379,6 +1435,24 @@ func (client *Client) GetPipelineStatusWithPerf(ctx context.Context, pipelineID 
 }
 
 
+func (client *Client) GetRecordVersion(ctx context.Context, namespace string, iD string, versionID string, options ...RequestOption) (*RecordVersion, error) {
+	out := RecordVersion{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/versions/%s", url.PathEscape(namespace), url.PathEscape(iD), url.PathEscape(versionID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetRecordVersionWithPerf(ctx context.Context, namespace string, iD string, versionID string, options ...RequestOption) (*LayerResponse[RecordVersion], error) {
+	out := RecordVersion{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/versions/%s", url.PathEscape(namespace), url.PathEscape(iD), url.PathEscape(versionID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[RecordVersion]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) GetScan(ctx context.Context, namespace string, scanID string, options ...RequestOption) (*ScanJob, error) {
 	out := ScanJob{}
 	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, options...); err != nil {
@@ -1890,6 +1964,58 @@ func (client *Client) ListPipelinesWithPerf(ctx context.Context, options ...Requ
 		return nil, err
 	}
 	return &LayerResponse[PipelineList]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ListRecordActivations(ctx context.Context, namespace string, iD string, params *ListRecordActivationsParams, options ...RequestOption) (*RecordActivationList, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := RecordActivationList{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/activations", url.PathEscape(namespace), url.PathEscape(iD)), query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListRecordActivationsWithPerf(ctx context.Context, namespace string, iD string, params *ListRecordActivationsParams, options ...RequestOption) (*LayerResponse[RecordActivationList], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := RecordActivationList{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/activations", url.PathEscape(namespace), url.PathEscape(iD)), query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[RecordActivationList]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ListRecordVersions(ctx context.Context, namespace string, iD string, params *ListRecordVersionsParams, options ...RequestOption) (*RecordVersionList, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := RecordVersionList{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/versions", url.PathEscape(namespace), url.PathEscape(iD)), query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListRecordVersionsWithPerf(ctx context.Context, namespace string, iD string, params *ListRecordVersionsParams, options ...RequestOption) (*LayerResponse[RecordVersionList], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := RecordVersionList{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/records/%s/versions", url.PathEscape(namespace), url.PathEscape(iD)), query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[RecordVersionList]{Data: out, Perf: *perf}, nil
 }
 
 

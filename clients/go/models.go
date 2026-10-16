@@ -580,6 +580,52 @@ type PutPipelineRowsRequest struct {
 	DistanceMetric string `json:"distance_metric,omitempty"`
 }
 
+type RecordVersionOptions struct {
+	Versioning map[string]interface{} `json:"versioning,omitempty"`
+	VersionID string `json:"version_id,omitempty"`
+}
+
+type RecordVersionReceipt struct {
+	ID string `json:"id"`
+	VersionID string `json:"version_id"`
+	Active bool `json:"active"`
+}
+
+type RecordVersion struct {
+	ID string `json:"id"`
+	VersionID string `json:"version_id"`
+	Row map[string]interface{} `json:"row"`
+	CreatedAt string `json:"created_at"`
+}
+
+type RecordVersionList struct {
+	Versions []RecordVersion `json:"versions"`
+	ActiveVersionID *string `json:"active_version_id"`
+	NextCursor *string `json:"next_cursor"`
+}
+
+type RecordActivationRequest struct {
+	VersionID string `json:"version_id"`
+	ExpectedCurrentVersion *string `json:"expected_current_version"`
+}
+
+type RecordActivationResult struct {
+	ID string `json:"id"`
+	ActiveVersionID string `json:"active_version_id"`
+}
+
+type RecordActivation struct {
+	Sequence int64 `json:"sequence"`
+	PreviousVersionID *string `json:"previous_version_id"`
+	VersionID *string `json:"version_id"`
+	CreatedAt string `json:"created_at"`
+}
+
+type RecordActivationList struct {
+	Activations []RecordActivation `json:"activations"`
+	NextCursor *string `json:"next_cursor"`
+}
+
 type TurbopufferWriteRequest map[string]interface{}
 
 type TurbopufferBranchFromRequest struct {
@@ -591,6 +637,7 @@ type TurbopufferCopyFromRequest struct {
 }
 
 type TurbopufferWriteResponse struct {
+	Versions []RecordVersionReceipt `json:"versions,omitempty"`
 	Status string `json:"status"`
 	Message string `json:"message"`
 	RowsAffected int64 `json:"rows_affected"`

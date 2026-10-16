@@ -2059,6 +2059,10 @@ struct MetricsTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for MetricsTurbopufferClient {
+    async fn record_versioning_enabled(&self, namespace: &str) -> Result<bool, TurbopufferError> {
+        self.inner.record_versioning_enabled(namespace).await
+    }
+
     async fn reconcile_change_token(
         &self,
         namespace: &str,

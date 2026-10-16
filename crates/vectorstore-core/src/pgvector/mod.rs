@@ -5,6 +5,7 @@ mod filter;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod versions;
 
 use crate::models::{DocumentPage, DocumentResponse, IncludeAttributes};
 use crate::turbopuffer::*;
@@ -31,6 +32,7 @@ struct Namespace {
     /// `schema`, never parsed by `Schema::parse`, so a gateway that predates
     /// it still loads every namespace.
     embed: Option<Value>,
+    versioning: Option<String>,
 }
 
 /// A rejection naming a stable feature id (RFC 0118 § "The 422 body").
@@ -198,6 +200,7 @@ impl PgvectorClient {
         // Content-addressed blobs (RFC 0123): one bytea row per sha256.
         sqlx::query("CREATE TABLE IF NOT EXISTS layer_pgvector.blobs (scope text NOT NULL, namespace text NOT NULL, sha256 text NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(scope,namespace,sha256))")
             .execute(&mut *bootstrap).await.map_err(db)?;
+        Self::bootstrap_versions(&mut bootstrap).await?;
         bootstrap.commit().await.map_err(db)?;
         Ok(Self {
             pool,
@@ -224,7 +227,7 @@ impl PgvectorClient {
         tx: &mut Transaction<'_, Postgres>,
         namespace: &str,
     ) -> Result<Option<Namespace>> {
-        let row = sqlx::query("SELECT table_name,schema,metric,embed FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2")
+        let row = sqlx::query("SELECT table_name,schema,metric,embed,versioning FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2")
             .bind(&self.scope).bind(namespace).fetch_optional(&mut **tx).await.map_err(db)?;
         row.map(|r| {
             Ok(Namespace {
@@ -232,6 +235,7 @@ impl PgvectorClient {
                 schema: Schema::parse(&r.get::<Value, _>("schema"))?,
                 metric: r.get("metric"),
                 embed: r.get("embed"),
+                versioning: r.get("versioning"),
             })
         })
         .transpose()
@@ -265,8 +269,10 @@ impl PgvectorClient {
                 "patch_condition",
                 "delete_condition",
                 EMBEDDING_PROFILES_KEY,
+                "_hevlayer",
             ],
         )?;
+        versions::options(body)?;
         let rows = schema::rows(body)?;
         let patches = schema::patches(body)?;
         for patch in &patches {
@@ -324,6 +330,9 @@ impl PgvectorClient {
         };
         let mut tx = self.begin(namespace).await?;
         let previous = self.load(&mut tx, namespace).await?;
+        let versioning = self
+            .versioning_mode(&mut tx, previous.as_ref(), body, &rows)
+            .await?;
         let old_schema = previous
             .as_ref()
             .map(|n| n.schema.clone())
@@ -438,6 +447,15 @@ impl PgvectorClient {
         schema.install(&mut tx, &table, &old_schema, metric).await?;
         sqlx::query("INSERT INTO layer_pgvector.namespaces (scope,name,table_name,schema,metric,embed) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope,name) DO UPDATE SET schema=excluded.schema,embed=excluded.embed,updated_at=now()")
             .bind(&self.scope).bind(namespace).bind(&table).bind(schema.value()).bind(metric).bind(&embed).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query(
+            "UPDATE layer_pgvector.namespaces SET versioning=$3 WHERE scope=$1 AND name=$2",
+        )
+        .bind(&self.scope)
+        .bind(namespace)
+        .bind(&versioning)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
         // Turbopuffer's order: delete_by_filter, then patch_by_filter, then
         // upserts, patches and deletes. One transaction; any error rolls back.
         let mut deleted = 0;
@@ -499,8 +517,23 @@ impl PgvectorClient {
             remaining |= more;
         }
         let mut upserted = 0;
+        let mut retained = Vec::new();
         for row in &rows {
-            upserted += upsert_row(&mut tx, &table, &schema, row, upsert_condition).await?;
+            if let Some(mode) = versioning.as_deref() {
+                let supplied = body
+                    .get("_hevlayer")
+                    .and_then(|o| o.get("version_id"))
+                    .and_then(Value::as_str);
+                let (receipt, publish) = self
+                    .retain_row(&mut tx, namespace, row, supplied, mode == "automatic")
+                    .await?;
+                retained.push(receipt);
+                if publish {
+                    upserted += upsert_row(&mut tx, &table, &schema, row, None).await?;
+                }
+            } else {
+                upserted += upsert_row(&mut tx, &table, &schema, row, upsert_condition).await?;
+            }
         }
         // A patch is the stored row with the named attributes replaced,
         // written through the upsert statement so `patch_condition` sees the
@@ -526,6 +559,11 @@ impl PgvectorClient {
         let mut sql = QueryBuilder::<Postgres>::new(format!(
             "DELETE FROM layer_pgvector.\"{table}\" WHERE key=ANY("
         ));
+        if versioning.is_some() {
+            for key in &deletes {
+                self.version_delete(&mut tx, namespace, key).await?;
+            }
+        }
         sql.push_bind(deletes).push(")");
         if let Some(condition) = delete_condition {
             sql.push(" AND (");
@@ -538,8 +576,18 @@ impl PgvectorClient {
             .await
             .map_err(db)?
             .rows_affected();
+        for receipt in &mut retained {
+            let key = id_key(&receipt["id"])?;
+            receipt["active"] = json!(
+                self.head(&mut tx, namespace, &key).await?.as_deref()
+                    == receipt["version_id"].as_str()
+            );
+        }
         tx.commit().await.map_err(db)?;
         let mut result = json!({"status":"OK", "message":"write committed", "billing":{}, "rows_affected":upserted+patched+deleted, "rows_upserted":upserted, "rows_patched":patched, "rows_deleted":deleted});
+        if versioning.is_some() {
+            result["versions"] = json!(retained);
+        }
         if delete_filter.is_some() || filter_patch.is_some() {
             result["rows_remaining"] = json!(remaining);
         }
@@ -881,12 +929,15 @@ impl PgvectorClient {
                 &format!("{method} {path}"),
             ));
         }
-        if query.is_some_and(|s| !s.is_empty()) {
+        if parts.get(3) != Some(&"records") && query.is_some_and(|s| !s.is_empty()) {
             return Err(unsupported_detail("passthrough", "query parameters"));
         }
         let ns = percent_encoding::percent_decode_str(parts[2])
             .decode_utf8()
             .map_err(|_| invalid("invalid namespace encoding"))?;
+        if parts.get(3) == Some(&"records") && parts.len() >= 6 {
+            return self.record_api(&ns, &parts, method, query, body).await;
+        }
         match (method, parts.get(3).copied(), parts.len()) {
             ("POST", None, 3) => self.write(&ns, &body.unwrap_or(Value::Null)).await,
             ("POST", Some("query"), 4) => self.query_wire(&ns, &body.unwrap_or(Value::Null)).await,
@@ -1161,6 +1212,19 @@ fn doc(mut value: Value) -> DocumentResponse {
 
 #[async_trait]
 impl TurbopufferClient for PgvectorClient {
+    async fn record_versioning_enabled(&self, namespace: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT versioning FROM layer_pgvector.namespaces WHERE scope=$1 AND name=$2",
+        )
+        .bind(&self.scope)
+        .bind(namespace)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?
+        .flatten()
+        .is_some())
+    }
+
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         crate::pgvector_capabilities::PGVECTOR_CAPABILITIES
     }

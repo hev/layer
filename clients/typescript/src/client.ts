@@ -85,6 +85,16 @@ export interface ListNamespacesOptions extends RequestOptions {
   pageSize?: number;
 }
 
+export interface ListRecordActivationsOptions extends RequestOptions {
+  after?: string;
+  limit?: number;
+}
+
+export interface ListRecordVersionsOptions extends RequestOptions {
+  after?: string;
+  limit?: number;
+}
+
 export interface ListSearchHistoryOptions extends RequestOptions {
   tags?: string[];
   from_?: string;
@@ -221,6 +231,20 @@ export class Hevlayer {
     this.timeout = options.timeout === undefined ? 30000 : options.timeout;
     this.fetchImpl = options.fetch ?? defaultFetch();
   }
+
+  async activateRecordVersion(namespace_: string, id: string, body: Models.RecordActivationRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.RecordActivationResult>;
+  async activateRecordVersion(namespace_: string, id: string, body: Models.RecordActivationRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.RecordActivationResult>>;
+  async activateRecordVersion(namespace_: string, id: string, body: Models.RecordActivationRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.RecordActivationResult | LayerResponse<Models.RecordActivationResult>> {
+    return this.requestJson<Models.RecordActivationResult>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/records/" + encodeURIComponent(String(id)) + "/activate",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.RecordActivationResult | LayerResponse<Models.RecordActivationResult>>;
+  }
+
 
   async authenticateKey(body: Models.AuthenticateKeyRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.AuthenticateKeyResponse>;
   async authenticateKey(body: Models.AuthenticateKeyRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.AuthenticateKeyResponse>>;
@@ -767,6 +791,19 @@ export class Hevlayer {
   }
 
 
+  async getRecordVersion(namespace_: string, id: string, versionId: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.RecordVersion>;
+  async getRecordVersion(namespace_: string, id: string, versionId: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.RecordVersion>>;
+  async getRecordVersion(namespace_: string, id: string, versionId: string, opts: RequestOptions = {}): Promise<Models.RecordVersion | LayerResponse<Models.RecordVersion>> {
+    return this.requestJson<Models.RecordVersion>({
+      method: "GET",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/records/" + encodeURIComponent(String(id)) + "/versions/" + encodeURIComponent(String(versionId)),
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.RecordVersion | LayerResponse<Models.RecordVersion>>;
+  }
+
+
   async getScan(namespace_: string, scanId: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.ScanJob>;
   async getScan(namespace_: string, scanId: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.ScanJob>>;
   async getScan(namespace_: string, scanId: string, opts: RequestOptions = {}): Promise<Models.ScanJob | LayerResponse<Models.ScanJob>> {
@@ -1125,6 +1162,38 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.PipelineList | LayerResponse<Models.PipelineList>>;
+  }
+
+
+  async listRecordActivations(namespace_: string, id: string, opts?: ListRecordActivationsOptions & { withPerf?: false }): Promise<Models.RecordActivationList>;
+  async listRecordActivations(namespace_: string, id: string, opts: ListRecordActivationsOptions & { withPerf: true }): Promise<LayerResponse<Models.RecordActivationList>>;
+  async listRecordActivations(namespace_: string, id: string, opts: ListRecordActivationsOptions = {}): Promise<Models.RecordActivationList | LayerResponse<Models.RecordActivationList>> {
+    return this.requestJson<Models.RecordActivationList>({
+      method: "GET",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/records/" + encodeURIComponent(String(id)) + "/activations",
+      params: [
+        { key: "after", value: opts.after },
+        { key: "limit", value: opts.limit }
+      ],
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.RecordActivationList | LayerResponse<Models.RecordActivationList>>;
+  }
+
+
+  async listRecordVersions(namespace_: string, id: string, opts?: ListRecordVersionsOptions & { withPerf?: false }): Promise<Models.RecordVersionList>;
+  async listRecordVersions(namespace_: string, id: string, opts: ListRecordVersionsOptions & { withPerf: true }): Promise<LayerResponse<Models.RecordVersionList>>;
+  async listRecordVersions(namespace_: string, id: string, opts: ListRecordVersionsOptions = {}): Promise<Models.RecordVersionList | LayerResponse<Models.RecordVersionList>> {
+    return this.requestJson<Models.RecordVersionList>({
+      method: "GET",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/records/" + encodeURIComponent(String(id)) + "/versions",
+      params: [
+        { key: "after", value: opts.after },
+        { key: "limit", value: opts.limit }
+      ],
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.RecordVersionList | LayerResponse<Models.RecordVersionList>>;
   }
 
 

@@ -51,6 +51,7 @@ class HevlayerError(Exception):
 
 
 class HevlayerProtocol(Protocol):
+    async def activate_record_version(self, namespace: str, id: str, body: RecordActivationRequest | dict[str, Any], *, with_perf: bool = False) -> RecordActivationResult | LayerResponse[RecordActivationResult]: ...
     async def authenticate_key(self, body: AuthenticateKeyRequest | dict[str, Any], *, with_perf: bool = False) -> AuthenticateKeyResponse | LayerResponse[AuthenticateKeyResponse]: ...
     async def batch_query_namespace(self, namespace: str, body: BatchQueryRequest | dict[str, Any], *, with_perf: bool = False) -> BatchQueryResponse | LayerResponse[BatchQueryResponse]: ...
     async def branch_namespace(self, namespace: str, body: TurbopufferBranchFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
@@ -90,6 +91,7 @@ class HevlayerProtocol(Protocol):
     async def get_namespace_snapshot(self, namespace: str, sha: str, *, with_perf: bool = False) -> SnapshotBody | LayerResponse[SnapshotBody]: ...
     async def get_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, *, with_perf: bool = False) -> GetChunksResponse | LayerResponse[GetChunksResponse]: ...
     async def get_pipeline_status(self, pipeline_id: str, *, with_perf: bool = False) -> PipelineStatus | LayerResponse[PipelineStatus]: ...
+    async def get_record_version(self, namespace: str, id: str, version_id: str, *, with_perf: bool = False) -> RecordVersion | LayerResponse[RecordVersion]: ...
     async def get_scan(self, namespace: str, scan_id: str, *, with_perf: bool = False) -> ScanJob | LayerResponse[ScanJob]: ...
     async def get_scan_results(self, namespace: str, scan_id: str, *, limit: int | None = None, offset: int | None = None, with_perf: bool = False) -> ScanIdsResponse | ScanValuesResponse | LayerResponse[ScanIdsResponse | ScanValuesResponse]: ...
     async def get_snapshot_job(self, namespace: str, job_id: str, *, with_perf: bool = False) -> SnapshotJob | LayerResponse[SnapshotJob]: ...
@@ -115,6 +117,8 @@ class HevlayerProtocol(Protocol):
     async def list_namespace_history(self, namespace: str, *, limit: int | None = None, before: str | None = None, with_perf: bool = False) -> list[SnapshotHistoryEntry] | LayerResponse[list[SnapshotHistoryEntry]]: ...
     async def list_namespaces(self, *, prefix: str | None = None, cursor: str | None = None, page_size: int | None = None, with_perf: bool = False) -> NamespaceList | LayerResponse[NamespaceList]: ...
     async def list_pipelines(self, *, with_perf: bool = False) -> PipelineList | LayerResponse[PipelineList]: ...
+    async def list_record_activations(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordActivationList | LayerResponse[RecordActivationList]: ...
+    async def list_record_versions(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordVersionList | LayerResponse[RecordVersionList]: ...
     async def list_scans(self, namespace: str, *, with_perf: bool = False) -> ScanJobList | LayerResponse[ScanJobList]: ...
     async def list_search_history(self, namespace: str, *, tags: list[str] | None = None, from_: str | None = None, to: str | None = None, before: str | None = None, limit: int | None = None, with_perf: bool = False) -> SearchHistoryListResponse | LayerResponse[SearchHistoryListResponse]: ...
     async def list_snapshot_activity(self, *, since: int | None = None, limit: int | None = None, namespace: str | None = None, cursor: str | None = None, with_perf: bool = False) -> SnapshotActivityList | LayerResponse[SnapshotActivityList]: ...
@@ -195,6 +199,15 @@ class AsyncHevlayer:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def activate_record_version(self, namespace: str, id: str, body: RecordActivationRequest | dict[str, Any], *, with_perf: bool = False) -> RecordActivationResult | LayerResponse[RecordActivationResult]:
+        return await self._request_json(
+            "POST",
+            f"/v2/namespaces/{namespace}/records/{id}/activate",
+            json=body, result_type=RecordActivationResult,
+            with_perf=with_perf,
+        )
+
 
     async def authenticate_key(self, body: AuthenticateKeyRequest | dict[str, Any], *, with_perf: bool = False) -> AuthenticateKeyResponse | LayerResponse[AuthenticateKeyResponse]:
         return await self._request_json(
@@ -546,6 +559,15 @@ class AsyncHevlayer:
         )
 
 
+    async def get_record_version(self, namespace: str, id: str, version_id: str, *, with_perf: bool = False) -> RecordVersion | LayerResponse[RecordVersion]:
+        return await self._request_json(
+            "GET",
+            f"/v2/namespaces/{namespace}/records/{id}/versions/{version_id}",
+            result_type=RecordVersion,
+            with_perf=with_perf,
+        )
+
+
     async def get_scan(self, namespace: str, scan_id: str, *, with_perf: bool = False) -> ScanJob | LayerResponse[ScanJob]:
         return await self._request_json(
             "GET",
@@ -767,6 +789,24 @@ class AsyncHevlayer:
             "GET",
             f"/v2/pipelines",
             result_type=PipelineList,
+            with_perf=with_perf,
+        )
+
+
+    async def list_record_activations(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordActivationList | LayerResponse[RecordActivationList]:
+        return await self._request_json(
+            "GET",
+            f"/v2/namespaces/{namespace}/records/{id}/activations",
+            params={"after": after, "limit": limit}, result_type=RecordActivationList,
+            with_perf=with_perf,
+        )
+
+
+    async def list_record_versions(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordVersionList | LayerResponse[RecordVersionList]:
+        return await self._request_json(
+            "GET",
+            f"/v2/namespaces/{namespace}/records/{id}/versions",
+            params={"after": after, "limit": limit}, result_type=RecordVersionList,
             with_perf=with_perf,
         )
 
@@ -1414,7 +1454,13 @@ class AsyncHevlayer:
         if value is None:
             return None
         if isinstance(value, BaseModel):
-            return value.model_dump(mode="json", by_alias=True, exclude_none=True)
+            body = value.model_dump(mode="json", by_alias=True, exclude_none=True)
+            # Required nullable fields express a precondition (for example,
+            # no active revision). Omitting them changes the wire contract.
+            for name, field in type(value).model_fields.items():
+                if field.is_required() and getattr(value, name) is None:
+                    body[field.serialization_alias or field.alias or name] = None
+            return body
         return value
 
     def _clean_token(self, value: str | None) -> str | None:

@@ -20,6 +20,201 @@ servers:
 security:
 - bearerAuth: []
 paths:
+  "/v2/namespaces/{namespace}/records/{id}/versions":
+    get:
+      operationId: listRecordVersions
+      summary: List immutable record revisions
+      description: 'Pgvector only. Requires opt-in versioning on an empty namespace.
+        Retained revisions never enter search candidate retrieval. History is retained
+        until namespace deletion. Activation requires an exact current version expectation
+        and commits pointer, searchable content and event atomically. See /docs/api/record-versions
+        for retry and deletion semantics.
+
+        '
+      tags:
+      - record-versions
+      x-hevlayer-store-support:
+        turbopuffer: unsupported
+        search: unsupported
+        pgvector: supported
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: after
+        in: query
+        schema:
+          type: string
+        description: Exclusive cursor returned as next_cursor.
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 100
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/RecordVersionList"
+        '400':
+          description: Invalid request or cursor
+        '404':
+          description: Namespace or retained revision not found
+        '409':
+          description: Versioning is disabled or expected current version does not
+            match
+        '422':
+          description: Store does not support record versioning
+  "/v2/namespaces/{namespace}/records/{id}/versions/{version_id}":
+    get:
+      operationId: getRecordVersion
+      summary: Retrieve an immutable record revision
+      description: 'Pgvector only. Requires opt-in versioning on an empty namespace.
+        Retained revisions never enter search candidate retrieval. History is retained
+        until namespace deletion. Activation requires an exact current version expectation
+        and commits pointer, searchable content and event atomically. See /docs/api/record-versions
+        for retry and deletion semantics.
+
+        '
+      tags:
+      - record-versions
+      x-hevlayer-store-support:
+        turbopuffer: unsupported
+        search: unsupported
+        pgvector: supported
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: version_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/RecordVersion"
+        '400':
+          description: Invalid request or cursor
+        '404':
+          description: Namespace or retained revision not found
+        '409':
+          description: Versioning is disabled or expected current version does not
+            match
+        '422':
+          description: Store does not support record versioning
+  "/v2/namespaces/{namespace}/records/{id}/activations":
+    get:
+      operationId: listRecordActivations
+      summary: List record activation events
+      description: 'Pgvector only. Requires opt-in versioning on an empty namespace.
+        Retained revisions never enter search candidate retrieval. History is retained
+        until namespace deletion. Activation requires an exact current version expectation
+        and commits pointer, searchable content and event atomically. See /docs/api/record-versions
+        for retry and deletion semantics.
+
+        '
+      tags:
+      - record-versions
+      x-hevlayer-store-support:
+        turbopuffer: unsupported
+        search: unsupported
+        pgvector: supported
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: after
+        in: query
+        schema:
+          type: string
+        description: Exclusive cursor returned as next_cursor.
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 100
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/RecordActivationList"
+        '400':
+          description: Invalid request or cursor
+        '404':
+          description: Namespace or retained revision not found
+        '409':
+          description: Versioning is disabled or expected current version does not
+            match
+        '422':
+          description: Store does not support record versioning
+  "/v2/namespaces/{namespace}/records/{id}/activate":
+    post:
+      operationId: activateRecordVersion
+      summary: Activate or restore a retained revision atomically
+      description: 'Pgvector only. Requires opt-in versioning on an empty namespace.
+        Retained revisions never enter search candidate retrieval. History is retained
+        until namespace deletion. Activation requires an exact current version expectation
+        and commits pointer, searchable content and event atomically. See /docs/api/record-versions
+        for retry and deletion semantics.
+
+        '
+      tags:
+      - record-versions
+      x-hevlayer-store-support:
+        turbopuffer: unsupported
+        search: unsupported
+        pgvector: supported
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/RecordActivationRequest"
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/RecordActivationResult"
+        '400':
+          description: Invalid request or cursor
+        '404':
+          description: Namespace or retained revision not found
+        '409':
+          description: Versioning is disabled or expected current version does not
+            match
+        '422':
+          description: Store does not support record versioning
   "/v2/namespaces/{namespace}/documents/{doc_id}":
     get:
       operationId: fetchDocument
@@ -2423,20 +2618,132 @@ components:
       additionalProperties: true
       properties:
         pinning: {}
+    RecordVersionReceipt:
+      type: object
+      required:
+      - id
+      - version_id
+      - active
+      properties:
+        id:
+          type: string
+        version_id:
+          type: string
+        active:
+          type: boolean
+    RecordVersion:
+      type: object
+      required:
+      - id
+      - version_id
+      - row
+      - created_at
+      properties:
+        id:
+          type: string
+        version_id:
+          type: string
+        row:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+    RecordVersionList:
+      type: object
+      required:
+      - versions
+      - active_version_id
+      - next_cursor
+      properties:
+        versions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/RecordVersion"
+        active_version_id:
+          type:
+          - string
+          - 'null'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    RecordActivationRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - version_id
+      - expected_current_version
+      properties:
+        version_id:
+          type: string
+        expected_current_version:
+          type:
+          - string
+          - 'null'
+          description: Required; null means no active version. A stale expectation
+            returns 409.
+    RecordActivationResult:
+      type: object
+      required:
+      - id
+      - active_version_id
+      properties:
+        id:
+          type: string
+        active_version_id:
+          type: string
+    RecordActivation:
+      type: object
+      required:
+      - sequence
+      - previous_version_id
+      - version_id
+      - created_at
+      properties:
+        sequence:
+          type: integer
+          format: int64
+        previous_version_id:
+          type:
+          - string
+          - 'null'
+        version_id:
+          type:
+          - string
+          - 'null'
+        created_at:
+          type: string
+    RecordActivationList:
+      type: object
+      required:
+      - activations
+      - next_cursor
+      properties:
+        activations:
+          type: array
+          items:
+            "$ref": "#/components/schemas/RecordActivation"
+        next_cursor:
+          type:
+          - string
+          - 'null'
     TurbopufferWriteRequest:
       type: object
       additionalProperties: true
-      description: 'Native Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`,
-        filter writes, copy, branch, schema, encryption, etc.). A schema attribute
-        may declare `embed` as a provider-namespaced model string or extended `{model,
-        dims, attribute, serving, revision, instructions, modality, chunk}` object.
-        The first row write establishing an embedded schema requires `distance_metric`
-        (Postgres defaults it to `cosine_distance`). `serving.prefer: native` is consumed
-        by Layer and the tpuf-compatible fields are forwarded on a Turbopuffer store.
-        `turbopuffer` (alias `autoscaler`) and native-on-search are resolved through
-        a configured Turbopuffer embedding provider. Native-on-Postgres is resolved
-        once, when the attribute is declared, through the `LAYER_EMBED_URL` embedder
-        when it lists the model, otherwise the configured Turbopuffer embedding provider;
+      description: 'The optional _hevlayer field follows RecordVersionOptions: pgvector-only
+        versioning configuration and a single-row immutable version_id retry key.
+        Enable on an empty namespace; activation is automatic or explicit. Native
+        Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`, filter writes,
+        copy, branch, schema, encryption, etc.). A schema attribute may declare `embed`
+        as a provider-namespaced model string or extended `{model, dims, attribute,
+        serving, revision, instructions, modality, chunk}` object. The first row write
+        establishing an embedded schema requires `distance_metric` (Postgres defaults
+        it to `cosine_distance`). `serving.prefer: native` is consumed by Layer and
+        the tpuf-compatible fields are forwarded on a Turbopuffer store. `turbopuffer`
+        (alias `autoscaler`) and native-on-search are resolved through a configured
+        Turbopuffer embedding provider. Native-on-Postgres is resolved once, when
+        the attribute is declared, through the `LAYER_EMBED_URL` embedder when it
+        lists the model, otherwise the configured Turbopuffer embedding provider;
         Postgres takes one embedded attribute per namespace, no client vector beside
         it; `chunk` requires explicit `turbopuffer` or `worker` serving. `local` is
         resolved in-process by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
@@ -2513,6 +2820,10 @@ components:
       - rows_affected
       - billing
       properties:
+        versions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/RecordVersionReceipt"
         status:
           type: string
         message:

@@ -11,6 +11,7 @@ and pipeline/scan/warm-cache helper methods.
 
 ## Generated Operations
 
+- `ActivateRecordVersion`
 - `AuthenticateKey`
 - `BatchQueryNamespace`
 - `BranchNamespace`
@@ -50,6 +51,7 @@ and pipeline/scan/warm-cache helper methods.
 - `GetNamespaceSnapshot`
 - `GetPipelineDocumentChunks`
 - `GetPipelineStatus`
+- `GetRecordVersion`
 - `GetScan`
 - `GetScanResults`
 - `GetSnapshotJob`
@@ -75,6 +77,8 @@ and pipeline/scan/warm-cache helper methods.
 - `ListNamespaceHistory`
 - `ListNamespaces`
 - `ListPipelines`
+- `ListRecordActivations`
+- `ListRecordVersions`
 - `ListScans`
 - `ListSearchHistory`
 - `ListSnapshotActivity`

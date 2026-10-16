@@ -350,6 +350,11 @@ pub trait TurbopufferClient: Send + Sync {
         crate::capabilities::UNDECLARED
     }
 
+    /// Versioned projections must bypass document caches to preserve atomic activation.
+    async fn record_versioning_enabled(&self, _namespace: &str) -> Result<bool, TurbopufferError> {
+        Ok(false)
+    }
+
     /// The capabilities of the store `namespace` resolves to. Routers answer
     /// for that store; a single store answers for itself.
     fn capabilities_for_namespace(&self, _namespace: &str) -> crate::capabilities::Capabilities {
@@ -787,6 +792,12 @@ impl RoutingTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for RoutingTurbopufferClient {
+    async fn record_versioning_enabled(&self, namespace: &str) -> Result<bool, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .record_versioning_enabled(namespace)
+            .await
+    }
+
     async fn head_namespace_in_store(
         &self,
         namespace: &str,

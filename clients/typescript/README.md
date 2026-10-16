@@ -32,6 +32,7 @@ console.log(response.data.rows);
 
 ## Generated Operations
 
+- `activateRecordVersion`
 - `authenticateKey`
 - `batchQueryNamespace`
 - `branchNamespace`
@@ -71,6 +72,7 @@ console.log(response.data.rows);
 - `getNamespaceSnapshot`
 - `getPipelineDocumentChunks`
 - `getPipelineStatus`
+- `getRecordVersion`
 - `getScan`
 - `getScanResults`
 - `getSnapshotJob`
@@ -96,6 +98,8 @@ console.log(response.data.rows);
 - `listNamespaceHistory`
 - `listNamespaces`
 - `listPipelines`
+- `listRecordActivations`
+- `listRecordVersions`
 - `listScans`
 - `listSearchHistory`
 - `listSnapshotActivity`

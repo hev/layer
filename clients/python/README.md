@@ -41,6 +41,7 @@ asyncio.run(main())
 
 ## Generated Operations
 
+- `activate_record_version`
 - `authenticate_key`
 - `batch_query_namespace`
 - `branch_namespace`
@@ -80,6 +81,7 @@ asyncio.run(main())
 - `get_namespace_snapshot`
 - `get_pipeline_document_chunks`
 - `get_pipeline_status`
+- `get_record_version`
 - `get_scan`
 - `get_scan_results`
 - `get_snapshot_job`
@@ -105,6 +107,8 @@ asyncio.run(main())
 - `list_namespace_history`
 - `list_namespaces`
 - `list_pipelines`
+- `list_record_activations`
+- `list_record_versions`
 - `list_scans`
 - `list_search_history`
 - `list_snapshot_activity`

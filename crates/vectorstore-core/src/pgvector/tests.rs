@@ -1093,3 +1093,104 @@ async fn branch_from_namespace_is_the_named_422() {
     assert_eq!(branch.support, crate::capabilities::Support::Unsupported);
     assert_eq!(branch.note, crate::capabilities::NO_NATIVE_BRANCH);
 }
+
+/// Immutable content and active projection must share one SQL commit.
+#[tokio::test]
+#[ignore = "requires pinned ParadeDB; set PGVECTOR_TEST_URL"]
+async fn pgvector_live_record_versions() {
+    let url = std::env::var("PGVECTOR_TEST_URL").expect("PGVECTOR_TEST_URL required");
+    let a = PgvectorClient::connect(&url, "test/lyr319/store")
+        .await
+        .unwrap();
+    let ns = format!("scratch-lyr319-rust-{}", std::process::id());
+    let path = format!("/v2/namespaces/{ns}/records/guide");
+    let result: Result<()> = async {
+        a.write(&ns, &json!({"_hevlayer":{"versioning":{"enabled":true,"activation":"explicit"},"version_id":"v1"},"upsert_rows":[{"id":"guide","text":"one","vector":[1,0]}]})).await?;
+        assert!(a.fetch(&ns,"guide").await?.is_none());
+        a.dispatch("POST", &format!("{path}/activate"), None, Some(json!({"version_id":"v1","expected_current_version":null}))).await?;
+        a.write(&ns, &json!({"_hevlayer":{"version_id":"v2"},"upsert_rows":[{"id":"guide","text":"two","vector":[0,1]}]})).await?;
+        assert_eq!(a.fetch(&ns,"guide").await?.unwrap().attributes["text"], "one");
+        for i in 0..120 { a.write(&ns,&json!({"upsert_rows":[{"id":format!("a{i}"),"text":"inactive","vector":[1,0]}]})).await?; }
+        let hits = a.query_wire(&ns,&json!({"rank_by":["vector","ANN",[1,0]],"top_k":10,"include_attributes":true})).await?;
+        assert_eq!(hits["rows"].as_array().unwrap().len(),1);
+        assert_eq!(hits["rows"][0]["id"],"guide");
+        a.dispatch("POST", &format!("{path}/activate"), None, Some(json!({"version_id":"v2","expected_current_version":"v1"}))).await?;
+        let stale = a.dispatch("POST", &format!("{path}/activate"), None, Some(json!({"version_id":"v1","expected_current_version":"v1"}))).await.unwrap_err();
+        assert!(matches!(stale, TurbopufferError::Response(ref r) if r.status == 409));
+        a.dispatch("POST", &format!("{path}/activate"), None, Some(json!({"version_id":"v1","expected_current_version":"v2"}))).await?;
+        // Retry of the staged version cannot reactivate it or change history.
+        a.write(&ns,&json!({"_hevlayer":{"version_id":"v2"},"upsert_rows":[{"id":"guide","text":"two","vector":[0,1]}]})).await?;
+        assert!(a.write(&ns,&json!({"_hevlayer":{"version_id":"v2"},"upsert_rows":[{"id":"guide","text":"changed"}]})).await.is_err());
+        let page = a.dispatch("GET", &format!("{path}/versions"), Some("limit=1"), None).await?;
+        assert_eq!(page["active_version_id"],"v1");
+        assert_eq!(page["next_cursor"],"v1");
+        let page = a.dispatch("GET", &format!("{path}/versions"), Some("limit=1&after=v1"), None).await?;
+        assert_eq!(page["versions"][0]["version_id"],"v2");
+        assert!(page["next_cursor"].is_null());
+        let events = a.dispatch("GET", &format!("{path}/activations"), None, None).await?;
+        assert_eq!(events["activations"].as_array().unwrap().len(),3);
+        let restarted = PgvectorClient::connect(&url,"test/lyr319/store").await?;
+        assert_eq!(restarted.fetch(&ns,"guide").await?.unwrap().attributes["text"],"one");
+        a.write(&ns,&json!({"deletes":["guide"]})).await?;
+        assert!(a.fetch(&ns,"guide").await?.is_none());
+        a.dispatch("POST", &format!("{path}/activate"), None, Some(json!({"version_id":"v2","expected_current_version":null}))).await?;
+        Ok(())
+    }.await;
+    let cleanup = a.delete_namespace(&ns).await;
+    result.unwrap();
+    assert_eq!(cleanup.unwrap().status, 200);
+}
+
+#[tokio::test]
+#[ignore = "requires pinned ParadeDB; set PGVECTOR_TEST_URL"]
+async fn pgvector_live_record_versions_automatic_rollback_and_race() {
+    let url = std::env::var("PGVECTOR_TEST_URL").expect("PGVECTOR_TEST_URL required");
+    let a = PgvectorClient::connect(&url, "test/lyr319/store")
+        .await
+        .unwrap();
+    let ns = format!("scratch-lyr319-auto-{}", std::process::id());
+    let path = format!("/v2/namespaces/{ns}/records/guide");
+    let result: Result<()> = async {
+        // Establish both active rows, then force an actual SQL indexing error.
+        a.write(&ns,&json!({"_hevlayer":{"versioning":{"enabled":true,"activation":"automatic"}},"upsert_rows":[{"id":"guide","text":"one"},{"id":"other","text":"reserved"}]})).await?;
+        let first = a.dispatch("GET",&format!("{path}/versions"),None,None).await?["active_version_id"].clone();
+        let n = { let mut tx=a.begin(&ns).await?; a.required(&mut tx,&ns).await? };
+        sqlx::query(&format!("CREATE UNIQUE INDEX ON layer_pgvector.\"{}\" ({})",n.table,quoted(&n.schema.get("text").unwrap().column())))
+            .execute(&a.pool).await.map_err(db)?;
+        assert!(a.write(&ns,&json!({"_hevlayer":{"version_id":"bad"},"upsert_rows":[{"id":"guide","text":"reserved"}]})).await.is_err());
+        let history=a.dispatch("GET",&format!("{path}/versions"),None,None).await?;
+        assert_eq!(history["active_version_id"],first);
+        assert_eq!(history["versions"].as_array().unwrap().len(),1);
+        assert_eq!(a.fetch(&ns,"guide").await?.unwrap().attributes["text"],"one");
+        a.write(&ns,&json!({"_hevlayer":{"version_id":"v2"},"upsert_rows":[{"id":"guide","text":"two"}]})).await?;
+        a.dispatch("POST",&format!("{path}/activate"),None,Some(json!({"version_id":first,"expected_current_version":"v2"}))).await?;
+        // Two processes can observe the same expected pointer; only one wins.
+        let b=PgvectorClient::connect(&url,"test/lyr319/store").await?;
+        let request=json!({"version_id":"v2","expected_current_version":first});
+        let activation_path = format!("{path}/activate");
+        let (one,two)=tokio::join!(a.dispatch("POST",&activation_path,None,Some(request.clone())),
+            b.dispatch("POST",&activation_path,None,Some(request)));
+        assert_ne!(one.is_ok(),two.is_ok());
+        let error=one.err().or_else(||two.err()).unwrap();
+        assert!(matches!(error,TurbopufferError::Response(ref r) if r.status==409));
+        // Retrying a previously committed write cannot republish it after restore.
+        a.dispatch("POST",&format!("{path}/activate"),None,Some(json!({"version_id":first,"expected_current_version":"v2"}))).await?;
+        a.write(&ns,&json!({"_hevlayer":{"version_id":"v2"},"upsert_rows":[{"id":"guide","text":"two"}]})).await?;
+        assert_eq!(a.fetch(&ns,"guide").await?.unwrap().attributes["text"],"one");
+        assert!(a.write(&ns,&json!({"patch_rows":[{"id":"guide","text":"patch"}]})).await.is_err());
+        assert!(a.write(&ns,&json!({"_hevlayer":{"versioning":{"enabled":false,"activation":"automatic"}}})).await.is_err());
+        Ok(())
+    }.await;
+    let cleanup = a.delete_namespace(&ns).await;
+    result.unwrap();
+    assert_eq!(cleanup.unwrap().status, 200);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM layer_pgvector.record_versions WHERE scope=$1 AND namespace=$2",
+    )
+    .bind(&a.scope)
+    .bind(&ns)
+    .fetch_one(&a.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}

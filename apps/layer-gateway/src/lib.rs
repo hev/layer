@@ -1079,6 +1079,22 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             post(routes::upsert::upsert_or_delete).delete(routes::namespaces::delete_namespace),
         )
         .route(
+            "/v2/namespaces/{namespace}/records/{id}/versions",
+            get(routes::record_versions::read),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/records/{id}/versions/{version_id}",
+            get(routes::record_versions::read),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/records/{id}/activations",
+            get(routes::record_versions::read),
+        )
+        .route(
+            "/v2/namespaces/{namespace}/records/{id}/activate",
+            post(routes::record_versions::activate),
+        )
+        .route(
             "/v2/namespaces/{namespace}/init",
             post(routes::init::init_namespace),
         )

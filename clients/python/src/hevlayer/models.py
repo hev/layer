@@ -586,6 +586,52 @@ class PutPipelineRowsRequest(BaseModel):
     schema: dict[str, Any] | None = None
     distance_metric: Literal["cosine_distance", "euclidean_squared"] | None = None
 
+class RecordVersionOptions(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    versioning: dict[str, Any] | None = None
+    version_id: str | None = None
+
+class RecordVersionReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    version_id: str
+    active: bool
+
+class RecordVersion(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    version_id: str
+    row: dict[str, Any]
+    created_at: str
+
+class RecordVersionList(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    versions: list[RecordVersion]
+    active_version_id: str | None
+    next_cursor: str | None
+
+class RecordActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    version_id: str
+    expected_current_version: str | None
+
+class RecordActivationResult(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    id: str
+    active_version_id: str
+
+class RecordActivation(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    sequence: int
+    previous_version_id: str | None
+    version_id: str | None
+    created_at: str
+
+class RecordActivationList(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    activations: list[RecordActivation]
+    next_cursor: str | None
+
 class TurbopufferWriteRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     pass
@@ -600,6 +646,7 @@ class TurbopufferCopyFromRequest(BaseModel):
 
 class TurbopufferWriteResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    versions: list[RecordVersionReceipt] | None = None
     status: str
     message: str
     rows_affected: int

@@ -277,6 +277,9 @@ pub(crate) async fn write_namespace(
     mut body: Value,
     staged_rows: bool,
 ) -> Result<Response, AppError> {
+    if body.get("_hevlayer").is_some() {
+        crate::routes::record_versions::require_store(&state, &namespace)?;
+    }
     let reconcile_lock = state
         .reconcile_locks
         .entry(namespace.clone())

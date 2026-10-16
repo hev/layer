@@ -71,6 +71,25 @@ pub async fn fetch_document(
     let trace_id = trace_id_from_headers(&headers);
     let tags = tags_from_headers(&headers).map_err(AppError::Validation)?;
 
+    // SQL-backed active projections are transactional. A pull-through cache
+    // can be filled by an old read after activation invalidation; read SQL.
+    if state
+        .turbopuffer()
+        .record_versioning_enabled(&namespace)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "read record versioning configuration"))?
+    {
+        let mut doc = state
+            .turbopuffer()
+            .fetch(&namespace, &doc_id)
+            .await
+            .map_err(|e| AppError::from_turbopuffer(e, "fetch active record"))?
+            .ok_or_else(|| AppError::NotFound(format!("document {doc_id}")))?;
+        if let Some(include) = include_attrs.as_ref() {
+            doc.attributes.retain(|k, _| include.contains(k));
+        }
+        return Ok((response_headers("miss", warn_vector_dropped), Json(doc)));
+    }
     // 1. Try Aerospike cache
     let cache_start = Instant::now();
     let cache_result = state
@@ -260,6 +279,36 @@ pub async fn fetch_many_documents(
         .is_some_and(|attrs| attrs.iter().any(|a| a == "vector"));
     let trace_id = trace_id_from_headers(&headers);
     let tags = tags_from_headers(&headers).map_err(AppError::Validation)?;
+
+    if state
+        .turbopuffer()
+        .record_versioning_enabled(&namespace)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "read record versioning configuration"))?
+    {
+        let found = state
+            .turbopuffer()
+            .fetch_many(&namespace, &request.ids)
+            .await
+            .map_err(|e| AppError::from_turbopuffer(e, "fetch active records"))?;
+        let mut documents = Vec::new();
+        let mut missing = Vec::new();
+        for id in &request.ids {
+            if let Some(doc) = found.get(id) {
+                let mut doc = doc.clone();
+                if let Some(include) = request.include_attributes.as_ref() {
+                    doc.attributes.retain(|k, _| include.contains(k));
+                }
+                documents.push(doc);
+            } else {
+                missing.push(id.clone());
+            }
+        }
+        return Ok((
+            response_headers("miss", warn_vector_dropped),
+            Json(FetchManyResponse { documents, missing }),
+        ));
+    }
 
     // 1. Try Aerospike cache for all IDs. On error, treat the whole batch as
     // missing and degrade to turbopuffer rather than 503'ing the caller.
