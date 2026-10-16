@@ -66,6 +66,7 @@ pub struct Bound {
     pub mime: String,
     pub version: Option<String>,
     identity: layer_original::Identity,
+    validate_typed_png: bool,
 }
 
 /// Bind the row's stored reference to this namespace and this document. The
@@ -100,6 +101,11 @@ pub fn bind(namespace: &str, attrs: &Value) -> Result<Bound, AppError> {
         declared_bytes: identity.bytes,
         mime: identity.mime.clone(),
         version: identity.version.clone(),
+        validate_typed_png: identity.mime == "image/png"
+            && attrs
+                .get("original_source_format_mismatch")
+                .and_then(Value::as_bool)
+                == Some(true),
         identity,
     })
 }
@@ -115,7 +121,7 @@ pub fn check_declared_size(bound: &Bound, limit: u64) -> Result<(), AppError> {
 fn oversize(size: u64, limit: u64) -> AppError {
     AppError::PayloadTooLarge(format!(
         "the original is {size} bytes, over this server's {limit}-byte limit; \
-         request specific `pages` as images instead, or use the source link"
+         for a PDF, request specific `pages` as images; otherwise use the source link"
     ))
 }
 
@@ -125,6 +131,12 @@ pub fn verify(bound: &Bound, bytes: &[u8], limit: u64) -> Result<(), AppError> {
         return Err(AppError::Conflict(format!(
             "version mismatch: the retained original {why}; re-sync the source before relying on it"
         )));
+    }
+    if bound.validate_typed_png && layer_original::format::inspect(bytes).mime != Some("image/png")
+    {
+        return Err(AppError::Conflict(
+            "retained typed original is not a valid supported PNG".into(),
+        ));
     }
     if bytes.len() as u64 > limit {
         return Err(oversize(bytes.len() as u64, limit));
@@ -307,6 +319,102 @@ pub fn synthetic_pdf() -> Vec<u8> {
         .bytes(),
     );
     out
+}
+
+/// Called only after MCP namespace authorization. The derived catalog keys are
+/// private Layer metadata, never caller-controlled bucket/key/URL locations.
+async fn catalog_entry(
+    state: &AppState,
+    namespace: &str,
+    key: &str,
+) -> Result<Option<layer_original::catalog::Entry>, AppError> {
+    let Some(bytes) = state
+        .s3
+        .get(key)
+        .await
+        .map_err(|e| AppError::from_s3(e, "read original catalog"))?
+    else {
+        return Ok(None);
+    };
+    if bytes.len() > 64 * 1024 {
+        return Err(AppError::Conflict(
+            "original catalog record exceeds its metadata limit".into(),
+        ));
+    }
+    let entry: layer_original::catalog::Entry = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::Conflict("original catalog record is invalid".into()))?;
+    if !entry.validate(namespace) {
+        return Err(AppError::Forbidden(
+            "original catalog record does not bind this namespace".into(),
+        ));
+    }
+    Ok(Some(entry))
+}
+/// Source-addressed IDs expose unindexed originals without creating search rows.
+pub async fn catalog_record(
+    state: &AppState,
+    namespace: &str,
+    id: &str,
+) -> Result<Value, AppError> {
+    let key = layer_original::catalog::source_key(namespace, id)
+        .ok_or_else(|| AppError::Validation("invalid original catalog id".into()))?;
+    let entry = catalog_entry(state, namespace, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("original catalog reference is missing".into()))?;
+    if entry.id() != id {
+        return Err(AppError::Forbidden(
+            "original catalog reference identity mismatched".into(),
+        ));
+    }
+    Ok(serde_json::json!({"id":id,"attributes":entry.attrs()}))
+}
+/// Lazily complete an already authorized row's missing retained reference. The
+/// row must name exact bytes or an exact drive/item/version; no live provider
+/// call, search enumeration, source URL resolution or queue work is performed.
+pub async fn catalog_fallback(
+    state: &AppState,
+    namespace: &str,
+    body: Value,
+) -> Result<Value, AppError> {
+    let attrs = body.get("attributes").unwrap_or(&body);
+    if attrs.get("original_blob").is_some_and(|v| !v.is_null()) || !state.s3.is_configured() {
+        return Ok(body);
+    }
+    let Some(key) = layer_original::catalog::row_key(namespace, attrs) else {
+        return Ok(body);
+    };
+    let Some(entry) = catalog_entry(state, namespace, &key).await? else {
+        return Ok(body);
+    };
+    if !entry.matches_row(attrs) {
+        return Err(AppError::Conflict(
+            "retained catalog version does not match this indexed document".into(),
+        ));
+    }
+    let mut body = body;
+    let attrs = if body.get("attributes").is_some() {
+        body.get_mut("attributes").unwrap()
+    } else {
+        &mut body
+    };
+    let attrs = attrs
+        .as_object_mut()
+        .ok_or_else(|| AppError::Conflict("original row attributes are invalid".into()))?;
+    let binding = entry.attrs();
+    for key in [
+        "original_blob",
+        "original_sha256",
+        "original_bytes",
+        "original_mime",
+    ] {
+        // The authorized row supplies its own citations and source/business
+        // provenance. A hash alias may name an identical copy in another scope;
+        // never project that copy's metadata through a pinned row.
+        attrs.insert(key.into(), binding[key].clone());
+    }
+    attrs.remove("original_skipped");
+    attrs.remove("original_skipped_bytes");
+    Ok(body)
 }
 
 #[cfg(test)]

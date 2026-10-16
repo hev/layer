@@ -153,8 +153,8 @@ fn generic_tools() -> Vec<Tool> {
 }
 
 fn fetch_original_description() -> &'static str {
-    "Fetch the retained ORIGINAL file of a record's document by the record id from search or get. \
-     Without `pages` it returns the whole PDF as an embedded resource when it is small enough; some \
+    "Fetch the retained ORIGINAL file by a record id from search/get, or a private original:<source-id> catalog reference for an unindexed source file. \
+     Without `pages` it returns the whole typed original as an embedded resource when it is small enough; some \
      hosts do not show embedded files to the model. With `pages` (page numbers of the original PDF) it \
      returns those pages as images the model can see, for charts, drawings, stamps and anything OCR text \
      missed. The source (SharePoint) link and page links are always in the text, never replaced."
@@ -1714,10 +1714,35 @@ impl McpHandler {
                 .parse()
                 .map_err(|_| invalid("invalid MCP history tag"))?,
         );
-        self.require_in_pin(ns, &headers, &id).await?;
-        let body = self.current_original_record(ns, &id, &headers).await?;
+        let body = if id.starts_with(layer_original::catalog::PREFIX) {
+            let body = original::catalog_record(&self.state, &ns.name, &id)
+                .await
+                .map_err(|error| {
+                    if ns.pin().is_some() && matches!(&error, AppError::NotFound(_)) {
+                        pinned_out(&id)
+                    } else {
+                        error
+                    }
+                })?;
+            let attrs = body.get("attributes").unwrap_or(&body);
+            // Catalog records have no search row to prove a pinned predicate.
+            // Every pinned value must be present and equal, otherwise fail closed.
+            if ns
+                .pinned
+                .iter()
+                .flatten()
+                .any(|(name, want)| attrs.get(name) != Some(want))
+            {
+                return Err(pinned_out(&id));
+            }
+            body
+        } else {
+            self.require_in_pin(ns, &headers, &id).await?;
+            let body = self.current_original_record(ns, &id, &headers).await?;
+            self.check_pin(ns, &id, body.get("attributes").unwrap_or(&body))?;
+            original::catalog_fallback(&self.state, &ns.name, body).await?
+        };
         let attrs = body.get("attributes").unwrap_or(&body);
-        self.check_pin(ns, &id, attrs)?;
         let source = ns
             .link
             .as_deref()
@@ -1755,7 +1780,7 @@ impl McpHandler {
         let name = attrs
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or("original.pdf");
+            .unwrap_or(if is_pdf { "original.pdf" } else { "original" });
         let page_number = attrs.get("page").and_then(Value::as_u64);
         let mut text = format!(
             "Original file `{name}` ({} bytes, sha256 {})",
@@ -1764,15 +1789,34 @@ impl McpHandler {
         );
         if let Some(url) = source {
             text.push_str(&format!("\nSource link: {url}"));
-            if let (true, Some(page), false) = (ns.page_link, page_number, url.contains('#')) {
+            if let (true, Some(page), false) =
+                (ns.page_link && is_pdf, page_number, url.contains('#'))
+            {
                 text.push_str(&format!("\nPage {page} link: {url}#page={page}"));
             }
+        }
+        if attrs
+            .get("original_source_format_mismatch")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            text.push_str(&format!(
+                "\nSource format mismatch: actual {}, provider declared {}.",
+                bound.mime,
+                attrs
+                    .get("original_declared_mime")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ));
         }
         let mut structured = json!({
             "id": id, "namespace": ns.name, "name": name, "mimeType": bound.mime,
             "bytes": file.len(), "sha256": bound.sha256, "version": bound.version,
             "sourceLink": source,
-            "pageLink": match (ns.page_link, source, page_number) {
+            "declaredMimeType": attrs.get("original_declared_mime"),
+            "sourceFormatMismatch": attrs.get("original_source_format_mismatch"),
+            "sourceIdentity": {"drive":attrs.get("original_drive"),"item":attrs.get("original_item"),"version":attrs.get("original_version"),"etag":attrs.get("original_etag")},
+            "pageLink": match (ns.page_link && is_pdf, source, page_number) {
                 (true, Some(url), Some(page)) if !url.contains('#') => json!(format!("{url}#page={page}")),
                 _ => Value::Null,
             },
@@ -1780,7 +1824,10 @@ impl McpHandler {
         let mut content = Vec::new();
         match pages {
             None => {
-                text.push_str("\nThe PDF is attached as an embedded resource. If your host does not show it, call again with `pages`.");
+                text.push_str("\nThe original is attached as an embedded resource.");
+                if is_pdf {
+                    text.push_str(" If your host does not show it, call again with `pages`.");
+                }
                 content.push(ContentBlock::text(text));
                 content.push(ContentBlock::resource(
                     ResourceContents::blob(

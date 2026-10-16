@@ -2682,8 +2682,13 @@ dependencies = [
 name = "layer-original"
 version = "0.8.0-dev"
 dependencies = [
+ "base64 0.22.1",
+ "crc32fast",
+ "flate2",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
+ "url",
 ]
 
 [[package]]

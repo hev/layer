@@ -4,6 +4,8 @@
 //! indexed `original_sha256` in the row's own namespace. The pipeline writes it
 //! at ingest, the backfill Function writes it for existing rows, and the
 //! gateway re-derives it before serving a byte. All three use this crate.
+pub mod catalog;
+pub mod format;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
