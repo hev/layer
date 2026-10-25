@@ -2641,6 +2641,24 @@ func (client *Client) RevokeKeyWithPerf(ctx context.Context, keyID string, optio
 }
 
 
+func (client *Client) ScanSourceRows(ctx context.Context, namespace string, body *ProjectedSourceRequest, options ...RequestOption) (*ProjectedSourceResponse, error) {
+	out := ProjectedSourceResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans/rows", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ScanSourceRowsWithPerf(ctx context.Context, namespace string, body *ProjectedSourceRequest, options ...RequestOption) (*LayerResponse[ProjectedSourceResponse], error) {
+	out := ProjectedSourceResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans/rows", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ProjectedSourceResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) SearchNamespace(ctx context.Context, namespace string, body *SearchRequest, options ...RequestOption) (*SearchResponse, error) {
 	out := SearchResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/search", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {

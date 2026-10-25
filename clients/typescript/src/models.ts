@@ -12,6 +12,18 @@ export type TurbopufferRankBy =
   | JSONValue[]
   | Record<string, JSONValue>;
 
+export interface ProjectedSourceRequest {
+  [key: string]: unknown;
+  include_attributes: string[];
+  scan: Record<string, unknown>;
+}
+
+export interface ProjectedSourceResponse {
+  [key: string]: unknown;
+  rows: Record<string, unknown>[];
+  source: Record<string, unknown>;
+}
+
 export interface LicenseSurfaceState {
   [key: string]: unknown;
   state: "licensed" | "grace" | "floor";

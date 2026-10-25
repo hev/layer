@@ -2059,6 +2059,48 @@ struct MetricsTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for MetricsTurbopufferClient {
+    fn supports_projected_source_rows(&self, namespace: &str) -> bool {
+        self.inner.supports_projected_source_rows(namespace)
+    }
+
+    async fn projected_source_partition(
+        &self,
+        namespace: &str,
+        fields: &[String],
+        partition: Option<&Value>,
+        budget: &vectorstore_core::latest_relation::SourceBudget,
+    ) -> Result<vectorstore_core::latest_relation::RelationSource, TurbopufferError> {
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .projected_source_partition(namespace, fields, partition, budget),
+        )
+        .await
+    }
+
+    async fn latest_relation_partition(
+        &self,
+        namespace: &str,
+        request: &vectorstore_core::latest_relation::LatestRequest,
+        partition: &Value,
+        budget: &vectorstore_core::latest_relation::SourceBudget,
+    ) -> Result<vectorstore_core::latest_relation::RelationSource, TurbopufferError> {
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .latest_relation_partition(namespace, request, partition, budget),
+        )
+        .await
+    }
+
     async fn latest_relation_source_for_request(
         &self,
         namespace: &str,
@@ -2444,6 +2486,24 @@ impl TurbopufferClient for MetricsTurbopufferClient {
         let result = vectorstore_core::turbopuffer::scope_read_billing(
             observer,
             self.inner.fetch(namespace, id),
+        )
+        .await;
+        self.metrics.dec_tpuf_inflight();
+        result
+    }
+
+    async fn fetch_complete_source_marker(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.metrics.inc_tpuf_inflight();
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Fetch, billing);
+        });
+        let result = vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.fetch_complete_source_marker(namespace),
         )
         .await;
         self.metrics.dec_tpuf_inflight();

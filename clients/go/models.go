@@ -2,6 +2,16 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type ProjectedSourceRequest struct {
+	IncludeAttributes []string `json:"include_attributes"`
+	Scan map[string]interface{} `json:"scan"`
+}
+
+type ProjectedSourceResponse struct {
+	Rows []map[string]interface{} `json:"rows"`
+	Source map[string]interface{} `json:"source"`
+}
+
 type LicenseSurfaceState struct {
 	State string `json:"state"`
 	SecondsToDeadline int64 `json:"seconds_to_deadline"`

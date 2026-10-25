@@ -6,6 +6,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 JSONValue = Any
 
+class ProjectedSourceRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    include_attributes: list[str]
+    scan: dict[str, Any]
+
+class ProjectedSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    rows: list[dict[str, Any]]
+    source: dict[str, Any]
+
 class LicenseSurfaceState(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     state: Literal["licensed", "grace", "floor"]

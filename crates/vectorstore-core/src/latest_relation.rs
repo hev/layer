@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
+/// Gateway-owned marker, never a logical data row (including during backfill).
+pub const NAMESPACE_META_ID: &str = "_hevlayer:namespace_meta";
+
 type Result<T> = std::result::Result<T, String>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -706,6 +709,47 @@ fn missing_projected_attribute(
     fields.iter().any(|field| message == format!("attribute \"{field}\" not found in schema, cannot be part of `include_attributes`. consider passing `include_attributes=True` to return all attribute data instead"))
 }
 
+/// Shared accepted-row and decoded-response-byte limits for one complete read.
+/// No task is spawned: dropping fan-out drops every pending provider future.
+#[derive(Debug)]
+pub struct SourceBudget {
+    budget: ScanBudget,
+    used: std::sync::Mutex<(usize, usize)>,
+}
+impl SourceBudget {
+    pub fn new(budget: ScanBudget) -> Self {
+        Self {
+            budget,
+            used: std::sync::Mutex::new((0, 0)),
+        }
+    }
+    fn limit(&self) -> usize {
+        let used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        1000.min(
+            self.budget
+                .max_rows
+                .saturating_sub(used.0)
+                .saturating_add(1),
+        )
+    }
+    fn charge(&self, rows: usize, bytes: usize) -> std::result::Result<(), TurbopufferError> {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        used.0 = used.0.saturating_add(rows);
+        used.1 = used.1.saturating_add(bytes);
+        if used.1 > self.budget.max_bytes {
+            return Err(TurbopufferError::Other(
+                "latest relation: scan byte budget exceeded; no partial result".into(),
+            ));
+        }
+        if used.0 > self.budget.max_rows {
+            return Err(TurbopufferError::Other(
+                "latest relation: scan row budget exceeded; no partial result".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Only an adapter with explicit projection support may call this path.
 /// Projection reduces returned attributes, not source row scans or billing.
 pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
@@ -714,6 +758,53 @@ pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
     budget: &ScanBudget,
     fields: Option<&[String]>,
 ) -> std::result::Result<RelationSource, TurbopufferError> {
+    scan_ordered_partition_projected(
+        client,
+        namespace,
+        &SourceBudget::new(budget.clone()),
+        fields,
+        None,
+    )
+    .await
+}
+
+/// One independent complete physical partition; callers share accounting.
+pub async fn scan_ordered_partition_projected<C: TurbopufferClient + ?Sized>(
+    client: &C,
+    namespace: &str,
+    shared: &SourceBudget,
+    fields: Option<&[String]>,
+    partition: Option<&Value>,
+) -> std::result::Result<RelationSource, TurbopufferError> {
+    scan_ordered_partition_projected_strict(client, namespace, shared, fields, partition, false)
+        .await
+}
+
+/// Complete source reads and their topology discovery must fail before using rows.
+pub(crate) fn reject_source_error_envelope(
+    body: &Value,
+) -> std::result::Result<(), TurbopufferError> {
+    if body.get("error").is_some()
+        || body.get("errors").is_some()
+        || body.get("status").and_then(Value::as_str) == Some("error")
+    {
+        return Err(TurbopufferError::Other(
+            "latest relation: source response contains an error envelope".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Strict projections never widen into full trace attributes on schema errors.
+pub async fn scan_ordered_partition_projected_strict<C: TurbopufferClient + ?Sized>(
+    client: &C,
+    namespace: &str,
+    shared: &SourceBudget,
+    fields: Option<&[String]>,
+    partition: Option<&Value>,
+    strict: bool,
+) -> std::result::Result<RelationSource, TurbopufferError> {
+    let budget = &shared.budget;
     let fail = |message: &str| TurbopufferError::Other(format!("latest relation: {message}"));
     budget.validate().map_err(|e| fail(&e))?;
     if budget.consistency != ReadConsistency::Observed {
@@ -733,19 +824,27 @@ pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
         percent_encoding::utf8_percent_encode(namespace, percent_encoding::NON_ALPHANUMERIC)
     );
     loop {
-        let limit = 1000usize.min(budget.max_rows.saturating_sub(rows.len()).saturating_add(1));
+        let limit = shared.limit();
         let mut body = json!({"rank_by":["id","asc"],"top_k":limit,"include_attributes":true,"consistency":{"level":"strong"}});
         if let Some(fields) = fields {
             body["include_attributes"] = json!(fields);
         }
-        if let Some(id) = &cursor {
-            body["filters"] = json!(["id", "Gt", id]);
+        let continuation = cursor.as_ref().map(|id| json!(["id", "Gt", id]));
+        body["filters"] = match (partition, continuation) {
+            (Some(partition), Some(after)) => json!(["And", [partition, after]]),
+            (Some(partition), None) => partition.clone(),
+            (None, Some(after)) => after,
+            (None, None) => Value::Null,
+        };
+        if body["filters"].is_null() {
+            body.as_object_mut().unwrap().remove("filters");
         }
         let response = match client.passthrough("POST", &path, None, Some(body)).await {
             Ok(response) | Err(TurbopufferError::Response(response)) => response,
             Err(error) => return Err(error),
         };
-        let retry_full = pages == 0
+        let retry_full = !strict
+            && pages == 0
             && fields.is_some_and(|fields| missing_projected_attribute(&response, fields));
         if !(200..300).contains(&response.status) && !retry_full {
             return Err(TurbopufferError::Response(response));
@@ -757,15 +856,14 @@ pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
         let body: Value =
             serde_json::from_slice(&response.body).map_err(|_| fail("invalid source JSON"))?;
         crate::turbopuffer::observe_projected_billing(namespace, &body);
-        if bytes > budget.max_bytes {
-            return Err(fail("scan byte budget exceeded; no partial result"));
-        }
+        shared.charge(0, response.body.len())?;
         if retry_full {
             // No successful page exists, so there are no rows/cursors to mix.
             // Keep the failed attempt's bytes and query count in the budget/result.
             fields = None;
             continue;
         }
+        reject_source_error_envelope(&body)?;
         let page = body
             .get("rows")
             .and_then(Value::as_array)
@@ -773,6 +871,12 @@ pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
         if page.len() > limit {
             return Err(fail("source exceeded requested page size"));
         }
+        shared.charge(
+            page.iter()
+                .filter(|row| attr(row, "id") != NAMESPACE_META_ID)
+                .count(),
+            0,
+        )?;
         for row in page {
             let id = attr(row, "id");
             if !id.as_str().is_some_and(|s| !s.is_empty()) && id.as_u64().is_none() {
@@ -784,9 +888,10 @@ pub async fn scan_ordered_source_projected<C: TurbopufferClient + ?Sized>(
                 }
             }
             cursor = Some(id.clone());
-            rows.push(row.clone());
-            if rows.len() > budget.max_rows {
-                return Err(fail("scan row budget exceeded; no partial result"));
+            // An unready/backfilling topology uses the unpartitioned cursor.
+            // Skip its marker here without a string-ID filter on uint stores.
+            if id != NAMESPACE_META_ID {
+                rows.push(row.clone());
             }
         }
         if page.len() < limit {

@@ -1653,6 +1653,20 @@ export class Hevlayer {
   }
 
 
+  async scanSourceRows(namespace_: string, body: Models.ProjectedSourceRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.ProjectedSourceResponse>;
+  async scanSourceRows(namespace_: string, body: Models.ProjectedSourceRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.ProjectedSourceResponse>>;
+  async scanSourceRows(namespace_: string, body: Models.ProjectedSourceRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.ProjectedSourceResponse | LayerResponse<Models.ProjectedSourceResponse>> {
+    return this.requestJson<Models.ProjectedSourceResponse>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/scans/rows",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.ProjectedSourceResponse | LayerResponse<Models.ProjectedSourceResponse>>;
+  }
+
+
   async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.SearchResponse>;
   async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.SearchResponse>>;
   async searchNamespace(namespace_: string, body: Models.SearchRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.SearchResponse | LayerResponse<Models.SearchResponse>> {

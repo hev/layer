@@ -1002,6 +1002,54 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/scans/rows":
+    post:
+      operationId: scanSourceRows
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: unsupported
+        pgvector: unsupported
+      summary: Read a complete bounded projected source
+      description: 'Synchronously acquires every projected revision with shared namespace
+        shard fanout (ordinary default 8), global row/decoded-byte budgets and query
+        admission. No latest selection, mutable filters, background job, cache warming
+        or snapshot. Physical IDs are included and globally sorted. Any source, budget
+        or identity error rejects the whole response. Pending work is dropped on disconnect;
+        accepted provider calls may finish. Projection errors never widen to full
+        attributes. Unsupported adapters reject before source reads. Counters exclude
+        readiness/metadata calls.
+
+        '
+      tags:
+      - scans
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ProjectedSourceRequest"
+      responses:
+        '200':
+          description: Complete observed projected source
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ProjectedSourceResponse"
+        '400':
+          description: Invalid request, source identity or budget failure; no partial
+            rows
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: UnsupportedByStore with feature projected_source_rows
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
   "/v2/namespaces/{namespace}/scans":
     post:
       operationId: createScan
@@ -2500,6 +2548,82 @@ components:
         enum:
         - 'true'
   schemas:
+    ProjectedSourceRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - include_attributes
+      - scan
+      properties:
+        include_attributes:
+          type: array
+          maxItems: 128
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: Literal nonvector field names. Physical ID is always included.
+        scan:
+          type: object
+          additionalProperties: false
+          required:
+          - max_rows
+          - max_bytes
+          - consistency
+          properties:
+            max_rows:
+              type: integer
+              minimum: 1
+              maximum: 1000000
+            max_bytes:
+              type: integer
+              minimum: 1
+              maximum: 268435456
+            consistency:
+              type: string
+              enum:
+              - observed
+    ProjectedSourceResponse:
+      type: object
+      required:
+      - rows
+      - source
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        source:
+          type: object
+          required:
+          - rows
+          - pages
+          - bytes
+          - complete
+          - consistency
+          - threads
+          properties:
+            rows:
+              type: integer
+              minimum: 0
+            pages:
+              type: integer
+              minimum: 1
+            bytes:
+              type: integer
+              minimum: 0
+            complete:
+              type: boolean
+              enum:
+              - true
+            consistency:
+              type: string
+              enum:
+              - observed
+            threads:
+              type: integer
+              minimum: 1
     LicenseSurfaceState:
       type: object
       required:

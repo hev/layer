@@ -110,6 +110,7 @@ and pipeline/scan/warm-cache helper methods.
 - `ResetFailedUdf`
 - `ResumeUdf`
 - `RevokeKey`
+- `ScanSourceRows`
 - `SearchNamespace`
 - `SetDocumentsStage`
 - `UpdateTurbopufferNamespaceMetadata`

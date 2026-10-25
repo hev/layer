@@ -150,6 +150,7 @@ class HevlayerProtocol(Protocol):
     async def reset_failed_udf(self, udf_id: str, *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]: ...
     async def resume_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]: ...
     async def revoke_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]: ...
+    async def scan_source_rows(self, namespace: str, body: ProjectedSourceRequest | dict[str, Any], *, with_perf: bool = False) -> ProjectedSourceResponse | LayerResponse[ProjectedSourceResponse]: ...
     async def search_namespace(self, namespace: str, body: SearchRequest | dict[str, Any], *, with_perf: bool = False) -> SearchResponse | LayerResponse[SearchResponse]: ...
     async def set_documents_stage(self, pipeline_id: str, body: SetDocumentsStageRequest | dict[str, Any], *, with_perf: bool = False) -> DocumentsStageResponse | LayerResponse[DocumentsStageResponse]: ...
     async def update_turbopuffer_namespace_metadata(self, namespace: str, body: TurbopufferMetadataPatch | dict[str, Any], *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]: ...
@@ -1087,6 +1088,15 @@ class AsyncHevlayer:
             "POST",
             f"/v2/keys/{keyId}/revoke",
             result_type=ApiKey,
+            with_perf=with_perf,
+        )
+
+
+    async def scan_source_rows(self, namespace: str, body: ProjectedSourceRequest | dict[str, Any], *, with_perf: bool = False) -> ProjectedSourceResponse | LayerResponse[ProjectedSourceResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/namespaces/{namespace}/scans/rows",
+            json=body, result_type=ProjectedSourceResponse,
             with_perf=with_perf,
         )
 

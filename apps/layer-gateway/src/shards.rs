@@ -16,7 +16,7 @@ pub const DEFAULT_SHARD_COUNT: u64 = 16;
 pub const SHARD_ATTR: &str = "_hevlayer_shard";
 pub const SCHEMA_VERSION_ATTR: &str = "_hevlayer_schema_version";
 pub const SHARD_COUNT_ATTR: &str = "_hevlayer_shard_count";
-pub const NAMESPACE_META_ID: &str = "_hevlayer:namespace_meta";
+pub use vectorstore_core::latest_relation::NAMESPACE_META_ID;
 
 const XXH64_SEED: u64 = 0;
 
@@ -64,7 +64,13 @@ pub async fn read_namespace_marker(
     tpuf: &dyn TurbopufferClient,
     namespace: &str,
 ) -> Result<Option<u64>, TurbopufferError> {
-    let doc = match tpuf.fetch(namespace, NAMESPACE_META_ID).await {
+    marker_shard_count(tpuf.fetch(namespace, NAMESPACE_META_ID).await)
+}
+
+fn marker_shard_count(
+    result: Result<Option<crate::models::DocumentResponse>, TurbopufferError>,
+) -> Result<Option<u64>, TurbopufferError> {
+    let doc = match result {
         Ok(doc) => doc,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) if is_marker_id_type_mismatch(&error) => return Ok(None),
@@ -73,6 +79,11 @@ pub async fn read_namespace_marker(
     let Some(doc) = doc else {
         return Ok(None);
     };
+    if doc.id != NAMESPACE_META_ID {
+        return Err(TurbopufferError::Other(
+            "namespace shard marker identity mismatch".into(),
+        ));
+    }
     Ok(doc
         .attributes
         .get(SHARD_COUNT_ATTR)
@@ -127,14 +138,92 @@ where
         return per_shard(None).await.map(|outcome| vec![outcome]);
     };
 
+    fanout_partitions(
+        state,
+        namespace,
+        threads,
+        shard_count,
+        (0..shard_count).map(|shard| Some(shard_filter(shard))),
+        per_shard,
+    )
+    .await
+}
+
+/// Bound the size of the remainder predicate as well as the number of tasks.
+/// Ordinary fanout retains its historical behavior; complete source readers
+/// use a complete serial cursor for hints outside this bounded plan.
+pub const MAX_COMPLETE_SCAN_SHARDS: u64 = 4096;
+
+/// Unbounded metadata is only a hint; a serial cursor preserves completeness
+/// without allocating a metadata-sized predicate or task set.
+pub fn bounded_complete_shard_count(active: Option<u64>) -> Option<u64> {
+    active.filter(|count| *count > 0 && *count <= MAX_COMPLETE_SCAN_SHARDS)
+}
+
+/// A complete, disjoint cover, even when cached topology is stale. NotEq is the
+/// provider's inverse of Eq, including missing/null attributes. Their conjunction
+/// is precisely the complement of the normal shard predicates. No ID literal is
+/// needed, so the plan works for both string and uint physical IDs.
+pub fn complete_scan_partitions(
+    active: Option<u64>,
+) -> Result<Vec<Option<Value>>, TurbopufferError> {
+    let Some(count) = bounded_complete_shard_count(active) else {
+        return Ok(vec![None]);
+    };
+    let mut partitions: Vec<_> = (0..count).map(|shard| Some(shard_filter(shard))).collect();
+    partitions.push(Some(json!([
+        "And",
+        (0..count)
+            .map(|shard| json!([SHARD_ATTR, "NotEq", shard]))
+            .collect::<Vec<_>>()
+    ])));
+    Ok(partitions)
+}
+
+/// Resolve topology once in the caller, then exhaust a complete cover. The
+/// remainder uses the same width and future lifetime as ordinary shards.
+pub async fn complete_shard_fanout<T, F, Fut>(
+    state: &AppState,
+    namespace: &str,
+    threads: u32,
+    active: Option<u64>,
+    per_partition: F,
+) -> Result<Vec<T>, TurbopufferError>
+where
+    F: Fn(Option<Value>) -> Fut,
+    Fut: Future<Output = Result<T, TurbopufferError>>,
+{
+    let partitions = complete_scan_partitions(active)?;
+    fanout_partitions(
+        state,
+        namespace,
+        threads,
+        bounded_complete_shard_count(active).unwrap_or(1),
+        partitions,
+        per_partition,
+    )
+    .await
+}
+
+async fn fanout_partitions<T, E, F, Fut>(
+    state: &AppState,
+    namespace: &str,
+    threads: u32,
+    shard_count: u64,
+    partitions: impl IntoIterator<Item = Option<Value>>,
+    per_partition: F,
+) -> Result<Vec<T>, E>
+where
+    F: Fn(Option<Value>) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
     let shard_cap = u32::try_from(shard_count).unwrap_or(u32::MAX).max(1);
     let width = threads
         .min(state.scan_threads_max_for(namespace))
         .min(shard_cap)
         .max(1);
-    let per_shard = &per_shard;
-    stream::iter(0..shard_count)
-        .map(|shard| per_shard(Some(shard_filter(shard))))
+    stream::iter(partitions)
+        .map(per_partition)
         .buffer_unordered(width as usize)
         .try_collect::<Vec<_>>()
         .await
@@ -142,6 +231,49 @@ where
 
 pub fn shard_manifest_key(namespace: &str) -> String {
     format!("shards/{namespace}/manifest.json")
+}
+
+/// Complete source acquisition does not infer absence from auth/throttle/data
+/// errors. Residual coverage means no speculative drain/readiness scan is needed,
+/// and an unready marker is never promoted into the shared readiness cache.
+pub async fn complete_source_shard_count(
+    state: &AppState,
+    namespace: &str,
+) -> Result<Option<u64>, TurbopufferError> {
+    if let Some(entry) = state.sharded_namespaces.get(namespace) {
+        return Ok(Some(*entry.value()));
+    }
+    let manifest = match state.s3.get(&shard_manifest_key(namespace)).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_configured() => None,
+        Err(error) => {
+            return Err(TurbopufferError::Other(format!(
+                "source topology manifest read failed: {error}"
+            )))
+        }
+    };
+    if let Some(bytes) = manifest {
+        let manifest: ShardManifest = serde_json::from_slice(&bytes).map_err(|e| {
+            TurbopufferError::Other(format!("invalid source topology manifest: {e}"))
+        })?;
+        if manifest.namespace != namespace {
+            return Err(TurbopufferError::Other(
+                "source topology manifest namespace mismatch".into(),
+            ));
+        }
+        if chrono::DateTime::parse_from_rfc3339(&manifest.completed_at).is_err() {
+            return Err(TurbopufferError::Other(
+                "source topology manifest has invalid completion timestamp".into(),
+            ));
+        }
+        return Ok(Some(manifest.shard_count));
+    }
+    marker_shard_count(
+        state
+            .turbopuffer()
+            .fetch_complete_source_marker(namespace)
+            .await,
+    )
 }
 
 pub async fn active_shard_count(state: &AppState, namespace: &str) -> Option<u64> {
@@ -219,9 +351,15 @@ pub async fn read_shard_manifest(
         return Ok(None);
     };
 
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|e| format!("decode shard manifest: {e}"))
+    let manifest: ShardManifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("decode shard manifest: {e}"))?;
+    if manifest.namespace != namespace {
+        return Err("shard manifest namespace identity mismatch".into());
+    }
+    if chrono::DateTime::parse_from_rfc3339(&manifest.completed_at).is_err() {
+        return Err("shard manifest has invalid completion timestamp".into());
+    }
+    Ok(Some(manifest))
 }
 
 pub async fn write_shard_manifest(

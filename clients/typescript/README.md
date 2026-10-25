@@ -131,6 +131,7 @@ console.log(response.data.rows);
 - `resetFailedUdf`
 - `resumeUdf`
 - `revokeKey`
+- `scanSourceRows`
 - `searchNamespace`
 - `setDocumentsStage`
 - `updateTurbopufferNamespaceMetadata`

@@ -4423,6 +4423,105 @@ fn cmp_values(a: &Value, b: &Value) -> Result<Ordering, String> {
     }
 }
 
+/// Synchronous all-or-nothing projected source acquisition; no background job.
+pub async fn source_rows(
+    State(state): State<Arc<AppState>>,
+    Path(namespace): Path<String>,
+    Json(request): Json<ProjectedSourceRequest>,
+) -> Result<Response, AppError> {
+    use vectorstore_core::latest_relation::{ReadConsistency, SourceBudget};
+    request.scan.validate().map_err(AppError::BadRequest)?;
+    if request.include_attributes.len() > 128
+        || request
+            .include_attributes
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 256 || s == "vector")
+    {
+        return Err(AppError::BadRequest(
+            "include_attributes requires at most 128 nonvector literal field names of 1..256 bytes"
+                .into(),
+        ));
+    }
+    let client = state.turbopuffer();
+    if !client.supports_projected_source_rows(&namespace)
+        || request.scan.consistency != ReadConsistency::Observed
+    {
+        return Err(AppError::unsupported_feature(
+            client.capabilities_for_namespace(&namespace).kind,
+            Some("scans/rows".into()),
+            "projected_source_rows",
+            "complete observed projected source unavailable",
+        ));
+    }
+    let active = crate::shards::complete_source_shard_count(&state, &namespace)
+        .await
+        .map_err(|e| AppError::from_turbopuffer(e, "projected source topology failed"))?;
+    let active = crate::shards::bounded_complete_shard_count(active);
+    let threads = active.map_or(1, |_| {
+        resolve_scan_threads_with_active(&state, &namespace, None, active)
+    });
+    let budget = SourceBudget::new(request.scan.clone());
+    let parts =
+        crate::shards::complete_shard_fanout(&state, &namespace, threads, active, |partition| {
+            let (client, namespace, fields, budget) =
+                (&client, &namespace, &request.include_attributes, &budget);
+            async move {
+                client
+                    .projected_source_partition(namespace, fields, partition.as_ref(), budget)
+                    .await
+            }
+        })
+        .await
+        .map_err(|e| {
+            if e.to_string()
+                .contains("scan row budget exceeded; no partial result")
+                || e.to_string()
+                    .contains("scan byte budget exceeded; no partial result")
+            {
+                AppError::BadRequest(e.to_string())
+            } else {
+                AppError::from_turbopuffer(e, "projected source failed")
+            }
+        })?;
+    let (mut rows, mut pages, mut bytes) = (Vec::new(), 0usize, 0usize);
+    for part in parts {
+        if part.consistency != ReadConsistency::Observed {
+            return Err(AppError::BadRequest("source consistency mismatch".into()));
+        }
+        rows.extend(part.rows);
+        pages += part.pages;
+        bytes += part.bytes;
+    }
+    // Validate identity across partitions before publishing any rows.
+    let mut ids = std::collections::HashSet::new();
+    let mut string_ids = None;
+    for row in &rows {
+        let id = row
+            .get("id")
+            .ok_or_else(|| AppError::BadRequest("source row missing id".into()))?;
+        let string = id.is_string();
+        if string_ids.is_some_and(|previous| previous != string) || !ids.insert(id.to_string()) {
+            return Err(AppError::BadRequest("mixed or duplicate source IDs".into()));
+        }
+        string_ids = Some(string);
+    }
+    rows.sort_by(|a, b| {
+        if string_ids == Some(true) {
+            a["id"].as_str().cmp(&b["id"].as_str())
+        } else {
+            a["id"].as_u64().cmp(&b["id"].as_u64())
+        }
+    });
+    Ok(Json(json!({"source":{"rows":rows.len(),"pages":pages,"bytes":bytes,"complete":true,"consistency":"observed","threads":threads},"rows":rows})).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedSourceRequest {
+    include_attributes: Vec<String>,
+    scan: vectorstore_core::latest_relation::ScanBudget,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

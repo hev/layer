@@ -1152,6 +1152,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             get(routes::scans::get_warm_job),
         )
         .route(
+            "/v2/namespaces/{namespace}/scans/rows",
+            post(routes::scans::source_rows),
+        )
+        .route(
             "/v2/namespaces/{namespace}/scans",
             post(routes::scans::create_scan).get(routes::scans::list_scans),
         )

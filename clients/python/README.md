@@ -140,6 +140,7 @@ asyncio.run(main())
 - `reset_failed_udf`
 - `resume_udf`
 - `revoke_key`
+- `scan_source_rows`
 - `search_namespace`
 - `set_documents_stage`
 - `update_turbopuffer_namespace_metadata`

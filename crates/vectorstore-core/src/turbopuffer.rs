@@ -351,6 +351,24 @@ pub trait TurbopufferClient: Send + Sync {
         crate::capabilities::UNDECLARED
     }
 
+    fn supports_projected_source_rows(&self, _namespace: &str) -> bool {
+        false
+    }
+
+    async fn projected_source_partition(
+        &self,
+        _namespace: &str,
+        _fields: &[String],
+        _partition: Option<&Value>,
+        _budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        Err(crate::capabilities::unsupported_by_store(
+            self.capabilities().kind,
+            "projected_source_rows",
+            None,
+        ))
+    }
+
     /// Complete bounded source for latest-row relations. Unsupported adapters fail closed.
     async fn latest_relation_source(
         &self,
@@ -373,6 +391,21 @@ pub trait TurbopufferClient: Send + Sync {
     ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
         request.validate().map_err(TurbopufferError::Other)?;
         self.latest_relation_source(namespace, &request.scan).await
+    }
+
+    /// Opt-in complete physical partition read with query-global accounting.
+    async fn latest_relation_partition(
+        &self,
+        _namespace: &str,
+        _request: &crate::latest_relation::LatestRequest,
+        _partition: &Value,
+        _budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        Err(crate::capabilities::unsupported_by_store(
+            self.capabilities().kind,
+            "latest_by",
+            Some("partitioned source unavailable"),
+        ))
     }
 
     /// Versioned projections must bypass document caches to preserve atomic activation.
@@ -544,6 +577,17 @@ pub trait TurbopufferClient: Send + Sync {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError>;
+
+    /// Read the topology marker for a complete source scan. HTTP implementations
+    /// must retain provider error envelopes rather than interpreting them as absence.
+    /// Other stores preserve their ordinary marker-fetch semantics by default.
+    async fn fetch_complete_source_marker(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.fetch(namespace, crate::latest_relation::NAMESPACE_META_ID)
+            .await
+    }
 
     async fn fetch_many(
         &self,
@@ -817,6 +861,35 @@ impl RoutingTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for RoutingTurbopufferClient {
+    fn supports_projected_source_rows(&self, namespace: &str) -> bool {
+        self.client_for_namespace(Some(namespace))
+            .is_ok_and(|client| client.supports_projected_source_rows(namespace))
+    }
+
+    async fn projected_source_partition(
+        &self,
+        namespace: &str,
+        fields: &[String],
+        partition: Option<&Value>,
+        budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .projected_source_partition(namespace, fields, partition, budget)
+            .await
+    }
+
+    async fn latest_relation_partition(
+        &self,
+        namespace: &str,
+        request: &crate::latest_relation::LatestRequest,
+        partition: &Value,
+        budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .latest_relation_partition(namespace, request, partition, budget)
+            .await
+    }
+
     async fn latest_relation_source_for_request(
         &self,
         namespace: &str,
@@ -1076,6 +1149,15 @@ impl TurbopufferClient for RoutingTurbopufferClient {
             .await
     }
 
+    async fn fetch_complete_source_marker(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .fetch_complete_source_marker(namespace)
+            .await
+    }
+
     async fn fetch_many(
         &self,
         namespace: &str,
@@ -1209,6 +1291,80 @@ impl HttpCaptureSource {
 }
 
 impl HttpTurbopufferClient {
+    async fn fetch_document(
+        &self,
+        namespace: &str,
+        id: &str,
+        complete_source_marker: bool,
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        // Complete scans require the original envelope even when a cached
+        // document could satisfy an ordinary fetch.
+        if !complete_source_marker
+            && (self.capture_metadata
+                || self.canonical_cache.is_some()
+                || self.shared_cache.is_some())
+            && self.api_key.is_some()
+        {
+            return Ok(self
+                .fetch_many(namespace, &[id.to_owned()])
+                .await?
+                .remove(id));
+        }
+        self.capabilities()
+            .require(crate::capabilities::WireFeature::Fetch)?;
+        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
+            // String-only system markers cannot exist in an integer namespace.
+            return Ok(None);
+        };
+        let body = serde_json::json!({
+            "rank_by": ["id", "asc"],
+            "top_k": 1,
+            "filters": ["id", "Eq", wire_id],
+            "include_attributes": true,
+            "consistency": {"level": "eventual"},
+        });
+
+        reserve_provider_query(namespace, 1).await?;
+        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
+        let resp_body = receipts::read_json(
+            namespace,
+            receipts::ReadKind::Fetch,
+            self.authorize(self.client.post(&url).json(&body))?,
+        )
+        .await?;
+
+        observe_projected_billing(namespace, &resp_body);
+
+        if complete_source_marker {
+            crate::latest_relation::reject_source_error_envelope(&resp_body)?;
+        }
+
+        let rows = resp_body
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(rows.into_iter().find_map(|row| {
+            let (row_id, _) = id_from_wire(row.get("id")?)?;
+            if row_id != id {
+                return None;
+            }
+            let mut attributes = HashMap::new();
+            if let Some(obj) = row.as_object() {
+                for (k, v) in obj {
+                    if !is_system_column(k) {
+                        attributes.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            Some(DocumentResponse {
+                id: row_id,
+                attributes,
+            })
+        }))
+    }
+
     pub fn new(api_key: &str, base_url: &str) -> Self {
         let api_key = api_key.trim();
         let api_key = if api_key.is_empty() {
@@ -2750,6 +2906,48 @@ mod strong_scan_contract_tests {
 
 #[async_trait]
 impl TurbopufferClient for HttpTurbopufferClient {
+    fn supports_projected_source_rows(&self, _namespace: &str) -> bool {
+        true
+    }
+
+    async fn projected_source_partition(
+        &self,
+        namespace: &str,
+        fields: &[String],
+        partition: Option<&Value>,
+        budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        crate::latest_relation::scan_ordered_partition_projected_strict(
+            self,
+            namespace,
+            budget,
+            Some(fields),
+            partition,
+            true,
+        )
+        .await
+    }
+
+    async fn latest_relation_partition(
+        &self,
+        namespace: &str,
+        request: &crate::latest_relation::LatestRequest,
+        partition: &Value,
+        budget: &crate::latest_relation::SourceBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        let fields = request
+            .source_projection()
+            .map_err(TurbopufferError::Other)?;
+        crate::latest_relation::scan_ordered_partition_projected(
+            self,
+            namespace,
+            budget,
+            fields.as_deref(),
+            Some(partition),
+        )
+        .await
+    }
+
     async fn latest_relation_source_for_request(
         &self,
         namespace: &str,
@@ -3392,63 +3590,15 @@ impl TurbopufferClient for HttpTurbopufferClient {
         namespace: &str,
         id: &str,
     ) -> Result<Option<DocumentResponse>, TurbopufferError> {
-        if (self.capture_metadata || self.canonical_cache.is_some() || self.shared_cache.is_some())
-            && self.api_key.is_some()
-        {
-            return Ok(self
-                .fetch_many(namespace, &[id.to_owned()])
-                .await?
-                .remove(id));
-        }
-        self.capabilities()
-            .require(crate::capabilities::WireFeature::Fetch)?;
-        let Some(wire_id) = Self::wire_id(id, self.integer_ids(namespace).await?) else {
-            // String-only system markers cannot exist in an integer namespace.
-            return Ok(None);
-        };
-        let body = serde_json::json!({
-            "rank_by": ["id", "asc"],
-            "top_k": 1,
-            "filters": ["id", "Eq", wire_id],
-            "include_attributes": true,
-            "consistency": {"level": "eventual"},
-        });
+        self.fetch_document(namespace, id, false).await
+    }
 
-        reserve_provider_query(namespace, 1).await?;
-        let url = format!("{}/v2/namespaces/{}/query", self.base_url, namespace);
-        let resp_body = receipts::read_json(
-            namespace,
-            receipts::ReadKind::Fetch,
-            self.authorize(self.client.post(&url).json(&body))?,
-        )
-        .await?;
-
-        observe_projected_billing(namespace, &resp_body);
-
-        let rows = resp_body
-            .get("rows")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(rows.into_iter().find_map(|row| {
-            let (row_id, _) = id_from_wire(row.get("id")?)?;
-            if row_id != id {
-                return None;
-            }
-            let mut attributes = HashMap::new();
-            if let Some(obj) = row.as_object() {
-                for (k, v) in obj {
-                    if !is_system_column(k) {
-                        attributes.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            Some(DocumentResponse {
-                id: row_id,
-                attributes,
-            })
-        }))
+    async fn fetch_complete_source_marker(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<DocumentResponse>, TurbopufferError> {
+        self.fetch_document(namespace, crate::latest_relation::NAMESPACE_META_ID, true)
+            .await
     }
 
     async fn fetch_many(

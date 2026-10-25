@@ -35,17 +35,35 @@ pub(crate) async fn run(
                 Some("aggregate".into()),
             )
         })?;
-    if crate::shards::active_shard_count(&state, &namespace)
+    let active = crate::shards::complete_source_shard_count(&state, &namespace)
         .await
-        .is_some()
-    {
-        return Err(AppError::BadRequest(
-            "latest_by does not support sharded namespaces".into(),
-        ));
-    }
-    let source = state
-        .turbopuffer()
-        .latest_relation_source_for_request(&namespace, &request)
+        .map_err(|e| AppError::from_turbopuffer(e, "latest relation topology failed"))?;
+    let active = crate::shards::bounded_complete_shard_count(active);
+    let threads = super::scans::resolve_scan_threads_with_active(&state, &namespace, None, active);
+    let budget = vectorstore_core::latest_relation::SourceBudget::new(request.scan.clone());
+    let source =
+        crate::shards::complete_shard_fanout(&state, &namespace, threads, active, |partition| {
+            let request = &request;
+            let budget = &budget;
+            let state = &state;
+            let namespace = &namespace;
+            async move {
+                match partition {
+                    Some(partition) => {
+                        state
+                            .turbopuffer()
+                            .latest_relation_partition(namespace, request, &partition, budget)
+                            .await
+                    }
+                    None => {
+                        state
+                            .turbopuffer()
+                            .latest_relation_source_for_request(namespace, request)
+                            .await
+                    }
+                }
+            }
+        })
         .await
         .map_err(|e| {
             if let vectorstore_core::turbopuffer::TurbopufferError::Other(message) = &e {
@@ -68,6 +86,22 @@ pub(crate) async fn run(
                 AppError::from_turbopuffer(e, "latest relation source failed")
             }
         })?;
+    let mut gathered = vectorstore_core::latest_relation::RelationSource {
+        rows: Vec::new(),
+        pages: 0,
+        bytes: 0,
+        consistency: request.scan.consistency,
+    };
+    for part in source {
+        if part.consistency != request.scan.consistency {
+            return Err(AppError::BadRequest(
+                "source consistency does not match request".into(),
+            ));
+        }
+        gathered.rows.extend(part.rows);
+        gathered.pages += part.pages;
+        gathered.bytes += part.bytes;
+    }
     let caller = CALLER_SCOPE
         .try_with(Clone::clone)
         .map_err(|_| AppError::BadRequest("authenticated executor scope unavailable".into()))?;
@@ -79,7 +113,7 @@ pub(crate) async fn run(
     })
     .to_string();
     let response = request
-        .execute(source, scope)
+        .execute(gathered, scope)
         .map_err(AppError::BadRequest)?;
     Ok(Json(response).into_response())
 }
