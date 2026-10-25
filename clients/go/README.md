@@ -12,6 +12,7 @@ and pipeline/scan/warm-cache helper methods.
 ## Generated Operations
 
 - `ActivateRecordVersion`
+- `AggregateLatest`
 - `AuthenticateKey`
 - `BatchQueryNamespace`
 - `BranchNamespace`

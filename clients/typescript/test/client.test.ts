@@ -3,6 +3,24 @@ import { Hevlayer, HevlayerError, type FetchLike, type LayerResponse } from "../
 // @ts-ignore Node provides this built-in module at runtime; the generated package has no dev dependency on @types/node.
 const { test } = await import("node:test");
 
+test("typed latest relation preserves ordering, budgets and observed consistency", async () => {
+  const fetch: FetchLike = async (input,init) => {
+    assertEqual(new URL(String(input)).pathname,"/v2/namespaces/ns/aggregate");
+    assertEqual(init?.method,"POST");
+    const body=JSON.parse(String(init?.body));
+    assertEqual(body.latest_by.key[0],"entity");
+    assertEqual(body.scan.consistency,"observed");
+    assertEqual(body.scan.max_rows,20000);
+    assertEqual(body.grouped.daily.group_by[0].kind,"utc_day");
+    return new Response(JSON.stringify({aggregations:{n:10007},relation:{complete:true,consistency:"observed",read_boundary:"observed_pages",source_rows:20014,source_pages:21,source_bytes:1000,selected_rows:10007,matching_rows:10007,plan:"bounded_source_scan"}}),{status:200,headers:{"content-type":"application/json"}});
+  };
+  const client=new Hevlayer({baseUrl:"https://unit.test",fetch});
+  const result=await client.aggregateLatest("ns",{latest_by:{key:["entity"],order_by:[{field:"version",direction:"desc",nulls:"last"}]},scan:{max_rows:20000,max_bytes:1000000,consistency:"observed"},aggregate_by:{n:["Count"]},grouped:{daily:{group_by:[{kind:"utc_day",field:"day"}],metrics:{n:{kind:"count"}},page_size:10}}});
+  assertEqual(result.aggregations.n,10007);
+  assertEqual(result.relation.consistency,"observed");
+  assertEqual(result.relation.complete,true);
+});
+
 test("core operations use the generated surface", async () => {
   const seen = new Set<string>();
   let scanPolls = 0;

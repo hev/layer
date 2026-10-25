@@ -33,6 +33,7 @@ console.log(response.data.rows);
 ## Generated Operations
 
 - `activateRecordVersion`
+- `aggregateLatest`
 - `authenticateKey`
 - `batchQueryNamespace`
 - `branchNamespace`

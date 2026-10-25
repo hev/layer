@@ -82,6 +82,10 @@ pub async fn query(
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    crate::routes::latest_relation::reject_nested(&body)?;
+    if body.get("latest_by").is_some() {
+        return crate::routes::latest_relation::run(state, namespace, body).await;
+    }
     if let Some(spec) = crate::routes::collapse::extract(&mut body)? {
         return crate::routes::collapse::run(state, namespace, uri, headers, body, spec).await;
     }
@@ -197,6 +201,10 @@ pub(crate) async fn query_prepared(
     body: Value,
     passthrough_uri: Option<(String, Option<String>)>,
 ) -> Result<Response, AppError> {
+    crate::routes::latest_relation::reject_nested(&body)?;
+    if body.get("latest_by").is_some() {
+        return crate::routes::latest_relation::run(state, namespace, body).await;
+    }
     // Layer-only rank expressions are intercepted ahead of passthrough:
     // `HybridText` (RFC 0022) and `Auto` (RFC 0044) are gateway-expanded
     // spellings inside the upstream `rank_by` vocabulary. Everything else —

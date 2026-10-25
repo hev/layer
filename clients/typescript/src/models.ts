@@ -747,6 +747,179 @@ export interface TurbopufferWriteResponse {
   performance?: Record<string, unknown>;
 }
 
+export interface LatestWinnerOrder {
+  [key: string]: unknown;
+  field: string;
+  direction: "asc" | "desc";
+  nulls: "first" | "last";
+  canonical_key?: string;
+}
+
+export interface LatestBy {
+  [key: string]: unknown;
+  key: string[];
+  order_by: LatestWinnerOrder[];
+}
+
+export interface LatestScanBudget {
+  [key: string]: unknown;
+  max_rows: number;
+  max_bytes: number;
+  consistency: "observed" | "snapshot";
+}
+
+export interface LatestRelationMetadata {
+  [key: string]: unknown;
+  complete: boolean;
+  consistency: "observed" | "snapshot";
+  read_boundary: string;
+  source_rows: number;
+  source_pages: number;
+  source_bytes: number;
+  selected_rows: number;
+  matching_rows: number;
+  plan: "bounded_source_scan";
+}
+
+export interface LatestGroupDimensionField {
+  [key: string]: unknown;
+  kind: "field";
+  field: string;
+}
+
+export interface LatestGroupDimensionUtcDay {
+  [key: string]: unknown;
+  kind: "utc_day";
+  field: string;
+}
+
+export interface LatestGroupDimensionWeekday {
+  [key: string]: unknown;
+  kind: "weekday";
+}
+
+export interface LatestGroupDimensionHour {
+  [key: string]: unknown;
+  kind: "hour";
+}
+
+export interface LatestGroupDimensionModel {
+  [key: string]: unknown;
+  kind: "model";
+}
+
+export interface LatestGroupExpansionTimestamps {
+  [key: string]: unknown;
+  kind: "timestamps";
+  field: string;
+  timezone: string;
+}
+
+export interface LatestGroupExpansionModels {
+  [key: string]: unknown;
+  kind: "models";
+  field: string;
+}
+
+export interface LatestGroupMetricCount {
+  [key: string]: unknown;
+  kind: "count";
+}
+
+export interface LatestGroupMetricSum {
+  [key: string]: unknown;
+  kind: "sum";
+  field: string;
+}
+
+export interface LatestGroupMetricModelSum {
+  [key: string]: unknown;
+  kind: "model_sum";
+  field: string;
+}
+
+export interface LatestGroupKeyNull {
+  [key: string]: unknown;
+  "type": "null";
+}
+
+export interface LatestGroupKeyBool {
+  [key: string]: unknown;
+  "type": "bool";
+  value: boolean;
+}
+
+export interface LatestGroupKeyNumber {
+  [key: string]: unknown;
+  "type": "number";
+  value: string;
+}
+
+export interface LatestGroupKeyString {
+  [key: string]: unknown;
+  "type": "string";
+  value: string;
+}
+
+export type LatestGroupDimension = LatestGroupDimensionField | LatestGroupDimensionUtcDay | LatestGroupDimensionWeekday | LatestGroupDimensionHour | LatestGroupDimensionModel;
+
+export type LatestGroupExpansion = LatestGroupExpansionTimestamps | LatestGroupExpansionModels;
+
+export type LatestGroupMetric = LatestGroupMetricCount | LatestGroupMetricSum | LatestGroupMetricModelSum;
+
+export interface LatestGroupedPlan {
+  [key: string]: unknown;
+  group_by: LatestGroupDimension[];
+  expand?: LatestGroupExpansion;
+  metrics: Record<string, LatestGroupMetric>;
+  page_size: number;
+  cursor?: string | null;
+}
+
+export type LatestGroupKey = LatestGroupKeyNull | LatestGroupKeyBool | LatestGroupKeyNumber | LatestGroupKeyString;
+
+export interface LatestGroup {
+  [key: string]: unknown;
+  key: LatestGroupKey[];
+  aggregates: Record<string, number>;
+}
+
+export interface LatestGroupRelationBinding {
+  [key: string]: unknown;
+  scope: string;
+  read_boundary: string;
+  complete: boolean;
+  consistency: "observed_scan" | "snapshot";
+}
+
+export interface LatestGroupPage {
+  [key: string]: unknown;
+  groups: LatestGroup[];
+  next_cursor: string | null;
+  complete: boolean;
+  total_groups: number;
+  relation: LatestGroupRelationBinding;
+  binding: string;
+  selected_rows: number;
+  expanded_instances: number;
+}
+
+export interface LatestRelationRequest {
+  [key: string]: unknown;
+  latest_by: LatestBy;
+  scan: LatestScanBudget;
+  filters?: TurbopufferFilter;
+  aggregate_by: Record<string, unknown>;
+  grouped?: Record<string, LatestGroupedPlan>;
+}
+
+export interface LatestRelationResponse {
+  [key: string]: unknown;
+  aggregations: Record<string, unknown>;
+  relation: LatestRelationMetadata;
+  grouped?: Record<string, LatestGroupPage>;
+}
+
 export interface TurbopufferQueryRequest {
   [key: string]: unknown;
   filters?: TurbopufferFilter;
@@ -755,6 +928,7 @@ export interface TurbopufferQueryRequest {
 
 export interface TurbopufferQueryResponse {
   [key: string]: unknown;
+  relation?: LatestRelationMetadata;
   rows?: Record<string, unknown>[];
   aggregations?: Record<string, unknown>;
   aggregation_groups?: Record<string, unknown>[];

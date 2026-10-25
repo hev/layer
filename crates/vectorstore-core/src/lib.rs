@@ -4,6 +4,8 @@ pub mod delete_timing;
 pub mod document_cache;
 #[cfg(feature = "embedded-engine")]
 pub mod embedded_search;
+pub mod grouped_aggregate;
+pub mod latest_relation;
 pub mod models;
 pub mod namespace_pattern;
 #[cfg(feature = "pgvector")]

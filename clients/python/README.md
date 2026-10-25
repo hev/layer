@@ -42,6 +42,7 @@ asyncio.run(main())
 ## Generated Operations
 
 - `activate_record_version`
+- `aggregate_latest`
 - `authenticate_key`
 - `batch_query_namespace`
 - `branch_namespace`

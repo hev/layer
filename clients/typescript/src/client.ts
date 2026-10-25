@@ -246,6 +246,20 @@ export class Hevlayer {
   }
 
 
+  async aggregateLatest(namespace_: string, body: Models.LatestRelationRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.LatestRelationResponse>;
+  async aggregateLatest(namespace_: string, body: Models.LatestRelationRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.LatestRelationResponse>>;
+  async aggregateLatest(namespace_: string, body: Models.LatestRelationRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.LatestRelationResponse | LayerResponse<Models.LatestRelationResponse>> {
+    return this.requestJson<Models.LatestRelationResponse>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/aggregate",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.LatestRelationResponse | LayerResponse<Models.LatestRelationResponse>>;
+  }
+
+
   async authenticateKey(body: Models.AuthenticateKeyRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.AuthenticateKeyResponse>;
   async authenticateKey(body: Models.AuthenticateKeyRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.AuthenticateKeyResponse>>;
   async authenticateKey(body: Models.AuthenticateKeyRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.AuthenticateKeyResponse | LayerResponse<Models.AuthenticateKeyResponse>> {

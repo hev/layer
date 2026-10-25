@@ -660,12 +660,162 @@ class TurbopufferWriteResponse(BaseModel):
     billing: dict[str, Any]
     performance: dict[str, Any] | None = None
 
+class LatestWinnerOrder(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    field: str
+    direction: Literal["asc", "desc"]
+    nulls: Literal["first", "last"]
+    canonical_key: str | None = None
+
+class LatestBy(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    key: list[str]
+    order_by: list[LatestWinnerOrder]
+
+class LatestScanBudget(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    max_rows: int
+    max_bytes: int
+    consistency: Literal["observed", "snapshot"]
+
+class LatestRelationMetadata(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    complete: bool
+    consistency: Literal["observed", "snapshot"]
+    read_boundary: str
+    source_rows: int
+    source_pages: int
+    source_bytes: int
+    selected_rows: int
+    matching_rows: int
+    plan: Literal["bounded_source_scan"]
+
+class LatestGroupDimensionField(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["field"]
+    field: str
+
+class LatestGroupDimensionUtcDay(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["utc_day"]
+    field: str
+
+class LatestGroupDimensionWeekday(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["weekday"]
+
+class LatestGroupDimensionHour(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["hour"]
+
+class LatestGroupDimensionModel(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["model"]
+
+class LatestGroupExpansionTimestamps(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["timestamps"]
+    field: str
+    timezone: str
+
+class LatestGroupExpansionModels(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["models"]
+    field: str
+
+class LatestGroupMetricCount(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["count"]
+
+class LatestGroupMetricSum(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["sum"]
+    field: str
+
+class LatestGroupMetricModelSum(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    kind: Literal["model_sum"]
+    field: str
+
+class LatestGroupKeyNull(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: Literal["null"]
+
+class LatestGroupKeyBool(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: Literal["bool"]
+    value: bool
+
+class LatestGroupKeyNumber(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: Literal["number"]
+    value: str
+
+class LatestGroupKeyString(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: Literal["string"]
+    value: str
+
+LatestGroupDimension = LatestGroupDimensionField | LatestGroupDimensionUtcDay | LatestGroupDimensionWeekday | LatestGroupDimensionHour | LatestGroupDimensionModel
+
+LatestGroupExpansion = LatestGroupExpansionTimestamps | LatestGroupExpansionModels
+
+LatestGroupMetric = LatestGroupMetricCount | LatestGroupMetricSum | LatestGroupMetricModelSum
+
+class LatestGroupedPlan(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    group_by: list[LatestGroupDimension]
+    expand: LatestGroupExpansion | None = None
+    metrics: dict[str, LatestGroupMetric]
+    page_size: int
+    cursor: str | None = None
+
+LatestGroupKey = LatestGroupKeyNull | LatestGroupKeyBool | LatestGroupKeyNumber | LatestGroupKeyString
+
+class LatestGroup(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    key: list[LatestGroupKey]
+    aggregates: dict[str, float]
+
+class LatestGroupRelationBinding(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    scope: str
+    read_boundary: str
+    complete: bool
+    consistency: Literal["observed_scan", "snapshot"]
+
+class LatestGroupPage(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    groups: list[LatestGroup]
+    next_cursor: str | None
+    complete: bool
+    total_groups: int
+    relation: LatestGroupRelationBinding
+    binding: str
+    selected_rows: int
+    expanded_instances: int
+
+class LatestRelationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    latest_by: LatestBy
+    scan: LatestScanBudget
+    filters: Any | None = None
+    aggregate_by: dict[str, Any]
+    grouped: dict[str, LatestGroupedPlan] | None = None
+
+class LatestRelationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    aggregations: dict[str, Any]
+    relation: LatestRelationMetadata
+    grouped: dict[str, LatestGroupPage] | None = None
+
 class TurbopufferQueryRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     pass
 
 class TurbopufferQueryResponse(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    relation: LatestRelationMetadata | None = None
     rows: list[dict[str, Any]] | None = None
     aggregations: dict[str, Any] | None = None
     aggregation_groups: list[dict[str, Any]] | None = None

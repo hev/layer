@@ -1744,6 +1744,55 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/v2/namespaces/{namespace}/aggregate":
+    post:
+      operationId: aggregateLatest
+      x-hevlayer-store-support:
+        turbopuffer: approximate
+        search: unsupported
+        pgvector: unsupported
+      summary: Aggregate complete latest whole-row winners before predicates
+      description: 'Bounded source scan inside Layer, with declarative winner ordering,
+        post-selection predicates, and Count/Sum. Turbopuffer supports strong individual
+        pages with observed consistency, not a source snapshot. Budget exhaustion
+        fails the whole request without partial totals.
+
+        '
+      tags:
+      - query
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/LatestRelationRequest"
+      responses:
+        '200':
+          description: Compact scalar totals and source consistency/cost counters
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/LatestRelationResponse"
+        '400':
+          description: Invalid plan or source data
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '422':
+          description: Unsupported backend or consistency
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+        '502':
+          description: Source failure or scan budget exhausted; no partial totals
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
   "/v2/namespaces/{namespace}/explain_query":
     post:
       operationId: explainTurbopufferQuery
@@ -2866,22 +2915,475 @@ components:
               type: integer
               minimum: 0
               description: Native embedding latency in milliseconds.
+    LatestWinnerOrder:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - direction
+      - nulls
+      properties:
+        field:
+          type: string
+          minLength: 1
+        direction:
+          type: string
+          enum:
+          - asc
+          - desc
+        nulls:
+          type: string
+          enum:
+          - first
+          - last
+        canonical_key:
+          type: string
+          description: On field id only, compare whether id equals this logical key
+            attribute.
+    LatestBy:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - order_by
+      properties:
+        key:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            type: string
+        order_by:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            "$ref": "#/components/schemas/LatestWinnerOrder"
+    LatestScanBudget:
+      type: object
+      description: 'Gateway row/decoded-response transfer budgets, not bounds on backend
+        scanned or billable bytes. Metadata and sharding checks can add source calls
+        outside the row-page counters.
+
+        '
+      additionalProperties: false
+      required:
+      - max_rows
+      - max_bytes
+      - consistency
+      properties:
+        max_rows:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        max_bytes:
+          type: integer
+          minimum: 1
+          maximum: 268435456
+        consistency:
+          type: string
+          enum:
+          - observed
+          - snapshot
+          description: Turbopuffer supports observed pages only; snapshot is rejected.
+    LatestRelationMetadata:
+      type: object
+      required:
+      - complete
+      - consistency
+      - read_boundary
+      - source_rows
+      - source_pages
+      - source_bytes
+      - selected_rows
+      - matching_rows
+      - plan
+      properties:
+        complete:
+          type: boolean
+          description: Source exhausted under declared consistency; never a snapshot
+            guarantee.
+        consistency:
+          type: string
+          enum:
+          - observed
+          - snapshot
+        read_boundary:
+          type: string
+        source_rows:
+          type: integer
+        source_pages:
+          type: integer
+        source_bytes:
+          type: integer
+          description: Decoded source JSON response bytes, not billable bytes.
+        selected_rows:
+          type: integer
+        matching_rows:
+          type: integer
+        plan:
+          type: string
+          enum:
+          - bounded_source_scan
+    LatestGroupDimensionField:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      properties:
+        kind:
+          type: string
+          enum:
+          - field
+        field:
+          type: string
+    LatestGroupDimensionUtcDay:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      properties:
+        kind:
+          type: string
+          enum:
+          - utc_day
+        field:
+          type: string
+    LatestGroupDimensionWeekday:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      properties:
+        kind:
+          type: string
+          enum:
+          - weekday
+    LatestGroupDimensionHour:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      properties:
+        kind:
+          type: string
+          enum:
+          - hour
+    LatestGroupDimensionModel:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      properties:
+        kind:
+          type: string
+          enum:
+          - model
+    LatestGroupExpansionTimestamps:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      - timezone
+      properties:
+        kind:
+          type: string
+          enum:
+          - timestamps
+        field:
+          type: string
+        timezone:
+          type: string
+          description: IANA timezone identifier; DST applies per timestamp instance.
+    LatestGroupExpansionModels:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      properties:
+        kind:
+          type: string
+          enum:
+          - models
+        field:
+          type: string
+    LatestGroupMetricCount:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      properties:
+        kind:
+          type: string
+          enum:
+          - count
+    LatestGroupMetricSum:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      properties:
+        kind:
+          type: string
+          enum:
+          - sum
+        field:
+          type: string
+    LatestGroupMetricModelSum:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - field
+      properties:
+        kind:
+          type: string
+          enum:
+          - model_sum
+        field:
+          type: string
+    LatestGroupKeyNull:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          enum:
+          - 'null'
+    LatestGroupKeyBool:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - bool
+        value:
+          type: boolean
+    LatestGroupKeyNumber:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - number
+        value:
+          type: string
+    LatestGroupKeyString:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - string
+        value:
+          type: string
+    LatestGroupDimension:
+      oneOf:
+      - "$ref": "#/components/schemas/LatestGroupDimensionField"
+      - "$ref": "#/components/schemas/LatestGroupDimensionUtcDay"
+      - "$ref": "#/components/schemas/LatestGroupDimensionWeekday"
+      - "$ref": "#/components/schemas/LatestGroupDimensionHour"
+      - "$ref": "#/components/schemas/LatestGroupDimensionModel"
+    LatestGroupExpansion:
+      oneOf:
+      - "$ref": "#/components/schemas/LatestGroupExpansionTimestamps"
+      - "$ref": "#/components/schemas/LatestGroupExpansionModels"
+    LatestGroupMetric:
+      oneOf:
+      - "$ref": "#/components/schemas/LatestGroupMetricCount"
+      - "$ref": "#/components/schemas/LatestGroupMetricSum"
+      - "$ref": "#/components/schemas/LatestGroupMetricModelSum"
+    LatestGroupedPlan:
+      type: object
+      additionalProperties: false
+      required:
+      - group_by
+      - metrics
+      - page_size
+      properties:
+        group_by:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            "$ref": "#/components/schemas/LatestGroupDimension"
+        expand:
+          "$ref": "#/components/schemas/LatestGroupExpansion"
+        metrics:
+          type: object
+          minProperties: 1
+          maxProperties: 64
+          additionalProperties:
+            "$ref": "#/components/schemas/LatestGroupMetric"
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        cursor:
+          type:
+          - string
+          - 'null'
+          description: Bound to exact selected relation, plan, page size, scope, boundary
+            and timezone database.
+    LatestGroupKey:
+      oneOf:
+      - "$ref": "#/components/schemas/LatestGroupKeyNull"
+      - "$ref": "#/components/schemas/LatestGroupKeyBool"
+      - "$ref": "#/components/schemas/LatestGroupKeyNumber"
+      - "$ref": "#/components/schemas/LatestGroupKeyString"
+    LatestGroup:
+      type: object
+      required:
+      - key
+      - aggregates
+      properties:
+        key:
+          type: array
+          items:
+            "$ref": "#/components/schemas/LatestGroupKey"
+        aggregates:
+          type: object
+          additionalProperties:
+            type: number
+    LatestGroupRelationBinding:
+      type: object
+      required:
+      - scope
+      - read_boundary
+      - complete
+      - consistency
+      properties:
+        scope:
+          type: string
+          description: Executor-derived auth tenant, store, namespace and complete
+            latest/filter/join query identity. Not a client authorization field.
+        read_boundary:
+          type: string
+        complete:
+          type: boolean
+          description: Complete source relation; always true on successful execution.
+        consistency:
+          type: string
+          enum:
+          - observed_scan
+          - snapshot
+          description: Snapshot only if upstream actually implements it; observed_scan
+            is not transactional.
+    LatestGroupPage:
+      type: object
+      required:
+      - groups
+      - next_cursor
+      - complete
+      - total_groups
+      - relation
+      - binding
+      - selected_rows
+      - expanded_instances
+      properties:
+        groups:
+          type: array
+          items:
+            "$ref": "#/components/schemas/LatestGroup"
+        next_cursor:
+          type:
+          - string
+          - 'null'
+        complete:
+          type: boolean
+          description: No groups remain through this page; source completeness is
+            separate.
+        total_groups:
+          type: integer
+          minimum: 0
+        relation:
+          "$ref": "#/components/schemas/LatestGroupRelationBinding"
+        binding:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        selected_rows:
+          type: integer
+          minimum: 0
+        expanded_instances:
+          type: integer
+          minimum: 0
+    LatestRelationRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - latest_by
+      - scan
+      - aggregate_by
+      properties:
+        latest_by:
+          "$ref": "#/components/schemas/LatestBy"
+        scan:
+          "$ref": "#/components/schemas/LatestScanBudget"
+        filters: {}
+        aggregate_by:
+          type: object
+          additionalProperties: true
+          description: Named [Count] or [Sum, attribute] expressions.
+        grouped:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            "$ref": "#/components/schemas/LatestGroupedPlan"
+    LatestRelationResponse:
+      type: object
+      required:
+      - aggregations
+      - relation
+      properties:
+        aggregations:
+          type: object
+          additionalProperties: true
+        relation:
+          "$ref": "#/components/schemas/LatestRelationMetadata"
+        grouped:
+          type: object
+          additionalProperties:
+            "$ref": "#/components/schemas/LatestGroupPage"
     TurbopufferQueryRequest:
       type: object
       additionalProperties: true
       description: 'Native Turbopuffer query body (`rank_by`, `filters`, `aggregate_by`,
         `group_by`, `limit`, etc.). `rank_by` may reference `["Embed", text]` / `["Embed",
-        text, {model}]`. A source attribute infers its schema model; a derived `embed_<attr>`
-        target requires the explicit model or returns `a model name must be provided`.
-        Native requests on a Turbopuffer store are forwarded transparently. Autoscaler
-        requests are lowered to concrete vectors and merge the provider''s embedding
-        performance into the response, without falling back to native — see `docs/api/embed.mdx`.
+        text, {model}]`. `latest_by` intercepts a separate complete bounded latest-before-filter
+        Count/Sum plan; it requires `scan` and `aggregate_by` and rejects all other
+        query options. See api/latest-relation. A source attribute infers its schema
+        model; a derived `embed_<attr>` target requires the explicit model or returns
+        `a model name must be provided`. Native requests on a Turbopuffer store are
+        forwarded transparently. Autoscaler requests are lowered to concrete vectors
+        and merge the provider''s embedding performance into the response, without
+        falling back to native — see `docs/api/embed.mdx`.
 
         '
     TurbopufferQueryResponse:
       type: object
       additionalProperties: true
       properties:
+        relation:
+          "$ref": "#/components/schemas/LatestRelationMetadata"
         rows:
           type: array
           items:

@@ -1106,6 +1106,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             "/v2/namespaces/{namespace}/search",
             post(routes::search::search),
         )
+        .route(
+            "/v2/namespaces/{namespace}/aggregate",
+            post(routes::latest_relation::aggregate_latest),
+        )
         .route("/v2/query", post(routes::federated_query::query))
         .route(
             "/v2/namespaces/{namespace}/explain_query",

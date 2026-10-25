@@ -70,6 +70,10 @@ pub async fn passthrough_query_post(
     OriginalUri(uri): OriginalUri,
     Json(mut body): Json<Value>,
 ) -> Result<Response, AppError> {
+    crate::routes::latest_relation::reject_nested(&body)?;
+    if body.get("latest_by").is_some() {
+        return crate::routes::latest_relation::run(state, namespace, body).await;
+    }
     if state.turbopuffer().requires_native_wire(&namespace) {
         let path = uri.path().replacen("/v1/namespaces/", "/v2/namespaces/", 1);
         return crate::routes::query::native_wire_query(

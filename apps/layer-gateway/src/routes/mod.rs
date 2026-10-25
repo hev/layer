@@ -8,6 +8,7 @@ pub mod fetch;
 pub mod health;
 pub mod hybrid_text;
 pub mod init;
+pub(crate) mod latest_relation;
 pub mod metadata;
 pub mod metrics;
 pub mod metrics_catalog;

@@ -652,9 +652,159 @@ type TurbopufferWriteResponse struct {
 	Performance map[string]interface{} `json:"performance,omitempty"`
 }
 
+type LatestWinnerOrder struct {
+	Field string `json:"field"`
+	Direction string `json:"direction"`
+	Nulls string `json:"nulls"`
+	CanonicalKey string `json:"canonical_key,omitempty"`
+}
+
+type LatestBy struct {
+	Key []string `json:"key"`
+	OrderBy []LatestWinnerOrder `json:"order_by"`
+}
+
+type LatestScanBudget struct {
+	MaxRows int64 `json:"max_rows"`
+	MaxBytes int64 `json:"max_bytes"`
+	Consistency string `json:"consistency"`
+}
+
+type LatestRelationMetadata struct {
+	Complete bool `json:"complete"`
+	Consistency string `json:"consistency"`
+	ReadBoundary string `json:"read_boundary"`
+	SourceRows int64 `json:"source_rows"`
+	SourcePages int64 `json:"source_pages"`
+	SourceBytes int64 `json:"source_bytes"`
+	SelectedRows int64 `json:"selected_rows"`
+	MatchingRows int64 `json:"matching_rows"`
+	Plan string `json:"plan"`
+}
+
+type LatestGroupDimensionField struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupDimensionUtcDay struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupDimensionWeekday struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupDimensionHour struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupDimensionModel struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupExpansionTimestamps struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+	Timezone string `json:"timezone"`
+}
+
+type LatestGroupExpansionModels struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupMetricCount struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupMetricSum struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupMetricModelSum struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupKeyNull struct {
+	Type string `json:"type"`
+}
+
+type LatestGroupKeyBool struct {
+	Type string `json:"type"`
+	Value bool `json:"value"`
+}
+
+type LatestGroupKeyNumber struct {
+	Type string `json:"type"`
+	Value string `json:"value"`
+}
+
+type LatestGroupKeyString struct {
+	Type string `json:"type"`
+	Value string `json:"value"`
+}
+
+type LatestGroupDimension interface{}
+
+type LatestGroupExpansion interface{}
+
+type LatestGroupMetric interface{}
+
+type LatestGroupedPlan struct {
+	GroupBy []LatestGroupDimension `json:"group_by"`
+	Expand LatestGroupExpansion `json:"expand,omitempty"`
+	Metrics map[string]LatestGroupMetric `json:"metrics"`
+	PageSize int64 `json:"page_size"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type LatestGroupKey interface{}
+
+type LatestGroup struct {
+	Key []LatestGroupKey `json:"key"`
+	Aggregates map[string]float64 `json:"aggregates"`
+}
+
+type LatestGroupRelationBinding struct {
+	Scope string `json:"scope"`
+	ReadBoundary string `json:"read_boundary"`
+	Complete bool `json:"complete"`
+	Consistency string `json:"consistency"`
+}
+
+type LatestGroupPage struct {
+	Groups []LatestGroup `json:"groups"`
+	NextCursor *string `json:"next_cursor"`
+	Complete bool `json:"complete"`
+	TotalGroups int64 `json:"total_groups"`
+	Relation LatestGroupRelationBinding `json:"relation"`
+	Binding string `json:"binding"`
+	SelectedRows int64 `json:"selected_rows"`
+	ExpandedInstances int64 `json:"expanded_instances"`
+}
+
+type LatestRelationRequest struct {
+	LatestBy LatestBy `json:"latest_by"`
+	Scan LatestScanBudget `json:"scan"`
+	Filters interface{} `json:"filters,omitempty"`
+	AggregateBy map[string]interface{} `json:"aggregate_by"`
+	Grouped map[string]LatestGroupedPlan `json:"grouped,omitempty"`
+}
+
+type LatestRelationResponse struct {
+	Aggregations map[string]interface{} `json:"aggregations"`
+	Relation LatestRelationMetadata `json:"relation"`
+	Grouped map[string]LatestGroupPage `json:"grouped,omitempty"`
+}
+
 type TurbopufferQueryRequest map[string]interface{}
 
 type TurbopufferQueryResponse struct {
+	Relation LatestRelationMetadata `json:"relation,omitempty"`
 	Rows []map[string]interface{} `json:"rows,omitempty"`
 	Aggregations map[string]interface{} `json:"aggregations,omitempty"`
 	AggregationGroups []map[string]interface{} `json:"aggregation_groups,omitempty"`

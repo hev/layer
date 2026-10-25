@@ -2059,6 +2059,39 @@ struct MetricsTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for MetricsTurbopufferClient {
+    async fn latest_relation_source_for_request(
+        &self,
+        namespace: &str,
+        request: &vectorstore_core::latest_relation::LatestRequest,
+    ) -> Result<vectorstore_core::latest_relation::RelationSource, TurbopufferError> {
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner
+                .latest_relation_source_for_request(namespace, request),
+        )
+        .await
+    }
+
+    async fn latest_relation_source(
+        &self,
+        namespace: &str,
+        budget: &vectorstore_core::latest_relation::ScanBudget,
+    ) -> Result<vectorstore_core::latest_relation::RelationSource, TurbopufferError> {
+        let metrics = self.metrics.clone();
+        let observer = Arc::new(move |namespace: &str, billing: &Value| {
+            metrics.observe_tpuf_billing(namespace, BillingOperation::Passthrough, billing);
+        });
+        vectorstore_core::turbopuffer::scope_read_billing(
+            observer,
+            self.inner.latest_relation_source(namespace, budget),
+        )
+        .await
+    }
+
     async fn record_versioning_enabled(&self, namespace: &str) -> Result<bool, TurbopufferError> {
         self.inner.record_versioning_enabled(namespace).await
     }

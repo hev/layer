@@ -96,6 +96,7 @@ fn turbopuffer_coverage(
         | Copy | Branch | Encryption | Export | Warm | Consistency | Snapshots | Udf
         | Passthrough | Embed | NearestToId | Temporal | LegBreakdown | Collapse | Auto
         | Threads | VectorEncoding | Search => Coverage::supported(),
+        LatestRelation => Coverage::approximate("Complete bounded source scan with strong per-page reads; observed consistency only, no snapshot or joins."),
         DeleteByFilter | Facet => Coverage::approximate(
             "Native wire request only; the optional portable adapter primitive is unavailable.",
         ),
@@ -348,6 +349,30 @@ pub trait TurbopufferClient: Send + Sync {
 
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         crate::capabilities::UNDECLARED
+    }
+
+    /// Complete bounded source for latest-row relations. Unsupported adapters fail closed.
+    async fn latest_relation_source(
+        &self,
+        _namespace: &str,
+        _budget: &crate::latest_relation::ScanBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        Err(crate::capabilities::unsupported_by_store(
+            self.capabilities().kind,
+            "latest_by",
+            None,
+        ))
+    }
+
+    /// Request-aware source read. Existing adapters retain their complete-source
+    /// implementation unless they explicitly opt in to field projection.
+    async fn latest_relation_source_for_request(
+        &self,
+        namespace: &str,
+        request: &crate::latest_relation::LatestRequest,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        request.validate().map_err(TurbopufferError::Other)?;
+        self.latest_relation_source(namespace, &request.scan).await
     }
 
     /// Versioned projections must bypass document caches to preserve atomic activation.
@@ -792,6 +817,26 @@ impl RoutingTurbopufferClient {
 
 #[async_trait]
 impl TurbopufferClient for RoutingTurbopufferClient {
+    async fn latest_relation_source_for_request(
+        &self,
+        namespace: &str,
+        request: &crate::latest_relation::LatestRequest,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .latest_relation_source_for_request(namespace, request)
+            .await
+    }
+
+    async fn latest_relation_source(
+        &self,
+        namespace: &str,
+        budget: &crate::latest_relation::ScanBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .latest_relation_source(namespace, budget)
+            .await
+    }
+
     async fn record_versioning_enabled(&self, namespace: &str) -> Result<bool, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .record_versioning_enabled(namespace)
@@ -2705,6 +2750,31 @@ mod strong_scan_contract_tests {
 
 #[async_trait]
 impl TurbopufferClient for HttpTurbopufferClient {
+    async fn latest_relation_source_for_request(
+        &self,
+        namespace: &str,
+        request: &crate::latest_relation::LatestRequest,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        let fields = request
+            .source_projection()
+            .map_err(TurbopufferError::Other)?;
+        crate::latest_relation::scan_ordered_source_projected(
+            self,
+            namespace,
+            &request.scan,
+            fields.as_deref(),
+        )
+        .await
+    }
+
+    async fn latest_relation_source(
+        &self,
+        namespace: &str,
+        budget: &crate::latest_relation::ScanBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        crate::latest_relation::scan_ordered_source(self, namespace, budget).await
+    }
+
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         TURBOPUFFER_CAPABILITIES
     }
@@ -4179,6 +4249,14 @@ fn object_schema_attribute(body: &Value) -> Option<&str> {
 
 #[async_trait]
 impl TurbopufferClient for MockTurbopufferClient {
+    async fn latest_relation_source(
+        &self,
+        namespace: &str,
+        budget: &crate::latest_relation::ScanBudget,
+    ) -> Result<crate::latest_relation::RelationSource, TurbopufferError> {
+        crate::latest_relation::scan_ordered_source(self, namespace, budget).await
+    }
+
     fn capabilities(&self) -> crate::capabilities::Capabilities {
         self.capabilities_override
             .read()

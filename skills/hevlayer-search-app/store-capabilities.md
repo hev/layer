@@ -39,6 +39,7 @@ request does once a turbopuffer key is set.
 | Ranked cursor / searchAfter | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Ordered scans | [api/scans](https://hevlayer.com/docs/api/scans) | yes | yes |
 | Facets | [api/scans](https://hevlayer.com/docs/api/scans) | no | partial |
+| Latest-row relation and scalar aggregates | [api/latest-relation](https://hevlayer.com/docs/api/latest-relation) | no | partial |
 | Aggregates / group_by | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
 | Delete by filter | [api/write](https://hevlayer.com/docs/api/write) | yes | partial |
 | Row patches | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
@@ -70,6 +71,7 @@ request does once a turbopuffer key is set.
 - **Multiple vector/text fields** on pgvector (local): Any number of full_text_search fields, ranked one at a time by BM25; a second vector field returns 422
 - **Multi-query queries body / rerank_by (client-composed hybrid)** on pgvector (local): 422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
+- **Latest-row relation and scalar aggregates** on turbopuffer: Complete bounded source scan with strong per-page reads; observed consistency only, no snapshot or joins.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
 - **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding requires explicit turbopuffer serving (autoscaler alias).

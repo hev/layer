@@ -52,6 +52,7 @@ class HevlayerError(Exception):
 
 class HevlayerProtocol(Protocol):
     async def activate_record_version(self, namespace: str, id: str, body: RecordActivationRequest | dict[str, Any], *, with_perf: bool = False) -> RecordActivationResult | LayerResponse[RecordActivationResult]: ...
+    async def aggregate_latest(self, namespace: str, body: LatestRelationRequest | dict[str, Any], *, with_perf: bool = False) -> LatestRelationResponse | LayerResponse[LatestRelationResponse]: ...
     async def authenticate_key(self, body: AuthenticateKeyRequest | dict[str, Any], *, with_perf: bool = False) -> AuthenticateKeyResponse | LayerResponse[AuthenticateKeyResponse]: ...
     async def batch_query_namespace(self, namespace: str, body: BatchQueryRequest | dict[str, Any], *, with_perf: bool = False) -> BatchQueryResponse | LayerResponse[BatchQueryResponse]: ...
     async def branch_namespace(self, namespace: str, body: TurbopufferBranchFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]: ...
@@ -205,6 +206,15 @@ class AsyncHevlayer:
             "POST",
             f"/v2/namespaces/{namespace}/records/{id}/activate",
             json=body, result_type=RecordActivationResult,
+            with_perf=with_perf,
+        )
+
+
+    async def aggregate_latest(self, namespace: str, body: LatestRelationRequest | dict[str, Any], *, with_perf: bool = False) -> LatestRelationResponse | LayerResponse[LatestRelationResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/namespaces/{namespace}/aggregate",
+            json=body, result_type=LatestRelationResponse,
             with_perf=with_perf,
         )
 

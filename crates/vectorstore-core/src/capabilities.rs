@@ -50,6 +50,7 @@ wire_features! {
     Pagination => ("search_after", "Ranked cursor / searchAfter", "api/query"),
     OrderedScan => ("ordered_scan", "Ordered scans", "api/scans"),
     Facet => ("facet", "Facets", "api/scans"),
+    LatestRelation => ("latest_by", "Latest-row relation and scalar aggregates", "api/latest-relation"),
     Aggregate => ("aggregate_by", "Aggregates / group_by", "api/query"),
     DeleteByFilter => ("delete_by_filter", "Delete by filter", "api/write"),
     PatchRows => ("patch_rows", "Row patches", "api/write"),

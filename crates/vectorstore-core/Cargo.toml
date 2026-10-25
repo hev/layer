@@ -10,6 +10,8 @@ pgvector = ["dep:sqlx"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("kube", "embedded-engine"))'] }
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 http = "1"
 async-trait = "0.1"
 base64 = "0.23"

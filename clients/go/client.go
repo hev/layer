@@ -669,6 +669,24 @@ func (client *Client) ActivateRecordVersionWithPerf(ctx context.Context, namespa
 }
 
 
+func (client *Client) AggregateLatest(ctx context.Context, namespace string, body *LatestRelationRequest, options ...RequestOption) (*LatestRelationResponse, error) {
+	out := LatestRelationResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/aggregate", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) AggregateLatestWithPerf(ctx context.Context, namespace string, body *LatestRelationRequest, options ...RequestOption) (*LayerResponse[LatestRelationResponse], error) {
+	out := LatestRelationResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/aggregate", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[LatestRelationResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) AuthenticateKey(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*AuthenticateKeyResponse, error) {
 	out := AuthenticateKeyResponse{}
 	if _, err := client.request(ctx, "POST", "/v2/keys/authenticate", url.Values{}, body, &out, options...); err != nil {
