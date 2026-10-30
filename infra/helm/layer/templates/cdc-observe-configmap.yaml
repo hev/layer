@@ -1,0 +1,19 @@
+{{- if .Values.gateway.cdcObserve.enabled }}
+{{- if not .Values.gateway.cdcObserve.bindings }}
+{{- fail "gateway.cdcObserve.bindings is required when observe is enabled" }}
+{{- end }}
+{{- range .Values.gateway.cdcObserve.bindings }}
+{{- if ne .mode "observe" }}
+{{- fail "gateway.cdcObserve bindings must use mode: observe" }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "layer.fullname" . }}-cdc-observe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+data:
+  observe.json: {{ .Values.gateway.cdcObserve.bindings | toJson | quote }}
+{{- end }}

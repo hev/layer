@@ -20,6 +20,155 @@ servers:
 security:
 - bearerAuth: []
 paths:
+  "/v2/cdc/{binding}":
+    get:
+      operationId: inspectCdcBinding
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Inspect a CDC binding and blocked readiness
+      description: 'Pro only. Requires a Layer key with read scope on both VectorStores
+        for every namespace in the binding. Observe requires source read grants for
+        the entire binding; prefix bindings require a declared Layer read or admin
+        key. Returns no credentials or mutation payloads. Configured observe bindings
+        instead return capture counts, gaps and buffer usage. Full delivery is unavailable
+        in this build; ready is always false. Stale observed generations and requested
+        enabled capture report blocked.
+
+        '
+      tags:
+      - cdc
+      parameters:
+      - name: binding
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Binding configuration and factual readiness observations
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - "$ref": "#/components/schemas/CdcInspection"
+                - "$ref": "#/components/schemas/CdcObserveInspection"
+        '401':
+          description: A recognized Layer key is required
+        '403':
+          description: Both store grants must cover every configured namespace
+        '404':
+          description: Binding not found
+        '503':
+          description: Control plane unavailable or binding/status invalid
+  "/v2/cdc/{binding}/mutations/{id}":
+    get:
+      operationId: inspectCdcMutation
+      summary: Inspect an isolated CDC mutation receipt
+      description: 'Requires the optional cdc-capture build feature and isolated runtime
+        composition, or configured observe binding. Full delivery fixtures are absent
+        from production startup. Observe requires source read grants; full delivery
+        requires read grants on both stores for the selected namespace. No payload
+        or credentials. A 200 reports status only; it does not acknowledge a successful
+        write.
+
+        '
+      tags:
+      - cdc
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: unsupported
+      parameters:
+      - name: binding
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: namespace
+        in: query
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Durable factual status without payload
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/CdcMutationResponse"
+        '401':
+          description: Recognized Layer identity required
+        '403':
+          description: Both store namespace grants required
+        '404':
+          description: Binding or mutation not found
+        '503':
+          description: Runtime absent or durable storage unavailable
+  "/v2/cdc/{binding}/mutations/{id}/replay":
+    post:
+      operationId: replayCdcMutation
+      summary: Attempt a proven rejected CDC destination phase once
+      description: 'Isolated cdc-capture composition only. Requires admin grants on
+        both stores for the selected namespace. Uses retained effect and receipt CAS;
+        never repeats the source or resolves an unknown attempt. Returned 200 reports
+        the resulting receipt, including partial or unknown outcomes. Observe bindings
+        always reject replay with 409.
+
+        '
+      tags:
+      - cdc
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: unsupported
+      parameters:
+      - name: binding
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: namespace
+        in: query
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CdcReplayRequest"
+      responses:
+        '200':
+          description: Factual status after one destination attempt
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/CdcMutationResponse"
+        '401':
+          description: Recognized Layer identity required
+        '403':
+          description: Both store administrator grants required
+        '404':
+          description: Binding not found
+        '409':
+          description: Stale receipt or replay unsafe
+        '429':
+          description: Buffer capacity exhausted
+        '503':
+          description: Runtime absent or storage outcome unresolved
   "/v2/namespaces/{namespace}/records/{id}/versions":
     get:
       operationId: listRecordVersions
@@ -1287,7 +1436,12 @@ paths:
         key needs read scope on the source (403), and the source must resolve to the
         same VectorStore (422 `BranchAcrossStores`). A store without native branching
         returns 422 `UnsupportedByStore` naming the feature; the gateway never emulates
-        a branch with a copy.
+        a branch with a copy. The optional isolated cdc-capture composition accepts
+        only one explicit vector upsert with an epoch-bearing Idempotency-Key. Healthy
+        metadata delivery returns 503 cdc_partial; no vector-final ACK is implemented.
+        Unsupported capture shapes return 422, identity conflicts/predecessors 409,
+        and buffer capacity refusal 429. Production startup does not install this
+        runtime; ordinary capture-disabled behavior is unchanged.
 
         '
       tags:
@@ -1295,6 +1449,12 @@ paths:
       - documents
       parameters:
       - "$ref": "#/components/parameters/namespace"
+      - name: Idempotency-Key
+        in: header
+        description: Required only by isolated CDC capture; current epoch followed
+          by colon and immutable mutation ID.
+        schema:
+          type: string
       requestBody:
         required: true
         content:
@@ -1308,6 +1468,9 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/TurbopufferWriteResponse"
+        '409':
+          description: CDC identity conflict, stale epoch or unresolved namespace
+            predecessor
         '400':
           description: 'A branch or copy combined with documents, `schema`, or the
             other key, or a source value that names no namespace
@@ -1333,7 +1496,9 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Error"
+                oneOf:
+                - "$ref": "#/components/schemas/Error"
+                - "$ref": "#/components/schemas/CdcFailure"
         '429':
           description: The upstream host serving a local CLIP image URL rate-limited
             the fetch
@@ -1345,7 +1510,9 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Error"
+                oneOf:
+                - "$ref": "#/components/schemas/Error"
+                - "$ref": "#/components/schemas/CdcFailure"
         '502':
           description: Turbopuffer write or local CLIP image fetch failed
           content:
@@ -1353,8 +1520,8 @@ paths:
               schema:
                 "$ref": "#/components/schemas/Error"
         '503':
-          description: The upstream host serving a local CLIP image URL returned a
-            server error
+          description: Upstream unavailable, or isolated CDC delivery partial, pending,
+            unknown or storage unresolved
           headers:
             Retry-After:
               description: Retry delay or date supplied by the image host, when present.
@@ -1363,7 +1530,9 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Error"
+                oneOf:
+                - "$ref": "#/components/schemas/Error"
+                - "$ref": "#/components/schemas/CdcFailure"
     delete:
       operationId: deleteNamespace
       x-hevlayer-store-support:
@@ -2624,6 +2793,366 @@ components:
             threads:
               type: integer
               minimum: 1
+    CdcFailure:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          properties:
+            code:
+              type: string
+        cdc:
+          "$ref": "#/components/schemas/CdcMutationReceipt"
+    CdcReplayRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - expectedReceiptVersion
+      properties:
+        expectedReceiptVersion:
+          type: integer
+          format: int64
+          minimum: 1
+    CdcMutationResponse:
+      type: object
+      required:
+      - cdc
+      properties:
+        cdc:
+          oneOf:
+          - "$ref": "#/components/schemas/CdcMutationReceipt"
+          - "$ref": "#/components/schemas/CdcObserveReceipt"
+    CdcMutationReceipt:
+      type: object
+      required:
+      - mutationId
+      - epoch
+      - namespaceIncarnation
+      - sequence
+      - receiptVersion
+      - inputHash
+      - state
+      - destinations
+      - embedding
+      - replayEligible
+      properties:
+        mutationId:
+          type: string
+        epoch:
+          type: string
+        namespaceIncarnation:
+          type: string
+        sequence:
+          type: integer
+          format: int64
+        receiptVersion:
+          type: integer
+          format: int64
+        inputHash:
+          type: string
+        state:
+          type: string
+          enum:
+          - pending
+          - complete
+          - partial
+          - failed
+          - unknown
+        sourceVersion:
+          type:
+          - string
+          - 'null'
+        destinations:
+          type: object
+          additionalProperties: true
+          description: Source and destination phase facts; dispatched pending attempts
+            project as unknown.
+        embedding:
+          type: object
+          additionalProperties: true
+          description: Retained vector identity and completion gap; supplied vectors
+            do not establish finality.
+        replayEligible:
+          type: boolean
+    CdcObserveReceipt:
+      type: object
+      required:
+      - mode
+      - state
+      - epoch
+      - namespaceIncarnation
+      - receiptVersion
+      - namespace
+      - requestBytes
+      - mutationId
+      - sequence
+      - inputHash
+      - observation
+      - destination
+      - replayEligible
+      - capture
+      properties:
+        epoch:
+          type: string
+        namespaceIncarnation:
+          type: string
+        receiptVersion:
+          type: integer
+          format: int64
+        namespace:
+          type: string
+        requestBytes:
+          type: integer
+          format: int64
+        capture:
+          "$ref": "#/components/schemas/CdcObserveInspection"
+        mode:
+          type: string
+          enum:
+          - observe
+        state:
+          type: string
+          enum:
+          - observed
+        mutationId:
+          type: string
+        sequence:
+          type: integer
+          format: int64
+        inputHash:
+          type: string
+        observation:
+          type: object
+          required:
+          - source
+          - capturedAt
+          properties:
+            capturedAt:
+              type: integer
+              format: int64
+            source:
+              type: object
+              required:
+              - state
+              properties:
+                state:
+                  type: string
+                  enum:
+                  - accepted
+                  - rejected
+                  - unknown
+                httpStatus:
+                  type: integer
+        destination:
+          type: object
+          required:
+          - state
+          - reason
+          properties:
+            state:
+              type: string
+              enum:
+              - not_dispatched
+            reason:
+              type: string
+              enum:
+              - observe_mode
+        replayEligible:
+          type: boolean
+          enum:
+          - false
+    CdcObserveInspection:
+      type: object
+      required:
+      - name
+      - mode
+      - ready
+      - namespaces
+      - prefixes
+      - capturedCount
+      - retainedCount
+      - evictedCount
+      - lastCapturedAt
+      - gapCount
+      - gaps
+      - processGaps
+      - countersScope
+      - buffer
+      - destination
+      properties:
+        name:
+          type: string
+        mode:
+          type: string
+          enum:
+          - observe
+        ready:
+          type: boolean
+          enum:
+          - false
+        namespaces:
+          type: array
+          items:
+            type: string
+        prefixes:
+          type: array
+          items:
+            type: string
+        capturedCount:
+          type: integer
+          format: int64
+          description: Cumulative persisted captures across replicas and restarts
+            while buffer records survive.
+        retainedCount:
+          type: integer
+          format: int64
+        evictedCount:
+          type: integer
+          format: int64
+        processGaps:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: Process-local gaps, including failures to persist gap evidence.
+        lastCapturedAt:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        gapCount:
+          type: integer
+          format: int64
+        gaps:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        countersScope:
+          type: string
+        buffer:
+          type: object
+          required:
+          - available
+          - usedBytes
+          - maxBytes
+          - shards
+          properties:
+            available:
+              type: boolean
+            usedBytes:
+              type: integer
+              format: int64
+            maxBytes:
+              type: integer
+              format: int64
+            shards:
+              type: integer
+              minimum: 1
+              maximum: 64
+        destination:
+          type: object
+          required:
+          - state
+          - reason
+          properties:
+            state:
+              type: string
+              enum:
+              - not_dispatched
+            reason:
+              type: string
+              enum:
+              - observe_mode
+    CdcReference:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+    CdcCondition:
+      type: object
+      required:
+      - type
+      - status
+      - reason
+      - message
+      - lastTransitionTime
+      properties:
+        type:
+          type: string
+        status:
+          type: string
+        reason:
+          type:
+          - string
+          - 'null'
+        message:
+          type:
+          - string
+          - 'null'
+        lastTransitionTime:
+          type:
+          - string
+          - 'null'
+    CdcInspection:
+      type: object
+      required:
+      - name
+      - generation
+      - observedGeneration
+      - sourceRef
+      - destinationRef
+      - bufferRef
+      - namespaces
+      - captureRequested
+      - captureState
+      - ready
+      - conditions
+      properties:
+        name:
+          type: string
+        generation:
+          type: integer
+          format: int64
+        observedGeneration:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        sourceRef:
+          "$ref": "#/components/schemas/CdcReference"
+        destinationRef:
+          "$ref": "#/components/schemas/CdcReference"
+        bufferRef:
+          "$ref": "#/components/schemas/CdcReference"
+        namespaces:
+          type: array
+          items:
+            type: string
+        captureRequested:
+          type: string
+          enum:
+          - disabled
+          - enabled
+        captureState:
+          type: string
+          enum:
+          - disabled
+          - blocked
+        ready:
+          type: boolean
+          description: Always false until capture implementation and acceptance are
+            complete.
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CdcCondition"
     LicenseSurfaceState:
       type: object
       required:

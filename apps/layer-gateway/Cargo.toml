@@ -9,7 +9,7 @@ default = ["pgvector"]
 pgvector = ["vectorstore-core/pgvector"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pro", "field-stats-capture"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pro", "field-stats-capture", "cdc-capture"))'] }
 [dependencies]
 layer-original = { path = "../../crates/layer-original" }
 axum = "0.8"

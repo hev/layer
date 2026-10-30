@@ -12,6 +12,94 @@ type ProjectedSourceResponse struct {
 	Source map[string]interface{} `json:"source"`
 }
 
+type CdcFailure struct {
+	Error map[string]interface{} `json:"error"`
+	Cdc CdcMutationReceipt `json:"cdc,omitempty"`
+}
+
+type CdcReplayRequest struct {
+	ExpectedReceiptVersion int64 `json:"expectedReceiptVersion"`
+}
+
+type CdcMutationResponse struct {
+	Cdc interface{} `json:"cdc"`
+}
+
+type CdcMutationReceipt struct {
+	MutationID string `json:"mutationId"`
+	Epoch string `json:"epoch"`
+	NamespaceIncarnation string `json:"namespaceIncarnation"`
+	Sequence int64 `json:"sequence"`
+	ReceiptVersion int64 `json:"receiptVersion"`
+	InputHash string `json:"inputHash"`
+	State string `json:"state"`
+	SourceVersion string `json:"sourceVersion,omitempty"`
+	Destinations map[string]interface{} `json:"destinations"`
+	Embedding map[string]interface{} `json:"embedding"`
+	ReplayEligible bool `json:"replayEligible"`
+}
+
+type CdcObserveReceipt struct {
+	Epoch string `json:"epoch"`
+	NamespaceIncarnation string `json:"namespaceIncarnation"`
+	ReceiptVersion int64 `json:"receiptVersion"`
+	Namespace string `json:"namespace"`
+	RequestBytes int64 `json:"requestBytes"`
+	Capture CdcObserveInspection `json:"capture"`
+	Mode string `json:"mode"`
+	State string `json:"state"`
+	MutationID string `json:"mutationId"`
+	Sequence int64 `json:"sequence"`
+	InputHash string `json:"inputHash"`
+	Observation map[string]interface{} `json:"observation"`
+	Destination map[string]interface{} `json:"destination"`
+	ReplayEligible string `json:"replayEligible"`
+}
+
+type CdcObserveInspection struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+	Ready string `json:"ready"`
+	Namespaces []string `json:"namespaces"`
+	Prefixes []string `json:"prefixes"`
+	CapturedCount int64 `json:"capturedCount"`
+	RetainedCount int64 `json:"retainedCount"`
+	EvictedCount int64 `json:"evictedCount"`
+	ProcessGaps map[string]int64 `json:"processGaps"`
+	LastCapturedAt *int64 `json:"lastCapturedAt"`
+	GapCount int64 `json:"gapCount"`
+	Gaps map[string]int64 `json:"gaps"`
+	CountersScope string `json:"countersScope"`
+	Buffer map[string]interface{} `json:"buffer"`
+	Destination map[string]interface{} `json:"destination"`
+}
+
+type CdcReference struct {
+	Name string `json:"name"`
+}
+
+type CdcCondition struct {
+	Type string `json:"type"`
+	Status string `json:"status"`
+	Reason *string `json:"reason"`
+	Message *string `json:"message"`
+	LastTransitionTime *string `json:"lastTransitionTime"`
+}
+
+type CdcInspection struct {
+	Name string `json:"name"`
+	Generation int64 `json:"generation"`
+	ObservedGeneration *int64 `json:"observedGeneration"`
+	SourceRef CdcReference `json:"sourceRef"`
+	DestinationRef CdcReference `json:"destinationRef"`
+	BufferRef CdcReference `json:"bufferRef"`
+	Namespaces []string `json:"namespaces"`
+	CaptureRequested string `json:"captureRequested"`
+	CaptureState string `json:"captureState"`
+	Ready bool `json:"ready"`
+	Conditions []CdcCondition `json:"conditions"`
+}
+
 type LicenseSurfaceState struct {
 	State string `json:"state"`
 	SecondsToDeadline int64 `json:"seconds_to_deadline"`

@@ -268,6 +268,21 @@ func (params *HintCacheWarmParams) query() (url.Values, error) {
 	return query, nil
 }
 
+type InspectCdcMutationParams struct {
+	Namespace string `json:"namespace,omitempty"`
+}
+
+func (params *InspectCdcMutationParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "namespace", params.Namespace); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
 type ListCheckpointsParams struct {
 	Limit int64 `json:"limit,omitempty"`
 	Before string `json:"before,omitempty"`
@@ -631,6 +646,21 @@ func (params *QueryMetricsRangeApiV1Params) query() (url.Values, error) {
 		return nil, err
 	}
 	if err := addQueryValue(query, "timeout", params.Timeout); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type ReplayCdcMutationParams struct {
+	Namespace string `json:"namespace,omitempty"`
+}
+
+func (params *ReplayCdcMutationParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "namespace", params.Namespace); err != nil {
 		return nil, err
 	}
 	return query, nil
@@ -1811,6 +1841,50 @@ func (client *Client) InitNamespaceWithPerf(ctx context.Context, namespace strin
 }
 
 
+func (client *Client) InspectCdcBinding(ctx context.Context, binding string, options ...RequestOption) (interface{}, error) {
+	var out interface{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/cdc/%s", url.PathEscape(binding)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (client *Client) InspectCdcBindingWithPerf(ctx context.Context, binding string, options ...RequestOption) (*LayerResponse[interface{}], error) {
+	var out interface{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/cdc/%s", url.PathEscape(binding)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[interface{}]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) InspectCdcMutation(ctx context.Context, binding string, iD string, params *InspectCdcMutationParams, options ...RequestOption) (*CdcMutationResponse, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CdcMutationResponse{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/cdc/%s/mutations/%s", url.PathEscape(binding), url.PathEscape(iD)), query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) InspectCdcMutationWithPerf(ctx context.Context, binding string, iD string, params *InspectCdcMutationParams, options ...RequestOption) (*LayerResponse[CdcMutationResponse], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CdcMutationResponse{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/cdc/%s/mutations/%s", url.PathEscape(binding), url.PathEscape(iD)), query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CdcMutationResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) ListCheckpoints(ctx context.Context, namespace string, params *ListCheckpointsParams, options ...RequestOption) (*CheckpointList, error) {
 	query, err := params.query()
 	if err != nil {
@@ -2584,6 +2658,32 @@ func (client *Client) QueryTurbopufferNamespaceWithPerf(ctx context.Context, nam
 		return nil, err
 	}
 	return &LayerResponse[TurbopufferQueryResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ReplayCdcMutation(ctx context.Context, binding string, iD string, body *CdcReplayRequest, params *ReplayCdcMutationParams, options ...RequestOption) (*CdcMutationResponse, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CdcMutationResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/cdc/%s/mutations/%s/replay", url.PathEscape(binding), url.PathEscape(iD)), query, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ReplayCdcMutationWithPerf(ctx context.Context, binding string, iD string, body *CdcReplayRequest, params *ReplayCdcMutationParams, options ...RequestOption) (*LayerResponse[CdcMutationResponse], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CdcMutationResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/cdc/%s/mutations/%s/replay", url.PathEscape(binding), url.PathEscape(iD)), query, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CdcMutationResponse]{Data: out, Perf: *perf}, nil
 }
 
 

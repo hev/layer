@@ -7,16 +7,13 @@ import math
 import os
 from pathlib import Path
 import uuid
-from urllib.parse import quote
 from hevlayer import AsyncHevlayer, HevlayerError
 
 
 async def main():
     prefix = os.environ.get("PGVECTOR_TEST_PREFIX", "scratch-lyr20")
     ns = f"{prefix}-{datetime.datetime.now(datetime.timezone.utc):%Y%m%d}-python-{uuid.uuid4().hex[:8]}-'雪_%41"
-    # The generated Python SDK interpolates path parameters directly (the TS
-    # SDK encodes them). Encode here so both suites send the same logical name.
-    path_ns = quote(ns, safe="")
+    # Pass raw names: the generated SDK encodes path parameters.
     # Cases may name a sibling namespace (`"ns": "embed"`); each is removed at the end.
     siblings = set()
     cases = json.loads(Path(__file__).with_name("cases.json").read_text())
@@ -27,10 +24,10 @@ async def main():
             for case in cases:
                 op = case["op"]
                 body = case.get("body", {})
-                path_ns = quote(ns, safe="")
+                path_ns = ns
                 if "ns" in case:
                     siblings.add(case["ns"])
-                    path_ns = quote(f"{ns}-{case['ns']}", safe="")
+                    path_ns = f"{ns}-{case['ns']}"
                 methods = {
                     "write": lambda: client.write_namespace(path_ns, body),
                     "query": lambda: client.query_namespace(path_ns, body),
@@ -138,8 +135,8 @@ async def main():
             assert ns in [n.id for n in listing.namespaces]
         finally:
             for sibling in siblings:
-                await client.delete_namespace(quote(f"{ns}-{sibling}", safe=""))
-            path_ns = quote(ns, safe="")
+                await client.delete_namespace(f"{ns}-{sibling}")
+            path_ns = ns
             await client.delete_namespace(path_ns)
             listing = await client.list_turbopuffer_namespaces(prefix=ns)
             assert not listing.namespaces, "namespace cleanup failed"

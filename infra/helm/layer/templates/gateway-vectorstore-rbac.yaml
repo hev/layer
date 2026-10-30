@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/component: gateway
 rules:
   - apiGroups: ["hevlayer.com"]
-    resources: ["vectorstores"]
+    resources: ["vectorstores", "cdcs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]

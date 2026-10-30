@@ -14,6 +14,10 @@ priorityClasses:
     value: 100000
 
 gateway:
+  # Passive CDC capture: no destination, secrets, or activation by default.
+  cdcObserve:
+    enabled: false
+    bindings: []
   image: ""  # required — customer pull path: hevlayer/layer-gateway-pro:<version>
   port: 8080
   mcp:

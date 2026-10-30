@@ -59,6 +59,10 @@ spec:
       app.kubernetes.io/component: gateway
   template:
     metadata:
+      {{- if .Values.gateway.cdcObserve.enabled }}
+      annotations:
+        checksum/cdc-observe: {{ include (print $.Template.BasePath "/cdc-observe-configmap.yaml") . | sha256sum }}
+      {{- end }}
       labels:
         {{- include "layer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
@@ -263,6 +267,10 @@ spec:
             - containerPort: {{ .Values.gateway.port }}
               name: http
           env:
+            {{- if .Values.gateway.cdcObserve.enabled }}
+            - name: LAYER_CDC_OBSERVE_CONFIG
+              value: /etc/layer/cdc-observe/observe.json
+            {{- end }}
             {{- if .Values.gateway.mcp.enabled }}
             # Rendered only when enabled: the gateway defaults to false, and an
             # unconditional "false" here would flip an MCP seed applied with
@@ -385,8 +393,13 @@ spec:
               value: "http://{{ include "layer.fullname" . }}-vmsingle:8429"
               {{- end }}
             {{- end }}
-          {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
+          {{- if or .Values.gateway.cdcObserve.enabled .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled (dig "fieldStatsCapture" "configMapName" "" .Values.gateway) (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
           volumeMounts:
+            {{- if .Values.gateway.cdcObserve.enabled }}
+            - name: cdc-observe
+              mountPath: /etc/layer/cdc-observe
+              readOnly: true
+            {{- end }}
             {{- if (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
             - name: function-read-cache
               mountPath: /etc/layer/function-read-cache
@@ -428,6 +441,11 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
       volumes:
+        {{- if .Values.gateway.cdcObserve.enabled }}
+        - name: cdc-observe
+          configMap:
+            name: {{ include "layer.fullname" . }}-cdc-observe
+        {{- end }}
         {{- if (dig "functionReadCache" "configMapName" "" .Values.gateway) }}
         - name: function-read-cache
           configMap:

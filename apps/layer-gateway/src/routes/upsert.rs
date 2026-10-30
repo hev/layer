@@ -262,8 +262,42 @@ pub async fn upsert_or_delete(
     Path(namespace): Path<String>,
     OriginalUri(uri): OriginalUri,
     grant: Option<Extension<CallerGrant>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, AppError> {
+    #[cfg(feature = "cdc-capture")]
+    if let Some(binding) = state
+        .cdc_capture
+        .as_ref()
+        .and_then(|r| r.observation(&namespace))
+    {
+        return binding
+            .write(Arc::clone(&state), &namespace, &uri, &headers, body)
+            .await;
+    }
+    #[cfg(feature = "cdc-capture")]
+    if let Some(runtime) = state
+        .cdc_capture
+        .as_ref()
+        .filter(|r| r.captures(&namespace))
+    {
+        if state.write_trigger.is_some() || state.shard_count != 1 {
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":{"code":"cdc_writer_configuration_unsupported"}})),
+            )
+                .into_response());
+        }
+        return Ok(runtime
+            .write(
+                &namespace,
+                grant.as_ref().map(|Extension(g)| g),
+                &headers,
+                body,
+            )
+            .await);
+    }
+    let _ = headers;
     write_namespace(state, namespace, uri, grant, body, false).await
 }
 
@@ -277,6 +311,19 @@ pub(crate) async fn write_namespace(
     mut body: Value,
     staged_rows: bool,
 ) -> Result<Response, AppError> {
+    #[cfg(feature = "cdc-capture")]
+    if state
+        .cdc_capture
+        .as_ref()
+        .is_some_and(|r| r.captures(&namespace))
+    {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":{"code":"cdc_internal_write_fenced"}})),
+        )
+            .into_response());
+    }
+    state.refuse_captured_write(&namespace)?;
     if body.get("_hevlayer").is_some() {
         crate::routes::record_versions::require_store(&state, &namespace)?;
     }

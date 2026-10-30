@@ -1,5 +1,9 @@
 pub mod agent;
 pub mod auth;
+#[cfg(feature = "cdc-capture")]
+pub mod cdc_capture;
+#[cfg(feature = "cdc-capture")]
+pub mod cdc_observe;
 pub mod clients;
 pub mod config;
 pub mod consistency;
@@ -93,6 +97,8 @@ pub struct RestoreRunState;
 pub const PINNED_THREADS_MAX: u32 = 512;
 pub const DEFAULT_PINNED_SCAN_THREADS: u32 = 32;
 pub struct AppState {
+    #[cfg(feature = "cdc-capture")]
+    pub cdc_capture: Option<Arc<cdc_capture::Runtime>>,
     pub namespace_purges: Arc<namespace_purge::NamespacePurges>,
     /// Set by SIGTERM handling or by the Kubernetes preStop drain marker before
     /// the pod is removed from Service/ALB endpoints.
@@ -366,6 +372,42 @@ impl AppState {
 
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst) || self.drain_marker_path.exists()
+    }
+
+    /// Internal final writers must refuse capture until they join journal admission.
+    pub(crate) fn refuse_captured_write(
+        &self,
+        namespace: &str,
+    ) -> Result<(), crate::error::AppError> {
+        #[cfg(feature = "cdc-capture")]
+        if let Some(runtime) = &self.cdc_capture {
+            if let Some(binding) = runtime.observation(namespace) {
+                drop(binding.gap("unsupported_shape:internal_writer", self));
+            }
+            if !runtime.has_delivery_bindings() {
+                return Ok(());
+            }
+            // Indirect targets must be literal provider namespace segments, so
+            // percent escapes or path normalization cannot bypass exact scope.
+            if namespace.is_empty()
+                || namespace.len() > 128
+                || matches!(namespace, "." | "..")
+                || !namespace
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            {
+                return Err(crate::error::AppError::Validation(
+                    "cdc_invalid_writer_namespace".into(),
+                ));
+            }
+            if runtime.captures(namespace) {
+                return Err(crate::error::AppError::Validation(
+                    "cdc_unsupported_write".into(),
+                ));
+            }
+        }
+        let _ = namespace;
+        Ok(())
     }
 
     pub fn turbopuffer(&self) -> &dyn TurbopufferClient {
@@ -810,10 +852,24 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         );
 
     #[cfg(feature = "pro")]
-    let mut router = router.route("/v2/license", get(routes::license::get_license));
+    #[allow(unused_mut)]
+    let mut router = router
+        .route("/v2/license", get(routes::license::get_license))
+        .route("/v2/cdc/{binding}", get(routes::cdc::inspect));
     #[cfg(not(feature = "pro"))]
     #[allow(unused_mut)]
     let mut router = router.route("/v2/license", get(open_gateway_license));
+
+    #[cfg(feature = "cdc-capture")]
+    let mut router = router
+        .route(
+            "/v2/cdc/{binding}/mutations/{id}",
+            get(cdc_capture::inspect),
+        )
+        .route(
+            "/v2/cdc/{binding}/mutations/{id}/replay",
+            post(cdc_capture::replay),
+        );
 
     let host_routes = mcp.clone().filter(|registry| registry.has_host_routes());
     if let Some(registry) = mcp {
@@ -1181,11 +1237,18 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             reject_while_draining,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            auth::require_api_key,
         ));
+
+    #[cfg(feature = "cdc-capture")]
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&state),
+        cdc_capture::fence,
+    ));
+
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&state),
+        auth::require_api_key,
+    ));
 
     let app = public
         .merge(router)

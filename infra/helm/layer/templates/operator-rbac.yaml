@@ -9,10 +9,10 @@ metadata:
     app.kubernetes.io/component: operator
 rules:
   - apiGroups: ["hevlayer.com"]
-    resources: ["agents", "indexes", "infrarules", "pipelines", "functions", "vectorstores", "apikeys", "warehouses"]
+    resources: ["agents", "indexes", "infrarules", "pipelines", "functions", "vectorstores", "apikeys", "warehouses", "cdcs", "cdcbuffers"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
   - apiGroups: ["hevlayer.com"]
-    resources: ["agents/status", "indexes/status", "infrarules/status", "pipelines/status", "functions/status", "vectorstores/status", "apikeys/status", "warehouses/status"]
+    resources: ["agents/status", "indexes/status", "infrarules/status", "pipelines/status", "functions/status", "vectorstores/status", "apikeys/status", "warehouses/status", "cdcs/status", "cdcbuffers/status"]
     verbs: ["get", "patch", "update"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]

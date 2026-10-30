@@ -247,6 +247,12 @@ impl LabelLimiter {
 }
 
 pub struct LayerMetrics {
+    pub cdc_mode: IntGaugeVec,
+    pub cdc_buffer_limit: IntGaugeVec,
+    pub cdc_captured: IntCounterVec,
+    pub cdc_gaps: IntCounterVec,
+    pub cdc_buffer_bytes: IntGaugeVec,
+    pub cdc_last_capture: IntGaugeVec,
     runtime_scheduling_delay: Histogram,
     namespace_purge_pending: IntGaugeVec,
     namespace_purge_discovery_ready: IntGauge,
@@ -360,6 +366,42 @@ impl Default for LayerMetrics {
 impl LayerMetrics {
     pub fn new() -> Self {
         let registry = Registry::new();
+        let cdc_mode = gauge_vec(
+            &registry,
+            "layer_cdc_binding_mode",
+            "Configured CDC binding mode",
+            &["binding", "mode"],
+        );
+        let cdc_buffer_limit = gauge_vec(
+            &registry,
+            "layer_cdc_observe_buffer_limit_bytes",
+            "Observe retained byte limit",
+            &["binding"],
+        );
+        let cdc_captured = counter(
+            &registry,
+            "layer_cdc_observe_captured_total",
+            "Durably captured observe mutations",
+            &["binding"],
+        );
+        let cdc_gaps = counter(
+            &registry,
+            "layer_cdc_observe_gaps_total",
+            "Observe capture misses by reason",
+            &["binding", "reason"],
+        );
+        let cdc_buffer_bytes = gauge_vec(
+            &registry,
+            "layer_cdc_observe_buffer_bytes",
+            "Retained observe journal bytes",
+            &["binding"],
+        );
+        let cdc_last_capture = gauge_vec(
+            &registry,
+            "layer_cdc_observe_last_capture_seconds",
+            "Last durable observe capture Unix time",
+            &["binding"],
+        );
         let namespace_purge_pending = gauge_vec(
             &registry,
             "layer_namespace_purge_pending",
@@ -909,6 +951,12 @@ impl LayerMetrics {
         );
 
         Self {
+            cdc_mode,
+            cdc_buffer_limit,
+            cdc_captured,
+            cdc_gaps,
+            cdc_buffer_bytes,
+            cdc_last_capture,
             runtime_scheduling_delay,
             namespace_purge_pending,
             namespace_purge_discovery_ready,

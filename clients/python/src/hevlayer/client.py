@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, get_args, get_origin
 
 import httpx
+from urllib.parse import quote
 from pydantic import BaseModel
 
 from .models import *
@@ -111,6 +112,8 @@ class HevlayerProtocol(Protocol):
     async def hint_cache_warm(self, namespace: str, *, turbopuffer: bool | None = None, documents: bool | None = None, snapshots: bool | None = None, blobs: bool | None = None, blob_budget_bytes: int | None = None, page_size: int | None = None, with_perf: bool = False) -> HintCacheWarmResponse | LayerResponse[HintCacheWarmResponse]: ...
     async def import_namespace(self, namespace: str, body: bytes, *, with_perf: bool = False) -> dict[str, Any] | LayerResponse[dict[str, Any]]: ...
     async def init_namespace(self, namespace: str, body: InitNamespaceRequest | dict[str, Any], *, with_perf: bool = False) -> InitNamespaceResponse | LayerResponse[InitNamespaceResponse]: ...
+    async def inspect_cdc_binding(self, binding: str, *, with_perf: bool = False) -> CdcInspection | CdcObserveInspection | LayerResponse[CdcInspection | CdcObserveInspection]: ...
+    async def inspect_cdc_mutation(self, binding: str, id: str, *, namespace: str | None = None, with_perf: bool = False) -> CdcMutationResponse | LayerResponse[CdcMutationResponse]: ...
     async def list_checkpoints(self, namespace: str, *, limit: int | None = None, before: str | None = None, with_perf: bool = False) -> CheckpointList | LayerResponse[CheckpointList]: ...
     async def list_clickstream(self, namespace: str, *, trace_id: str | None = None, tags: list[str] | None = None, from_: str | None = None, to: str | None = None, before: str | None = None, limit: int | None = None, with_perf: bool = False) -> ClickstreamListResponse | LayerResponse[ClickstreamListResponse]: ...
     async def list_keys(self, *, includeRevoked: bool | None = None, with_perf: bool = False) -> ApiKeyList | LayerResponse[ApiKeyList]: ...
@@ -147,6 +150,7 @@ class HevlayerProtocol(Protocol):
     async def query_metrics_range_api_v1(self, *, query: str | None = None, start: str | None = None, end: str | None = None, step: str | None = None, timeout: str | None = None, with_perf: bool = False) -> PrometheusResponse | LayerResponse[PrometheusResponse]: ...
     async def query_namespace(self, namespace: str, body: QueryRequest | dict[str, Any], *, raw_query: str | None = None, tags: list[str] | None = None, with_perf: bool = False) -> QueryResponse | LayerResponse[QueryResponse]: ...
     async def query_turbopuffer_namespace(self, namespace: str, body: TurbopufferQueryRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferQueryResponse | LayerResponse[TurbopufferQueryResponse]: ...
+    async def replay_cdc_mutation(self, binding: str, id: str, body: CdcReplayRequest | dict[str, Any], *, namespace: str | None = None, with_perf: bool = False) -> CdcMutationResponse | LayerResponse[CdcMutationResponse]: ...
     async def reset_failed_udf(self, udf_id: str, *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]: ...
     async def resume_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]: ...
     async def revoke_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]: ...
@@ -205,7 +209,7 @@ class AsyncHevlayer:
     async def activate_record_version(self, namespace: str, id: str, body: RecordActivationRequest | dict[str, Any], *, with_perf: bool = False) -> RecordActivationResult | LayerResponse[RecordActivationResult]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/records/{id}/activate",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/records/{quote(str(id), safe='').replace('.', '%2E')}/activate",
             json=body, result_type=RecordActivationResult,
             with_perf=with_perf,
         )
@@ -214,7 +218,7 @@ class AsyncHevlayer:
     async def aggregate_latest(self, namespace: str, body: LatestRelationRequest | dict[str, Any], *, with_perf: bool = False) -> LatestRelationResponse | LayerResponse[LatestRelationResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/aggregate",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/aggregate",
             json=body, result_type=LatestRelationResponse,
             with_perf=with_perf,
         )
@@ -232,7 +236,7 @@ class AsyncHevlayer:
     async def batch_query_namespace(self, namespace: str, body: BatchQueryRequest | dict[str, Any], *, with_perf: bool = False) -> BatchQueryResponse | LayerResponse[BatchQueryResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/query",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/query",
             params={"stainless_overload": "multiQuery"}, json=body, result_type=BatchQueryResponse,
             with_perf=with_perf,
         )
@@ -241,7 +245,7 @@ class AsyncHevlayer:
     async def branch_namespace(self, namespace: str, body: TurbopufferBranchFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}",
             params={"stainless_overload": "branchFrom"}, json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
@@ -250,7 +254,7 @@ class AsyncHevlayer:
     async def claim_documents(self, pipeline_id: str, body: ClaimDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> ClaimDocumentsResponse | LayerResponse[ClaimDocumentsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/pipelines/{pipeline_id}/claim",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/claim",
             json=body, result_type=ClaimDocumentsResponse,
             with_perf=with_perf,
         )
@@ -259,7 +263,7 @@ class AsyncHevlayer:
     async def claim_udf_items(self, udf_id: str, body: UdfClaimRequest | dict[str, Any], *, with_perf: bool = False) -> UdfClaimResponse | LayerResponse[UdfClaimResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/claim",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/claim",
             json=body, result_type=UdfClaimResponse,
             with_perf=with_perf,
         )
@@ -268,7 +272,7 @@ class AsyncHevlayer:
     async def compare_udf_candidate(self, udf_id: str, *, namespace: str | None = None, max_rows: int | None = None, sample: int | None = None, with_perf: bool = False) -> UdfCandidateComparison | LayerResponse[UdfCandidateComparison]:
         return await self._request_json(
             "GET",
-            f"/v2/udfs/{udf_id}/candidate/compare",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/candidate/compare",
             params={"namespace": namespace, "max_rows": max_rows, "sample": sample}, result_type=UdfCandidateComparison,
             with_perf=with_perf,
         )
@@ -277,7 +281,7 @@ class AsyncHevlayer:
     async def complete_udf_items(self, udf_id: str, body: UdfCompleteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/items/complete",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/items/complete",
             json=body, result_type=UdfItemsResponse,
             with_perf=with_perf,
         )
@@ -286,7 +290,7 @@ class AsyncHevlayer:
     async def copy_namespace(self, namespace: str, body: TurbopufferCopyFromRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}",
             params={"stainless_overload": "copyFrom"}, json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
@@ -295,7 +299,7 @@ class AsyncHevlayer:
     async def create_checkpoint(self, namespace: str, body: CreateCheckpointRequest | dict[str, Any], *, with_perf: bool = False) -> Checkpoint | LayerResponse[Checkpoint]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/checkpoints",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/checkpoints",
             json=body, result_type=Checkpoint,
             with_perf=with_perf,
         )
@@ -313,7 +317,7 @@ class AsyncHevlayer:
     async def create_scan(self, namespace: str, body: CreateScanRequest | dict[str, Any], *, with_perf: bool = False) -> ScanCountResponse | ScanJob | LayerResponse[ScanCountResponse | ScanJob]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/scans",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans",
             json=body, result_type=(ScanCountResponse, ScanJob),
             with_perf=with_perf,
         )
@@ -322,7 +326,7 @@ class AsyncHevlayer:
     async def create_snapshot(self, namespace: str, body: CreateSnapshotRequest | dict[str, Any], *, with_perf: bool = False) -> SnapshotJob | LayerResponse[SnapshotJob]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/snapshots",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshots",
             json=body, result_type=SnapshotJob,
             with_perf=with_perf,
         )
@@ -340,7 +344,7 @@ class AsyncHevlayer:
     async def create_udf_candidate(self, udf_id: str, body: UdfCandidateRequest | dict[str, Any], *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/candidate",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/candidate",
             json=body, result_type=GetUdfResponse,
             with_perf=with_perf,
         )
@@ -349,7 +353,7 @@ class AsyncHevlayer:
     async def delete_key(self, keyId: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/keys/{keyId}",
+            f"/v2/keys/{quote(str(keyId), safe='').replace('.', '%2E')}",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -358,7 +362,7 @@ class AsyncHevlayer:
     async def delete_namespace(self, namespace: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/namespaces/{namespace}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -367,7 +371,7 @@ class AsyncHevlayer:
     async def delete_pipeline(self, pipeline_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/pipelines/{pipeline_id}",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -376,7 +380,7 @@ class AsyncHevlayer:
     async def delete_scan(self, namespace: str, scan_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/namespaces/{namespace}/scans/{scan_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans/{quote(str(scan_id), safe='').replace('.', '%2E')}",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -385,7 +389,7 @@ class AsyncHevlayer:
     async def delete_udf(self, udf_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/udfs/{udf_id}",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -394,7 +398,7 @@ class AsyncHevlayer:
     async def discard_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "DELETE",
-            f"/v2/udfs/{udf_id}/candidate",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/candidate",
             result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -403,7 +407,7 @@ class AsyncHevlayer:
     async def discover_udf(self, udf_id: str, body: UdfDiscoverRequest | dict[str, Any], *, with_perf: bool = False) -> UdfDiscoverResponse | LayerResponse[UdfDiscoverResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/discover",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/discover",
             json=body, result_type=UdfDiscoverResponse,
             with_perf=with_perf,
         )
@@ -412,7 +416,7 @@ class AsyncHevlayer:
     async def evaluate_turbopuffer_recall(self, namespace: str, body: TurbopufferRecallRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferRecallResponse | LayerResponse[TurbopufferRecallResponse]:
         return await self._request_json(
             "POST",
-            f"/v1/namespaces/{namespace}/_debug/recall",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/_debug/recall",
             json=body, result_type=TurbopufferRecallResponse,
             with_perf=with_perf,
         )
@@ -421,7 +425,7 @@ class AsyncHevlayer:
     async def explain_turbopuffer_query(self, namespace: str, body: TurbopufferQueryRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferExplainQueryResponse | LayerResponse[TurbopufferExplainQueryResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/explain_query",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/explain_query",
             json=body, result_type=TurbopufferExplainQueryResponse,
             with_perf=with_perf,
         )
@@ -430,7 +434,7 @@ class AsyncHevlayer:
     async def fail_udf_items(self, udf_id: str, body: UdfFailRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/items/fail",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/items/fail",
             json=body, result_type=UdfItemsResponse,
             with_perf=with_perf,
         )
@@ -439,7 +443,7 @@ class AsyncHevlayer:
     async def fetch_document(self, namespace: str, doc_id: str, *, include_attributes: list[str] | None = None, with_perf: bool = False) -> Document | LayerResponse[Document]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/documents/{doc_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/documents/{quote(str(doc_id), safe='').replace('.', '%2E')}",
             params={"include_attributes": include_attributes}, result_type=Document,
             with_perf=with_perf,
         )
@@ -448,7 +452,7 @@ class AsyncHevlayer:
     async def fetch_documents(self, namespace: str, body: FetchDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> FetchDocumentsResponse | LayerResponse[FetchDocumentsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/documents",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/documents",
             json=body, result_type=FetchDocumentsResponse,
             with_perf=with_perf,
         )
@@ -457,7 +461,7 @@ class AsyncHevlayer:
     async def get_blob(self, namespace: str, sha256: str, *, with_perf: bool = False) -> bytes | LayerResponse[bytes]:
         return await self._request_bytes(
             "GET",
-            f"/v1/namespaces/{namespace}/blobs/{sha256}",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/blobs/{quote(str(sha256), safe='').replace('.', '%2E')}",
             with_perf=with_perf,
         )
 
@@ -465,7 +469,7 @@ class AsyncHevlayer:
     async def get_checkpoint(self, namespace: str, label: str, *, with_perf: bool = False) -> Checkpoint | LayerResponse[Checkpoint]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/checkpoints/{label}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/checkpoints/{quote(str(label), safe='').replace('.', '%2E')}",
             result_type=Checkpoint,
             with_perf=with_perf,
         )
@@ -501,7 +505,7 @@ class AsyncHevlayer:
     async def get_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]:
         return await self._request_json(
             "GET",
-            f"/v2/keys/{keyId}",
+            f"/v2/keys/{quote(str(keyId), safe='').replace('.', '%2E')}",
             result_type=ApiKey,
             with_perf=with_perf,
         )
@@ -519,7 +523,7 @@ class AsyncHevlayer:
     async def get_metric_catalog_entry(self, name: str, *, with_perf: bool = False) -> MetricCatalogEntry | LayerResponse[MetricCatalogEntry]:
         return await self._request_json(
             "GET",
-            f"/v2/metrics/catalog/{name}",
+            f"/v2/metrics/catalog/{quote(str(name), safe='').replace('.', '%2E')}",
             result_type=MetricCatalogEntry,
             with_perf=with_perf,
         )
@@ -528,7 +532,7 @@ class AsyncHevlayer:
     async def get_namespace_capabilities(self, namespace: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/capabilities",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/capabilities",
             result_type=CapabilitiesReport,
             with_perf=with_perf,
         )
@@ -537,7 +541,7 @@ class AsyncHevlayer:
     async def get_namespace_metadata(self, namespace: str, *, field_stats: bool | None = None, field_stats_top: int | None = None, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/metadata",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/metadata",
             params={"field_stats": field_stats, "field_stats_top": field_stats_top}, result_type=NamespaceMetadata,
             with_perf=with_perf,
         )
@@ -546,7 +550,7 @@ class AsyncHevlayer:
     async def get_namespace_snapshot(self, namespace: str, sha: str, *, with_perf: bool = False) -> SnapshotBody | LayerResponse[SnapshotBody]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/snapshots/{sha}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshots/{quote(str(sha), safe='').replace('.', '%2E')}",
             result_type=SnapshotBody,
             with_perf=with_perf,
         )
@@ -555,7 +559,7 @@ class AsyncHevlayer:
     async def get_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, *, with_perf: bool = False) -> GetChunksResponse | LayerResponse[GetChunksResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/pipelines/{pipeline_id}/documents/{doc_id}/chunks",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/{quote(str(doc_id), safe='').replace('.', '%2E')}/chunks",
             result_type=GetChunksResponse,
             with_perf=with_perf,
         )
@@ -564,7 +568,7 @@ class AsyncHevlayer:
     async def get_pipeline_status(self, pipeline_id: str, *, with_perf: bool = False) -> PipelineStatus | LayerResponse[PipelineStatus]:
         return await self._request_json(
             "GET",
-            f"/v2/pipelines/{pipeline_id}/status",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/status",
             result_type=PipelineStatus,
             with_perf=with_perf,
         )
@@ -573,7 +577,7 @@ class AsyncHevlayer:
     async def get_record_version(self, namespace: str, id: str, version_id: str, *, with_perf: bool = False) -> RecordVersion | LayerResponse[RecordVersion]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/records/{id}/versions/{version_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/records/{quote(str(id), safe='').replace('.', '%2E')}/versions/{quote(str(version_id), safe='').replace('.', '%2E')}",
             result_type=RecordVersion,
             with_perf=with_perf,
         )
@@ -582,7 +586,7 @@ class AsyncHevlayer:
     async def get_scan(self, namespace: str, scan_id: str, *, with_perf: bool = False) -> ScanJob | LayerResponse[ScanJob]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/scans/{scan_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans/{quote(str(scan_id), safe='').replace('.', '%2E')}",
             result_type=ScanJob,
             with_perf=with_perf,
         )
@@ -591,7 +595,7 @@ class AsyncHevlayer:
     async def get_scan_results(self, namespace: str, scan_id: str, *, limit: int | None = None, offset: int | None = None, with_perf: bool = False) -> ScanIdsResponse | ScanValuesResponse | LayerResponse[ScanIdsResponse | ScanValuesResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/scans/{scan_id}/results",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans/{quote(str(scan_id), safe='').replace('.', '%2E')}/results",
             params={"limit": limit, "offset": offset}, result_type=(ScanIdsResponse, ScanValuesResponse),
             with_perf=with_perf,
         )
@@ -600,7 +604,7 @@ class AsyncHevlayer:
     async def get_snapshot_job(self, namespace: str, job_id: str, *, with_perf: bool = False) -> SnapshotJob | LayerResponse[SnapshotJob]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/snapshot-jobs/{job_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshot-jobs/{quote(str(job_id), safe='').replace('.', '%2E')}",
             result_type=SnapshotJob,
             with_perf=with_perf,
         )
@@ -609,7 +613,7 @@ class AsyncHevlayer:
     async def get_snapshot_policy(self, namespace: str, *, with_perf: bool = False) -> SnapshotPolicy | LayerResponse[SnapshotPolicy]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/snapshot-policy",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshot-policy",
             result_type=SnapshotPolicy,
             with_perf=with_perf,
         )
@@ -618,7 +622,7 @@ class AsyncHevlayer:
     async def get_turbopuffer_namespace_schema(self, namespace: str, *, with_perf: bool = False) -> TurbopufferSchema | LayerResponse[TurbopufferSchema]:
         return await self._request_json(
             "GET",
-            f"/v1/namespaces/{namespace}/schema",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/schema",
             result_type=TurbopufferSchema,
             with_perf=with_perf,
         )
@@ -627,7 +631,7 @@ class AsyncHevlayer:
     async def get_turbopuffer_v1_namespace_metadata(self, namespace: str, *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
         return await self._request_json(
             "GET",
-            f"/v1/namespaces/{namespace}/metadata",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/metadata",
             result_type=NamespaceMetadata,
             with_perf=with_perf,
         )
@@ -636,7 +640,7 @@ class AsyncHevlayer:
     async def get_udf(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/udfs/{udf_id}",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}",
             result_type=GetUdfResponse,
             with_perf=with_perf,
         )
@@ -645,7 +649,7 @@ class AsyncHevlayer:
     async def get_udf_candidate(self, udf_id: str, *, with_perf: bool = False) -> GetUdfResponse | LayerResponse[GetUdfResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/udfs/{udf_id}/candidate",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/candidate",
             result_type=GetUdfResponse,
             with_perf=with_perf,
         )
@@ -654,7 +658,7 @@ class AsyncHevlayer:
     async def get_udf_status(self, udf_id: str, *, with_perf: bool = False) -> UdfStatus | LayerResponse[UdfStatus]:
         return await self._request_json(
             "GET",
-            f"/v2/udfs/{udf_id}/status",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/status",
             result_type=UdfStatus,
             with_perf=with_perf,
         )
@@ -663,7 +667,7 @@ class AsyncHevlayer:
     async def get_vectorstore(self, name: str, *, with_perf: bool = False) -> VectorStore | LayerResponse[VectorStore]:
         return await self._request_json(
             "GET",
-            f"/v2/vectorstores/{name}",
+            f"/v2/vectorstores/{quote(str(name), safe='').replace('.', '%2E')}",
             result_type=VectorStore,
             with_perf=with_perf,
         )
@@ -672,7 +676,7 @@ class AsyncHevlayer:
     async def get_vector_store_capabilities(self, name: str, *, with_perf: bool = False) -> CapabilitiesReport | LayerResponse[CapabilitiesReport]:
         return await self._request_json(
             "GET",
-            f"/v2/vectorstores/{name}/capabilities",
+            f"/v2/vectorstores/{quote(str(name), safe='').replace('.', '%2E')}/capabilities",
             result_type=CapabilitiesReport,
             with_perf=with_perf,
         )
@@ -681,7 +685,7 @@ class AsyncHevlayer:
     async def get_warehouse(self, name: str, *, with_perf: bool = False) -> Warehouse | LayerResponse[Warehouse]:
         return await self._request_json(
             "GET",
-            f"/v2/warehouses/{name}",
+            f"/v2/warehouses/{quote(str(name), safe='').replace('.', '%2E')}",
             result_type=Warehouse,
             with_perf=with_perf,
         )
@@ -690,7 +694,7 @@ class AsyncHevlayer:
     async def get_warm_job(self, namespace: str, job_id: str, *, with_perf: bool = False) -> WarmJob | LayerResponse[WarmJob]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/warm-jobs/{job_id}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/warm-jobs/{quote(str(job_id), safe='').replace('.', '%2E')}",
             result_type=WarmJob,
             with_perf=with_perf,
         )
@@ -699,7 +703,7 @@ class AsyncHevlayer:
     async def heartbeat_documents(self, pipeline_id: str, body: HeartbeatDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> DocumentsStageResponse | LayerResponse[DocumentsStageResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/pipelines/{pipeline_id}/documents/heartbeat",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/heartbeat",
             json=body, result_type=DocumentsStageResponse,
             with_perf=with_perf,
         )
@@ -708,7 +712,7 @@ class AsyncHevlayer:
     async def heartbeat_udf_items(self, udf_id: str, body: UdfHeartbeatRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/items/heartbeat",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/items/heartbeat",
             json=body, result_type=UdfItemsResponse,
             with_perf=with_perf,
         )
@@ -717,7 +721,7 @@ class AsyncHevlayer:
     async def hint_cache_warm(self, namespace: str, *, turbopuffer: bool | None = None, documents: bool | None = None, snapshots: bool | None = None, blobs: bool | None = None, blob_budget_bytes: int | None = None, page_size: int | None = None, with_perf: bool = False) -> HintCacheWarmResponse | LayerResponse[HintCacheWarmResponse]:
         return await self._request_json(
             "GET",
-            f"/v1/namespaces/{namespace}/hint_cache_warm",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/hint_cache_warm",
             params={"turbopuffer": turbopuffer, "documents": documents, "snapshots": snapshots, "blobs": blobs, "blob_budget_bytes": blob_budget_bytes, "page_size": page_size}, result_type=HintCacheWarmResponse,
             with_perf=with_perf,
         )
@@ -726,7 +730,7 @@ class AsyncHevlayer:
     async def import_namespace(self, namespace: str, body: bytes, *, with_perf: bool = False) -> dict[str, Any] | LayerResponse[dict[str, Any]]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/import",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/import",
             content=body, content_type="application/vnd.apache.arrow.stream", result_type=None,
             with_perf=with_perf,
         )
@@ -735,8 +739,26 @@ class AsyncHevlayer:
     async def init_namespace(self, namespace: str, body: InitNamespaceRequest | dict[str, Any], *, with_perf: bool = False) -> InitNamespaceResponse | LayerResponse[InitNamespaceResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/init",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/init",
             json=body, result_type=InitNamespaceResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def inspect_cdc_binding(self, binding: str, *, with_perf: bool = False) -> CdcInspection | CdcObserveInspection | LayerResponse[CdcInspection | CdcObserveInspection]:
+        return await self._request_json(
+            "GET",
+            f"/v2/cdc/{quote(str(binding), safe='').replace('.', '%2E')}",
+            result_type=(CdcInspection, CdcObserveInspection),
+            with_perf=with_perf,
+        )
+
+
+    async def inspect_cdc_mutation(self, binding: str, id: str, *, namespace: str | None = None, with_perf: bool = False) -> CdcMutationResponse | LayerResponse[CdcMutationResponse]:
+        return await self._request_json(
+            "GET",
+            f"/v2/cdc/{quote(str(binding), safe='').replace('.', '%2E')}/mutations/{quote(str(id), safe='').replace('.', '%2E')}",
+            params={"namespace": namespace}, result_type=CdcMutationResponse,
             with_perf=with_perf,
         )
 
@@ -744,7 +766,7 @@ class AsyncHevlayer:
     async def list_checkpoints(self, namespace: str, *, limit: int | None = None, before: str | None = None, with_perf: bool = False) -> CheckpointList | LayerResponse[CheckpointList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/checkpoints",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/checkpoints",
             params={"limit": limit, "before": before}, result_type=CheckpointList,
             with_perf=with_perf,
         )
@@ -753,7 +775,7 @@ class AsyncHevlayer:
     async def list_clickstream(self, namespace: str, *, trace_id: str | None = None, tags: list[str] | None = None, from_: str | None = None, to: str | None = None, before: str | None = None, limit: int | None = None, with_perf: bool = False) -> ClickstreamListResponse | LayerResponse[ClickstreamListResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/clickstream",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/clickstream",
             params={"trace_id": trace_id, "tag": tags, "from": from_, "to": to, "before": before, "limit": limit}, result_type=ClickstreamListResponse,
             with_perf=with_perf,
         )
@@ -780,7 +802,7 @@ class AsyncHevlayer:
     async def list_namespace_history(self, namespace: str, *, limit: int | None = None, before: str | None = None, with_perf: bool = False) -> list[SnapshotHistoryEntry] | LayerResponse[list[SnapshotHistoryEntry]]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/history",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/history",
             params={"limit": limit, "before": before}, result_type=list[SnapshotHistoryEntry],
             with_perf=with_perf,
         )
@@ -807,7 +829,7 @@ class AsyncHevlayer:
     async def list_record_activations(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordActivationList | LayerResponse[RecordActivationList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/records/{id}/activations",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/records/{quote(str(id), safe='').replace('.', '%2E')}/activations",
             params={"after": after, "limit": limit}, result_type=RecordActivationList,
             with_perf=with_perf,
         )
@@ -816,7 +838,7 @@ class AsyncHevlayer:
     async def list_record_versions(self, namespace: str, id: str, *, after: str | None = None, limit: int | None = None, with_perf: bool = False) -> RecordVersionList | LayerResponse[RecordVersionList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/records/{id}/versions",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/records/{quote(str(id), safe='').replace('.', '%2E')}/versions",
             params={"after": after, "limit": limit}, result_type=RecordVersionList,
             with_perf=with_perf,
         )
@@ -825,7 +847,7 @@ class AsyncHevlayer:
     async def list_scans(self, namespace: str, *, with_perf: bool = False) -> ScanJobList | LayerResponse[ScanJobList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/scans",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans",
             result_type=ScanJobList,
             with_perf=with_perf,
         )
@@ -834,7 +856,7 @@ class AsyncHevlayer:
     async def list_search_history(self, namespace: str, *, tags: list[str] | None = None, from_: str | None = None, to: str | None = None, before: str | None = None, limit: int | None = None, with_perf: bool = False) -> SearchHistoryListResponse | LayerResponse[SearchHistoryListResponse]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/search-history",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/search-history",
             params={"tag": tags, "from": from_, "to": to, "before": before, "limit": limit}, result_type=SearchHistoryListResponse,
             with_perf=with_perf,
         )
@@ -852,7 +874,7 @@ class AsyncHevlayer:
     async def list_snapshot_jobs(self, namespace: str, *, with_perf: bool = False) -> SnapshotJobList | LayerResponse[SnapshotJobList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/snapshot-jobs",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshot-jobs",
             result_type=SnapshotJobList,
             with_perf=with_perf,
         )
@@ -897,7 +919,7 @@ class AsyncHevlayer:
     async def list_warm_jobs(self, namespace: str, *, with_perf: bool = False) -> WarmJobList | LayerResponse[WarmJobList]:
         return await self._request_json(
             "GET",
-            f"/v2/namespaces/{namespace}/warm-jobs",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/warm-jobs",
             result_type=WarmJobList,
             with_perf=with_perf,
         )
@@ -906,7 +928,7 @@ class AsyncHevlayer:
     async def lookup_udf_siblings(self, udf_id: str, body: UdfLookupRequest | dict[str, Any], *, with_perf: bool = False) -> UdfLookupResponse | LayerResponse[UdfLookupResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/items/lookup",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/items/lookup",
             json=body, result_type=UdfLookupResponse,
             with_perf=with_perf,
         )
@@ -924,7 +946,7 @@ class AsyncHevlayer:
     async def pause_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/pause",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/pause",
             result_type=Udf,
             with_perf=with_perf,
         )
@@ -933,7 +955,7 @@ class AsyncHevlayer:
     async def promote_udf_candidate(self, udf_id: str, body: UdfCandidatePromoteRequest | dict[str, Any], *, with_perf: bool = False) -> UdfCandidatePromoteResponse | LayerResponse[UdfCandidatePromoteResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/candidate/promote",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/candidate/promote",
             json=body, result_type=UdfCandidatePromoteResponse,
             with_perf=with_perf,
         )
@@ -942,7 +964,7 @@ class AsyncHevlayer:
     async def put_blob(self, namespace: str, body: bytes, *, warm: bool | None = None, with_perf: bool = False) -> BlobPutResponse | LayerResponse[BlobPutResponse]:
         return await self._request_json(
             "PUT",
-            f"/v1/namespaces/{namespace}/blobs",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/blobs",
             params={"warm": warm}, content=body, content_type="application/octet-stream", result_type=BlobPutResponse,
             with_perf=with_perf,
         )
@@ -951,7 +973,7 @@ class AsyncHevlayer:
     async def put_pipeline_document_chunks(self, pipeline_id: str, doc_id: str, body: PutChunksRequest | dict[str, Any], *, with_perf: bool = False) -> StageDocumentResponse | LayerResponse[StageDocumentResponse]:
         return await self._request_json(
             "PUT",
-            f"/v2/pipelines/{pipeline_id}/documents/{doc_id}",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/{quote(str(doc_id), safe='').replace('.', '%2E')}",
             json=body, result_type=StageDocumentResponse,
             with_perf=with_perf,
         )
@@ -960,7 +982,7 @@ class AsyncHevlayer:
     async def put_pipeline_document_rows(self, pipeline_id: str, doc_id: str, body: PutPipelineRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
         return await self._request_json(
             "PUT",
-            f"/v2/pipelines/{pipeline_id}/documents/{doc_id}/rows",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/{quote(str(doc_id), safe='').replace('.', '%2E')}/rows",
             json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
@@ -969,7 +991,7 @@ class AsyncHevlayer:
     async def put_pipeline_document_vectors(self, pipeline_id: str, doc_id: str, body: PutVectorsRequest | dict[str, Any], *, with_perf: bool = False) -> StatusResponse | LayerResponse[StatusResponse]:
         return await self._request_json(
             "PUT",
-            f"/v2/pipelines/{pipeline_id}/documents/{doc_id}/vectors",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/{quote(str(doc_id), safe='').replace('.', '%2E')}/vectors",
             json=body, result_type=StatusResponse,
             with_perf=with_perf,
         )
@@ -978,7 +1000,7 @@ class AsyncHevlayer:
     async def put_pipeline_rows(self, pipeline_id: str, body: PutPipelineBulkRowsRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
         return await self._request_json(
             "PUT",
-            f"/v2/pipelines/{pipeline_id}/rows",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/rows",
             json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )
@@ -987,7 +1009,7 @@ class AsyncHevlayer:
     async def put_snapshot_policy(self, namespace: str, body: SnapshotPolicy | dict[str, Any], *, with_perf: bool = False) -> SnapshotPolicy | LayerResponse[SnapshotPolicy]:
         return await self._request_json(
             "PUT",
-            f"/v2/namespaces/{namespace}/snapshot-policy",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/snapshot-policy",
             json=body, result_type=SnapshotPolicy,
             with_perf=with_perf,
         )
@@ -1005,7 +1027,7 @@ class AsyncHevlayer:
     async def query_agent(self, name: str, body: AgentQueryRequest | dict[str, Any], *, with_perf: bool = False) -> AgentQueryResponse | LayerResponse[AgentQueryResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/agents/{name}/query",
+            f"/v2/agents/{quote(str(name), safe='').replace('.', '%2E')}/query",
             json=body, result_type=AgentQueryResponse,
             with_perf=with_perf,
         )
@@ -1050,7 +1072,7 @@ class AsyncHevlayer:
     async def query_namespace(self, namespace: str, body: QueryRequest | dict[str, Any], *, raw_query: str | None = None, tags: list[str] | None = None, with_perf: bool = False) -> QueryResponse | LayerResponse[QueryResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/query",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/query",
             json=body, headers=self._search_history_headers(raw_query, tags), result_type=QueryResponse,
             with_perf=with_perf,
         )
@@ -1059,8 +1081,17 @@ class AsyncHevlayer:
     async def query_turbopuffer_namespace(self, namespace: str, body: TurbopufferQueryRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferQueryResponse | LayerResponse[TurbopufferQueryResponse]:
         return await self._request_json(
             "POST",
-            f"/v1/namespaces/{namespace}/query",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/query",
             json=body, result_type=TurbopufferQueryResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def replay_cdc_mutation(self, binding: str, id: str, body: CdcReplayRequest | dict[str, Any], *, namespace: str | None = None, with_perf: bool = False) -> CdcMutationResponse | LayerResponse[CdcMutationResponse]:
+        return await self._request_json(
+            "POST",
+            f"/v2/cdc/{quote(str(binding), safe='').replace('.', '%2E')}/mutations/{quote(str(id), safe='').replace('.', '%2E')}/replay",
+            params={"namespace": namespace}, json=body, result_type=CdcMutationResponse,
             with_perf=with_perf,
         )
 
@@ -1068,7 +1099,7 @@ class AsyncHevlayer:
     async def reset_failed_udf(self, udf_id: str, *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/reset-failed",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/reset-failed",
             result_type=UdfItemsResponse,
             with_perf=with_perf,
         )
@@ -1077,7 +1108,7 @@ class AsyncHevlayer:
     async def resume_udf(self, udf_id: str, *, with_perf: bool = False) -> Udf | LayerResponse[Udf]:
         return await self._request_json(
             "POST",
-            f"/v2/udfs/{udf_id}/resume",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}/resume",
             result_type=Udf,
             with_perf=with_perf,
         )
@@ -1086,7 +1117,7 @@ class AsyncHevlayer:
     async def revoke_key(self, keyId: str, *, with_perf: bool = False) -> ApiKey | LayerResponse[ApiKey]:
         return await self._request_json(
             "POST",
-            f"/v2/keys/{keyId}/revoke",
+            f"/v2/keys/{quote(str(keyId), safe='').replace('.', '%2E')}/revoke",
             result_type=ApiKey,
             with_perf=with_perf,
         )
@@ -1095,7 +1126,7 @@ class AsyncHevlayer:
     async def scan_source_rows(self, namespace: str, body: ProjectedSourceRequest | dict[str, Any], *, with_perf: bool = False) -> ProjectedSourceResponse | LayerResponse[ProjectedSourceResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/scans/rows",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/scans/rows",
             json=body, result_type=ProjectedSourceResponse,
             with_perf=with_perf,
         )
@@ -1104,7 +1135,7 @@ class AsyncHevlayer:
     async def search_namespace(self, namespace: str, body: SearchRequest | dict[str, Any], *, with_perf: bool = False) -> SearchResponse | LayerResponse[SearchResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/search",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/search",
             json=body, result_type=SearchResponse,
             with_perf=with_perf,
         )
@@ -1113,7 +1144,7 @@ class AsyncHevlayer:
     async def set_documents_stage(self, pipeline_id: str, body: SetDocumentsStageRequest | dict[str, Any], *, with_perf: bool = False) -> DocumentsStageResponse | LayerResponse[DocumentsStageResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/pipelines/{pipeline_id}/documents/stage",
+            f"/v2/pipelines/{quote(str(pipeline_id), safe='').replace('.', '%2E')}/documents/stage",
             json=body, result_type=DocumentsStageResponse,
             with_perf=with_perf,
         )
@@ -1122,7 +1153,7 @@ class AsyncHevlayer:
     async def update_turbopuffer_namespace_metadata(self, namespace: str, body: TurbopufferMetadataPatch | dict[str, Any], *, with_perf: bool = False) -> NamespaceMetadata | LayerResponse[NamespaceMetadata]:
         return await self._request_json(
             "PATCH",
-            f"/v1/namespaces/{namespace}/metadata",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/metadata",
             json=body, result_type=NamespaceMetadata,
             with_perf=with_perf,
         )
@@ -1131,7 +1162,7 @@ class AsyncHevlayer:
     async def update_turbopuffer_namespace_schema(self, namespace: str, body: TurbopufferSchema | dict[str, Any], *, with_perf: bool = False) -> TurbopufferSchema | LayerResponse[TurbopufferSchema]:
         return await self._request_json(
             "POST",
-            f"/v1/namespaces/{namespace}/schema",
+            f"/v1/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/schema",
             json=body, result_type=TurbopufferSchema,
             with_perf=with_perf,
         )
@@ -1140,7 +1171,7 @@ class AsyncHevlayer:
     async def upsert_udf(self, udf_id: str, body: UpdateUdfRequest | dict[str, Any], *, with_perf: bool = False) -> Udf | LayerResponse[Udf]:
         return await self._request_json(
             "PUT",
-            f"/v2/udfs/{udf_id}",
+            f"/v2/udfs/{quote(str(udf_id), safe='').replace('.', '%2E')}",
             json=body, result_type=Udf,
             with_perf=with_perf,
         )
@@ -1149,7 +1180,7 @@ class AsyncHevlayer:
     async def warm_cache(self, namespace: str, *, page_size: int | None = None, with_perf: bool = False) -> WarmJob | LayerResponse[WarmJob]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}/warm",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/warm",
             params={"page_size": page_size}, result_type=WarmJob,
             with_perf=with_perf,
         )
@@ -1158,7 +1189,7 @@ class AsyncHevlayer:
     async def write_namespace(self, namespace: str, body: TurbopufferWriteRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferWriteResponse | LayerResponse[TurbopufferWriteResponse]:
         return await self._request_json(
             "POST",
-            f"/v2/namespaces/{namespace}",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}",
             json=body, result_type=TurbopufferWriteResponse,
             with_perf=with_perf,
         )

@@ -50,6 +50,7 @@ pub async fn init_namespace(
     Path(namespace): Path<String>,
     request: Option<Json<InitNamespaceRequest>>,
 ) -> Result<Json<InitNamespaceResponse>, AppError> {
+    state.refuse_captured_write(&namespace)?;
     let request = request
         .map(|Json(request)| request)
         .unwrap_or(InitNamespaceRequest {
@@ -210,6 +211,7 @@ async fn run_backfill(
     };
 
     loop {
+        state.refuse_captured_write(namespace)?;
         let page = state
             .turbopuffer()
             .scan_page(

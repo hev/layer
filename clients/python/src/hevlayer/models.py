@@ -16,6 +16,94 @@ class ProjectedSourceResponse(BaseModel):
     rows: list[dict[str, Any]]
     source: dict[str, Any]
 
+class CdcFailure(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    error: dict[str, Any]
+    cdc: CdcMutationReceipt | None = None
+
+class CdcReplayRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    expectedReceiptVersion: int
+
+class CdcMutationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    cdc: CdcMutationReceipt | CdcObserveReceipt
+
+class CdcMutationReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    mutationId: str
+    epoch: str
+    namespaceIncarnation: str
+    sequence: int
+    receiptVersion: int
+    inputHash: str
+    state: Literal["pending", "complete", "partial", "failed", "unknown"]
+    sourceVersion: str | None = None
+    destinations: dict[str, Any]
+    embedding: dict[str, Any]
+    replayEligible: bool
+
+class CdcObserveReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    epoch: str
+    namespaceIncarnation: str
+    receiptVersion: int
+    namespace: str
+    requestBytes: int
+    capture: CdcObserveInspection
+    mode: Literal["observe"]
+    state: Literal["observed"]
+    mutationId: str
+    sequence: int
+    inputHash: str
+    observation: dict[str, Any]
+    destination: dict[str, Any]
+    replayEligible: Literal[False]
+
+class CdcObserveInspection(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    name: str
+    mode: Literal["observe"]
+    ready: Literal[False]
+    namespaces: list[str]
+    prefixes: list[str]
+    capturedCount: int
+    retainedCount: int
+    evictedCount: int
+    processGaps: dict[str, int]
+    lastCapturedAt: int | None
+    gapCount: int
+    gaps: dict[str, int]
+    countersScope: str
+    buffer: dict[str, Any]
+    destination: dict[str, Any]
+
+class CdcReference(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    name: str
+
+class CdcCondition(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: str
+    status: str
+    reason: str | None
+    message: str | None
+    lastTransitionTime: str | None
+
+class CdcInspection(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    name: str
+    generation: int
+    observedGeneration: int | None
+    sourceRef: CdcReference
+    destinationRef: CdcReference
+    bufferRef: CdcReference
+    namespaces: list[str]
+    captureRequested: Literal["disabled", "enabled"]
+    captureState: Literal["disabled", "blocked"]
+    ready: bool
+    conditions: list[CdcCondition]
+
 class LicenseSurfaceState(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     state: Literal["licensed", "grace", "floor"]

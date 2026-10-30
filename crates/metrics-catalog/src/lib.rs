@@ -85,6 +85,12 @@ pub fn metric(name: &str) -> Option<&'static MetricDoc> {
 }
 
 const CATALOG: &[MetricDoc] = &[
+    MetricDoc { name:"layer_cdc_binding_mode",kind:MetricKind::Gauge,family:MetricFamily::Storage,labels:&["binding", "mode"],description:"Configured CDC binding mode",example_promql:"layer_cdc_binding_mode",alert:None },
+    MetricDoc { name:"layer_cdc_observe_buffer_limit_bytes",kind:MetricKind::Gauge,family:MetricFamily::Storage,labels:&["binding"],description:"Observe retained byte limit",example_promql:"layer_cdc_observe_buffer_limit_bytes",alert:None },
+    MetricDoc { name: "layer_cdc_observe_captured_total", kind: MetricKind::Counter, labels: &["binding"], description: "Durably captured observe mutations", example_promql: "layer_cdc_observe_captured_total", alert: None, family: MetricFamily::Storage },
+    MetricDoc { name: "layer_cdc_observe_gaps_total", kind: MetricKind::Counter, labels: &["binding", "reason"], description: "Observe capture misses by reason", example_promql: "layer_cdc_observe_gaps_total", alert: None, family: MetricFamily::Storage },
+    MetricDoc { name: "layer_cdc_observe_buffer_bytes", kind: MetricKind::Gauge, labels: &["binding"], description: "Retained observe journal bytes", example_promql: "layer_cdc_observe_buffer_bytes", alert: None, family: MetricFamily::Storage },
+    MetricDoc { name: "layer_cdc_observe_last_capture_seconds", kind: MetricKind::Gauge, labels: &["binding"], description: "Last durable observe capture Unix time", example_promql: "layer_cdc_observe_last_capture_seconds", alert: None, family: MetricFamily::Storage },
     MetricDoc {
         name: "capacity_source_lag_seconds",
         kind: MetricKind::Gauge,

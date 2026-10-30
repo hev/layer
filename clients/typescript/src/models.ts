@@ -24,6 +24,103 @@ export interface ProjectedSourceResponse {
   source: Record<string, unknown>;
 }
 
+export interface CdcFailure {
+  [key: string]: unknown;
+  error: Record<string, unknown>;
+  cdc?: CdcMutationReceipt;
+}
+
+export interface CdcReplayRequest {
+  [key: string]: unknown;
+  expectedReceiptVersion: number;
+}
+
+export interface CdcMutationResponse {
+  [key: string]: unknown;
+  cdc: CdcMutationReceipt | CdcObserveReceipt;
+}
+
+export interface CdcMutationReceipt {
+  [key: string]: unknown;
+  mutationId: string;
+  epoch: string;
+  namespaceIncarnation: string;
+  sequence: number;
+  receiptVersion: number;
+  inputHash: string;
+  state: "pending" | "complete" | "partial" | "failed" | "unknown";
+  sourceVersion?: string | null;
+  destinations: Record<string, unknown>;
+  embedding: Record<string, unknown>;
+  replayEligible: boolean;
+}
+
+export interface CdcObserveReceipt {
+  [key: string]: unknown;
+  epoch: string;
+  namespaceIncarnation: string;
+  receiptVersion: number;
+  "namespace": string;
+  requestBytes: number;
+  capture: CdcObserveInspection;
+  mode: "observe";
+  state: "observed";
+  mutationId: string;
+  sequence: number;
+  inputHash: string;
+  observation: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  replayEligible: false;
+}
+
+export interface CdcObserveInspection {
+  [key: string]: unknown;
+  name: string;
+  mode: "observe";
+  ready: false;
+  namespaces: string[];
+  prefixes: string[];
+  capturedCount: number;
+  retainedCount: number;
+  evictedCount: number;
+  processGaps: Record<string, number>;
+  lastCapturedAt: number | null;
+  gapCount: number;
+  gaps: Record<string, number>;
+  countersScope: string;
+  buffer: Record<string, unknown>;
+  destination: Record<string, unknown>;
+}
+
+export interface CdcReference {
+  [key: string]: unknown;
+  name: string;
+}
+
+export interface CdcCondition {
+  [key: string]: unknown;
+  "type": string;
+  status: string;
+  reason: string | null;
+  message: string | null;
+  lastTransitionTime: string | null;
+}
+
+export interface CdcInspection {
+  [key: string]: unknown;
+  name: string;
+  generation: number;
+  observedGeneration: number | null;
+  sourceRef: CdcReference;
+  destinationRef: CdcReference;
+  bufferRef: CdcReference;
+  namespaces: string[];
+  captureRequested: "disabled" | "enabled";
+  captureState: "disabled" | "blocked";
+  ready: boolean;
+  conditions: CdcCondition[];
+}
+
 export interface LicenseSurfaceState {
   [key: string]: unknown;
   state: "licensed" | "grace" | "floor";

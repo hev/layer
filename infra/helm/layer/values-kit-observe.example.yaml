@@ -1,0 +1,25 @@
+# Synthetic names only. Resolve the exact private Kit inventory before use.
+# Explicitly opting in here is an example, not permission to deploy it.
+# Includes the five families: base chunks, sessions, blocks, evals, instructions.
+gateway:
+  cdcObserve:
+    enabled: true
+    bindings:
+      - name: kit-observe
+        mode: observe
+        sourceRef: kit-source
+        namespaces:
+          - example-kit
+          - example-kit-sessions
+          - example-kit-blocks
+          - example-kit-evals
+          - example-kit-instructions
+        prefixes: []
+        epoch: kit-observe-v1
+        incarnation: kit-observe-v1
+        aerospikeHosts: example-aerospike:3000
+        aerospikeNamespace: observe
+        aerospikeSet: kit-observe
+        retainedBytes: 6400000
+        maxMutations: 16000
+        admissionTimeoutMs: 100

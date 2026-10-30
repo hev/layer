@@ -52,6 +52,10 @@ export interface HintCacheWarmOptions extends RequestOptions {
   pageSize?: number;
 }
 
+export interface InspectCdcMutationOptions extends RequestOptions {
+  namespace_?: string;
+}
+
 export interface ListCheckpointsOptions extends RequestOptions {
   limit?: number;
   before?: string;
@@ -151,6 +155,10 @@ export interface QueryMetricsRangeApiV1Options extends RequestOptions {
 export interface QueryNamespaceOptions extends RequestOptions {
   searchQuery?: string;
   tags?: string[];
+}
+
+export interface ReplayCdcMutationOptions extends RequestOptions {
+  namespace_?: string;
 }
 
 export interface WarmCacheOptions extends RequestOptions {
@@ -1067,6 +1075,34 @@ export class Hevlayer {
   }
 
 
+  async inspectCdcBinding(binding: string, opts?: RequestOptions & { withPerf?: false }): Promise<Models.CdcInspection | Models.CdcObserveInspection>;
+  async inspectCdcBinding(binding: string, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.CdcInspection | Models.CdcObserveInspection>>;
+  async inspectCdcBinding(binding: string, opts: RequestOptions = {}): Promise<Models.CdcInspection | Models.CdcObserveInspection | LayerResponse<Models.CdcInspection | Models.CdcObserveInspection>> {
+    return this.requestJson<Models.CdcInspection | Models.CdcObserveInspection>({
+      method: "GET",
+      path: "/v2/cdc/" + encodeURIComponent(String(binding)),
+      params: undefined,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.CdcInspection | Models.CdcObserveInspection | LayerResponse<Models.CdcInspection | Models.CdcObserveInspection>>;
+  }
+
+
+  async inspectCdcMutation(binding: string, id: string, opts?: InspectCdcMutationOptions & { withPerf?: false }): Promise<Models.CdcMutationResponse>;
+  async inspectCdcMutation(binding: string, id: string, opts: InspectCdcMutationOptions & { withPerf: true }): Promise<LayerResponse<Models.CdcMutationResponse>>;
+  async inspectCdcMutation(binding: string, id: string, opts: InspectCdcMutationOptions = {}): Promise<Models.CdcMutationResponse | LayerResponse<Models.CdcMutationResponse>> {
+    return this.requestJson<Models.CdcMutationResponse>({
+      method: "GET",
+      path: "/v2/cdc/" + encodeURIComponent(String(binding)) + "/mutations/" + encodeURIComponent(String(id)),
+      params: [
+        { key: "namespace", value: opts.namespace_ }
+      ],
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.CdcMutationResponse | LayerResponse<Models.CdcMutationResponse>>;
+  }
+
+
   async listCheckpoints(namespace_: string, opts?: ListCheckpointsOptions & { withPerf?: false }): Promise<Models.CheckpointList>;
   async listCheckpoints(namespace_: string, opts: ListCheckpointsOptions & { withPerf: true }): Promise<LayerResponse<Models.CheckpointList>>;
   async listCheckpoints(namespace_: string, opts: ListCheckpointsOptions = {}): Promise<Models.CheckpointList | LayerResponse<Models.CheckpointList>> {
@@ -1611,6 +1647,22 @@ export class Hevlayer {
       withPerf: opts.withPerf === true,
       signal: opts.signal,
     }) as Promise<Models.TurbopufferQueryResponse | LayerResponse<Models.TurbopufferQueryResponse>>;
+  }
+
+
+  async replayCdcMutation(binding: string, id: string, body: Models.CdcReplayRequest | Record<string, unknown>, opts?: ReplayCdcMutationOptions & { withPerf?: false }): Promise<Models.CdcMutationResponse>;
+  async replayCdcMutation(binding: string, id: string, body: Models.CdcReplayRequest | Record<string, unknown>, opts: ReplayCdcMutationOptions & { withPerf: true }): Promise<LayerResponse<Models.CdcMutationResponse>>;
+  async replayCdcMutation(binding: string, id: string, body: Models.CdcReplayRequest | Record<string, unknown>, opts: ReplayCdcMutationOptions = {}): Promise<Models.CdcMutationResponse | LayerResponse<Models.CdcMutationResponse>> {
+    return this.requestJson<Models.CdcMutationResponse>({
+      method: "POST",
+      path: "/v2/cdc/" + encodeURIComponent(String(binding)) + "/mutations/" + encodeURIComponent(String(id)) + "/replay",
+      params: [
+        { key: "namespace", value: opts.namespace_ }
+      ],
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.CdcMutationResponse | LayerResponse<Models.CdcMutationResponse>>;
   }
 
 

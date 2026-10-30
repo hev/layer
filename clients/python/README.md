@@ -101,6 +101,8 @@ asyncio.run(main())
 - `hint_cache_warm`
 - `import_namespace`
 - `init_namespace`
+- `inspect_cdc_binding`
+- `inspect_cdc_mutation`
 - `list_checkpoints`
 - `list_clickstream`
 - `list_keys`
@@ -137,6 +139,7 @@ asyncio.run(main())
 - `query_metrics_range_api_v1`
 - `query_namespace`
 - `query_turbopuffer_namespace`
+- `replay_cdc_mutation`
 - `reset_failed_udf`
 - `resume_udf`
 - `revoke_key`
