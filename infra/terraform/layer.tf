@@ -67,6 +67,29 @@ resource "aws_s3_bucket_lifecycle_configuration" "layer_wal" {
     }
   }
 
+  # Bucket-wide: drop noncurrent versions, orphaned delete markers and stale
+  # multipart uploads. Overlaps the prefix rules above; when rules overlap S3
+  # applies the earliest expiry, so history/ and snapshots/ keep their 7-day
+  # current-object expiry. Versioning stays Enabled because clouddrive-originals
+  # requires a VersionId on retained blobs/ objects.
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+
+    expiration {
+      expired_object_delete_marker = true
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "layer_wal" {
