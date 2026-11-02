@@ -2171,7 +2171,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hevlayer-gateway"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "alyze",
  "async-trait",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "layer-original"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "metrics-catalog"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5347,7 +5347,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vectorstore-core"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "aws-config",
