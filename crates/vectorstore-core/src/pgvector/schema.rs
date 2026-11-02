@@ -39,11 +39,15 @@ impl Field {
             "uint" => "numeric(20,0)",
             "float" => "double precision",
             "bool" => "boolean",
+            "json" => "jsonb",
             _ => unreachable!(),
         };
         format!("{base}{array}")
     }
     pub fn validate(&self, v: &Value) -> Result<()> {
+        if self.kind == "json" {
+            return Ok(());
+        }
         if v.is_null() {
             return Ok(());
         }
@@ -103,6 +107,9 @@ impl Field {
     pub fn array(&self) -> bool {
         self.element().is_some()
     }
+    pub fn json(&self) -> bool {
+        self.kind == "json"
+    }
     pub fn validate_vector(&self, v: &Value, metric: &str) -> Result<()> {
         let dim = self
             .dimension()
@@ -125,7 +132,9 @@ impl Field {
     pub fn bind(&self, sql: &mut QueryBuilder<'_, Postgres>, value: &Value) {
         // A JSON scalar is bound, then cast through text to the declared SQL
         // type. JSON null becomes SQL NULL; no request text becomes SQL syntax.
-        if self.dimension().is_some() {
+        if self.kind == "json" {
+            sql.push_bind(value.clone()).push("::jsonb");
+        } else if self.dimension().is_some() {
             sql.push_bind(if value.is_null() {
                 None
             } else {
@@ -218,7 +227,11 @@ impl Schema {
                 declaration: decl.clone(),
             };
             let element = kind.strip_prefix("[]").unwrap_or(kind);
-            if !SCALAR_TYPES.contains(&element)
+            if kind == "json" && decl.get("filterable") != Some(&Value::Bool(false)) {
+                return Err(invalid("json attributes require filterable: false"));
+            }
+            if kind != "json"
+                && !SCALAR_TYPES.contains(&element)
                 && !f.dimension().is_some_and(|d| d > 0 && d <= 2000)
             {
                 return Err(unsupported_detail("schema.type", kind));

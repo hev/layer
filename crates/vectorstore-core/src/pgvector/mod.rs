@@ -166,6 +166,38 @@ fn ordering(rank: &Value) -> Result<Option<Vec<(String, bool)>>> {
         .map(Some)
 }
 
+/// The optional native BM25 tuple parameter. Do not silently ignore unknown
+/// options or accept ANN options that the adapter cannot execute.
+fn last_as_prefix(rank: &[Value]) -> Result<bool> {
+    if rank.len() == 3 {
+        return Ok(false);
+    }
+    if rank.len() != 4 || rank[1] != "BM25" {
+        return Err(unsupported_detail("rank_by", "options require BM25"));
+    }
+    let options = object(&rank[3])?;
+    if options.keys().any(|key| key != "last_as_prefix") {
+        return Err(unsupported_detail("rank_by", "unknown BM25 option"));
+    }
+    match options.get("last_as_prefix") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(invalid("last_as_prefix must be boolean")),
+    }
+}
+
+fn literal_prefix(token: &str) -> String {
+    let mut escaped = String::new();
+    for ch in token.chars() {
+        if ".+*?()|[]{}^$\\".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push_str(".*");
+    escaped
+}
+
 impl PgvectorClient {
     pub async fn connect(url: &str, scope: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -661,9 +693,12 @@ impl PgvectorClient {
             .cloned()
             .or_else(|| body.get("vector").map(|v| json!(["vector", "ANN", v])))
             .ok_or_else(|| invalid("rank_by or vector is required"))?;
-        let rank = rank.as_array().filter(|r| r.len() == 3).ok_or_else(|| {
-            unsupported_detail("rank_by", "expression must be [field, operator, input]")
-        })?;
+        let rank = rank
+            .as_array()
+            .filter(|r| (3..=4).contains(&r.len()))
+            .ok_or_else(|| {
+                unsupported_detail("rank_by", "expression must be [field, operator, input]")
+            })?;
         let field = rank[0]
             .as_str()
             .ok_or_else(|| invalid("rank field must be a string"))?;
@@ -673,6 +708,7 @@ impl PgvectorClient {
         if !["ANN", "BM25"].contains(&mode) {
             return Err(unsupported(mode));
         }
+        let prefix = last_as_prefix(rank)?;
         let mut tx = self.begin(namespace).await?;
         let ns = self.required(&mut tx, namespace).await?;
         let field = ns
@@ -721,16 +757,53 @@ impl PgvectorClient {
                 .ok_or_else(|| unsupported_detail("fts", "BM25 input must be a string"))?;
             sql.push("paradedb.score(rid)::float8 AS score FROM layer_pgvector.")
                 .push(quoted(&ns.table))
-                .push(" WHERE rid @@@ paradedb.match(")
-                .push_bind(field.column())
-                .push("::text,")
-                .push_bind(text.to_owned())
-                // Materialize BM25 scores before scalar filtering. pg_search
-                // 0.18 can choose a B-tree filter plan that leaves score NULL
-                // when unindexed scalar predicates share the search scan.
-                .push(
-                    ") ORDER BY paradedb.score(rid) DESC) SELECT data,score FROM hits WHERE TRUE",
-                );
+                .push(" WHERE rid @@@ ");
+            if prefix {
+                // Tokenize with the index's own tokenizer, not a second
+                // gateway approximation. Only the final token becomes a
+                // regex; all earlier terms retain their exact BM25 scores.
+                let tokens: Vec<String> = sqlx::query_scalar(
+                    "SELECT token FROM paradedb.tokenize('{\"type\":\"default\"}'::jsonb, $1) ORDER BY position",
+                )
+                .bind(text)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db)?;
+                if tokens.is_empty() {
+                    tx.commit().await.map_err(db)?;
+                    return Ok(json!({"rows": []}));
+                }
+                sql.push("paradedb.boolean(should => ARRAY[");
+                for (index, token) in tokens.iter().enumerate() {
+                    if index > 0 {
+                        sql.push(",");
+                    }
+                    if index + 1 == tokens.len() {
+                        sql.push("paradedb.const_score(1.0::real,paradedb.regex(")
+                            .push_bind(field.column())
+                            .push("::text,")
+                            .push_bind(literal_prefix(token))
+                            .push("))");
+                    } else {
+                        sql.push("paradedb.term(")
+                            .push_bind(field.column())
+                            .push("::text,")
+                            .push_bind(token.clone())
+                            .push(")");
+                    }
+                }
+                sql.push("])");
+            } else {
+                sql.push("paradedb.match(")
+                    .push_bind(field.column())
+                    .push("::text,")
+                    .push_bind(text.to_owned())
+                    .push(")");
+            }
+            // Materialize BM25 scores before scalar filtering. pg_search
+            // 0.18 can choose a B-tree filter plan that leaves score NULL
+            // when unindexed scalar predicates share the search scan.
+            sql.push(" ORDER BY paradedb.score(rid) DESC) SELECT data,score FROM hits WHERE TRUE");
         }
         if let Some(filters) = body.get("filters").filter(|v| !v.is_null()) {
             sql.push(" AND (");
@@ -815,6 +888,9 @@ impl PgvectorClient {
             }
             if field.array() {
                 return Err(invalid("rank_by cannot order by an array attribute"));
+            }
+            if field.json() {
+                return Err(invalid("rank_by cannot order by a json attribute"));
             }
             sql.push(field.order_expr("")).push(if *descending {
                 " DESC NULLS LAST,"

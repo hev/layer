@@ -65,3 +65,8 @@ path = "tests/integration/search_ce.rs"
 [[test]]
 name = "standalone_boot"
 path = "tests/integration/standalone_boot.rs"
+
+[[test]]
+name = "typeahead_ce"
+path = "tests/integration/typeahead_ce.rs"
+required-features = ["pgvector"]

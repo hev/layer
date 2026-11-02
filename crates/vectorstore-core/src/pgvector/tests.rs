@@ -1194,3 +1194,48 @@ async fn pgvector_live_record_versions_automatic_rollback_and_race() {
     .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn typeahead_options_and_payload_schema_are_explicit() {
+    for (options, expected) in [
+        (json!({}), false),
+        (json!({"last_as_prefix": false}), false),
+        (json!({"last_as_prefix": true}), true),
+    ] {
+        assert_eq!(
+            last_as_prefix(json!(["text", "BM25", "Murp", options]).as_array().unwrap()).unwrap(),
+            expected
+        );
+    }
+    for rank in [
+        json!(["text", "BM25", "q", {"last_as_prefix": 1}]),
+        json!(["text", "BM25", "q", {"prefix": true}]),
+        json!(["vector", "ANN", [1, 0], {"last_as_prefix": true}]),
+    ] {
+        assert!(last_as_prefix(rank.as_array().unwrap()).is_err());
+    }
+    assert_eq!(literal_prefix("a.b+"), "a\\.b\\+.*");
+    let schema = Schema::parse(&json!({"links": {"type": "json", "filterable": false}})).unwrap();
+    let links =
+        json!([{"label":"Folder", "system":"SharePoint", "url":"https://example.test/job"}]);
+    schema
+        .validate_row(&json!({"id":"job", "links":links} ), "cosine_distance")
+        .unwrap();
+    for declaration in [
+        json!("json"),
+        json!({"type":"json"}),
+        json!({"type":"json", "filterable":true}),
+        json!({"type":"json", "filterable":false, "full_text_search":true}),
+    ] {
+        assert!(Schema::parse(&json!({"links":declaration})).is_err());
+    }
+    let mut sql = QueryBuilder::<Postgres>::new("");
+    assert!(filter::compile(
+        &mut sql,
+        &schema,
+        &json!(["links", "Eq", links]),
+        0,
+        filter::Refs::Rejected
+    )
+    .is_err());
+}

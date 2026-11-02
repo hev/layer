@@ -3434,36 +3434,39 @@ components:
       additionalProperties: true
       description: 'The optional _hevlayer field follows RecordVersionOptions: pgvector-only
         versioning configuration and a single-row immutable version_id retry key.
-        Enable on an empty namespace; activation is automatic or explicit. Native
-        Turbopuffer write body (`upsert_rows`, `patch_rows`, `deletes`, filter writes,
-        copy, branch, schema, encryption, etc.). A schema attribute may declare `embed`
-        as a provider-namespaced model string or extended `{model, dims, attribute,
-        serving, revision, instructions, modality, chunk}` object. The first row write
-        establishing an embedded schema requires `distance_metric` (Postgres defaults
-        it to `cosine_distance`). `serving.prefer: native` is consumed by Layer and
-        the tpuf-compatible fields are forwarded on a Turbopuffer store. `turbopuffer`
-        (alias `autoscaler`) and native-on-search are resolved through a configured
-        Turbopuffer embedding provider. Native-on-Postgres is resolved once, when
-        the attribute is declared, through the `LAYER_EMBED_URL` embedder when it
-        lists the model, otherwise the configured Turbopuffer embedding provider;
-        Postgres takes one embedded attribute per namespace, no client vector beside
-        it; `chunk` requires explicit `turbopuffer` or `worker` serving. `local` is
-        resolved in-process by model family: `erikkaum/lattice-retrieval` uses `LAYER_LATTICE_MODEL_PATH`,
-        while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`; `lattice` remains
-        an alias for `local`. `serving.prefer` accepts exactly `native` (default),
-        `turbopuffer` (alias `autoscaler`), `local` (alias `lattice`), or `worker`.
-        Worker routes to the InfraRules embedder whose model matches, using its OpenAI-compatible
-        /v1/embeddings endpoint. Worker profiles pin the image digest; changing it
-        requires re-indexing. Waking workers return 503 with Retry-After. Invalid
-        vectors return 502 before cache insertion or store writes. There is no fallback
-        between explicit providers. The Turbopuffer provider path accepts supported
-        Hugging Face checkpoints, including finetuned models, and sends only concrete
-        vectors to the active store. The Layer-only revision, instruction, modality,
-        and chunking fields are never forwarded upstream; local CLIP supports image
-        modality while worker supports text instructions and chunking; revision selection
-        belongs in the worker image. Worker prepared inputs use a conservative UTF-8
-        byte budget plus two special tokens against maxInputTokens; oversized inputs
-        are rejected, never truncated.
+        Enable on an empty namespace; activation is automatic or explicit. Postgres
+        also accepts explicitly declared `{type: json, filterable: false}` payload
+        attributes, including arrays of labelled links. These values are returned
+        intact by query, search, collapse and MCP, and cannot be filtered, sorted
+        or ranked. This extension is not supported by Turbopuffer. Native Turbopuffer
+        write body (`upsert_rows`, `patch_rows`, `deletes`, filter writes, copy, branch,
+        schema, encryption, etc.). A schema attribute may declare `embed` as a provider-namespaced
+        model string or extended `{model, dims, attribute, serving, revision, instructions,
+        modality, chunk}` object. The first row write establishing an embedded schema
+        requires `distance_metric` (Postgres defaults it to `cosine_distance`). `serving.prefer:
+        native` is consumed by Layer and the tpuf-compatible fields are forwarded
+        on a Turbopuffer store. `turbopuffer` (alias `autoscaler`) and native-on-search
+        are resolved through a configured Turbopuffer embedding provider. Native-on-Postgres
+        is resolved once, when the attribute is declared, through the `LAYER_EMBED_URL`
+        embedder when it lists the model, otherwise the configured Turbopuffer embedding
+        provider; Postgres takes one embedded attribute per namespace, no client vector
+        beside it; `chunk` requires explicit `turbopuffer` or `worker` serving. `local`
+        is resolved in-process by model family: `erikkaum/lattice-retrieval` uses
+        `LAYER_LATTICE_MODEL_PATH`, while CLIP-family models use `LAYER_LOCAL_CLIP_MODEL_PATH`;
+        `lattice` remains an alias for `local`. `serving.prefer` accepts exactly `native`
+        (default), `turbopuffer` (alias `autoscaler`), `local` (alias `lattice`),
+        or `worker`. Worker routes to the InfraRules embedder whose model matches,
+        using its OpenAI-compatible /v1/embeddings endpoint. Worker profiles pin the
+        image digest; changing it requires re-indexing. Waking workers return 503
+        with Retry-After. Invalid vectors return 502 before cache insertion or store
+        writes. There is no fallback between explicit providers. The Turbopuffer provider
+        path accepts supported Hugging Face checkpoints, including finetuned models,
+        and sends only concrete vectors to the active store. The Layer-only revision,
+        instruction, modality, and chunking fields are never forwarded upstream; local
+        CLIP supports image modality while worker supports text instructions and chunking;
+        revision selection belongs in the worker image. Worker prepared inputs use
+        a conservative UTF-8 byte budget plus two special tokens against maxInputTokens;
+        oversized inputs are rejected, never truncated.
 
         '
     TurbopufferBranchFromRequest:
@@ -5287,15 +5290,19 @@ components:
               - Embed
               - how plants turn sunlight into food
               - field: text
-          description: 'Rank expression tuple. With `top_k`, Layer handles the portable
-            subset with cache, history, and stable-read behavior; native upstream
-            `rank_by` bodies that omit `top_k` pass through unchanged. For search-store
-            multivector namespaces, spell ANN over a vector bag as `["vectors", "ANN",
-            [[...], [...]]]`. Two Layer-only operator spellings are intercepted: `["field",
-            "HybridText", "input", {fuzziness?, rank_constant?, per_leg_limit?, threads?}?]`
-            (hybrid text fusion, RFC 0022; `threads` is the same scatter/gather fan-out
-            control as scans, defaulting from `Index.spec.scan.threads`) and `["field",
-            "Auto", "input", {route?, vector?}?]` (query router, RFC 0044). Auto `vector`
+          description: 'Rank expression tuple. `["field", "BM25", "input", {"last_as_prefix":
+            true}]` treats only the last token as a literal prefix (default false),
+            scoring prefix matches at 1.0. Supported by Turbopuffer and Postgres,
+            including with collapse; the field must have full_text_search enabled.
+            With `top_k`, Layer handles the portable subset with cache, history, and
+            stable-read behavior; native upstream `rank_by` bodies that omit `top_k`
+            pass through unchanged. For search-store multivector namespaces, spell
+            ANN over a vector bag as `["vectors", "ANN", [[...], [...]]]`. Two Layer-only
+            operator spellings are intercepted: `["field", "HybridText", "input",
+            {fuzziness?, rank_constant?, per_leg_limit?, threads?}?]` (hybrid text
+            fusion, RFC 0022; `threads` is the same scatter/gather fan-out control
+            as scans, defaulting from `Index.spec.scan.threads`) and `["field", "Auto",
+            "input", {route?, vector?}?]` (query router, RFC 0044). Auto `vector`
             accepts a number array or `["Embed", input, {field?, model?}?]`; `field`
             defaults to the Auto lexical field and may instead select a different
             source attribute or derived vector target. Layer resolves the inline expression

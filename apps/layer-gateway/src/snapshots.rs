@@ -972,9 +972,9 @@ pub(crate) async fn aggregate_facets_partition_with_admission(
                 }
                 #[cfg(not(feature = "field-stats-capture"))]
                 {
-                    return Err(TurbopufferError::Other(
+                    Err(TurbopufferError::Other(
                         "complete capture feature unavailable".into(),
-                    ));
+                    ))
                 }
             } else {
                 tpuf.scan_page(
