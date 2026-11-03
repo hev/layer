@@ -6,6 +6,28 @@ from pydantic import BaseModel, ConfigDict, Field
 
 JSONValue = Any
 
+class BundleRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    filters: list[Any]
+    include_attributes: list[str]
+    max_rows: int
+
+class EdgeBundle(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    content: str
+    manifest: BundleManifest
+
+class BundleManifest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    version: Literal[1]
+    namespace: str
+    stable_as_of: int
+    consistency: Literal["observed"]
+    row_count: int
+    schema: dict[str, Any]
+    tokenizers: dict[str, Literal["word_v2"]]
+    content_hash: str
+
 class ProjectedSourceRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     include_attributes: list[str]

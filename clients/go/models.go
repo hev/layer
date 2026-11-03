@@ -2,6 +2,28 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type BundleRequest struct {
+	Filters []interface{} `json:"filters"`
+	IncludeAttributes []string `json:"include_attributes"`
+	MaxRows int64 `json:"max_rows"`
+}
+
+type EdgeBundle struct {
+	Content string `json:"content"`
+	Manifest BundleManifest `json:"manifest"`
+}
+
+type BundleManifest struct {
+	Version string `json:"version"`
+	Namespace string `json:"namespace"`
+	StableAsOf int64 `json:"stable_as_of"`
+	Consistency string `json:"consistency"`
+	RowCount int64 `json:"row_count"`
+	Schema map[string]interface{} `json:"schema"`
+	Tokenizers map[string]string `json:"tokenizers"`
+	ContentHash string `json:"content_hash"`
+}
+
 type ProjectedSourceRequest struct {
 	IncludeAttributes []string `json:"include_attributes"`
 	Scan map[string]interface{} `json:"scan"`

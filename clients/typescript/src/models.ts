@@ -12,6 +12,31 @@ export type TurbopufferRankBy =
   | JSONValue[]
   | Record<string, JSONValue>;
 
+export interface BundleRequest {
+  [key: string]: unknown;
+  filters: TurbopufferFilter;
+  include_attributes: string[];
+  max_rows: number;
+}
+
+export interface EdgeBundle {
+  [key: string]: unknown;
+  content: string;
+  manifest: BundleManifest;
+}
+
+export interface BundleManifest {
+  [key: string]: unknown;
+  version: 1;
+  "namespace": string;
+  stable_as_of: number;
+  consistency: "observed";
+  row_count: number;
+  schema: Record<string, unknown>;
+  tokenizers: Record<string, "word_v2">;
+  content_hash: string;
+}
+
 export interface ProjectedSourceRequest {
   [key: string]: unknown;
   include_attributes: string[];

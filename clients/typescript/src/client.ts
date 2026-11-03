@@ -593,6 +593,20 @@ export class Hevlayer {
   }
 
 
+  async exportBundle(namespace_: string, body: Models.BundleRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.EdgeBundle>;
+  async exportBundle(namespace_: string, body: Models.BundleRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.EdgeBundle>>;
+  async exportBundle(namespace_: string, body: Models.BundleRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.EdgeBundle | LayerResponse<Models.EdgeBundle>> {
+    return this.requestJson<Models.EdgeBundle>({
+      method: "POST",
+      path: "/v2/namespaces/" + encodeURIComponent(String(namespace_)) + "/bundle",
+      params: undefined,
+        body: body,
+      withPerf: opts.withPerf === true,
+      signal: opts.signal,
+    }) as Promise<Models.EdgeBundle | LayerResponse<Models.EdgeBundle>>;
+  }
+
+
   async failUdfItems(udfId: string, body: Models.UdfFailRequest | Record<string, unknown>, opts?: RequestOptions & { withPerf?: false }): Promise<Models.UdfItemsResponse>;
   async failUdfItems(udfId: string, body: Models.UdfFailRequest | Record<string, unknown>, opts: RequestOptions & { withPerf: true }): Promise<LayerResponse<Models.UdfItemsResponse>>;
   async failUdfItems(udfId: string, body: Models.UdfFailRequest | Record<string, unknown>, opts: RequestOptions = {}): Promise<Models.UdfItemsResponse | LayerResponse<Models.UdfItemsResponse>> {

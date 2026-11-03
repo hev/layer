@@ -57,6 +57,7 @@ console.log(response.data.rows);
 - `discoverUdf`
 - `evaluateTurbopufferRecall`
 - `explainTurbopufferQuery`
+- `exportBundle`
 - `failUdfItems`
 - `fetchDocument`
 - `fetchDocuments`

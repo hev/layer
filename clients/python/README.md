@@ -66,6 +66,7 @@ asyncio.run(main())
 - `discover_udf`
 - `evaluate_turbopuffer_recall`
 - `explain_turbopuffer_query`
+- `export_bundle`
 - `fail_udf_items`
 - `fetch_document`
 - `fetch_documents`

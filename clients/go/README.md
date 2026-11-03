@@ -36,6 +36,7 @@ and pipeline/scan/warm-cache helper methods.
 - `DiscoverUdf`
 - `EvaluateTurbopufferRecall`
 - `ExplainTurbopufferQuery`
+- `ExportBundle`
 - `FailUdfItems`
 - `FetchDocument`
 - `FetchDocuments`
