@@ -141,7 +141,7 @@ same mount through an override file.
 and the verified artifact recipe. Build context is `apps/layer-embed`. The final
 nonroot image contains the binary and model/license files, with no Python or
 package installer. No image is built or published by native tests. CI's
-`gateway-mirror` job builds the image from the staged public tree with Depot
+`gateway-mirror` job builds the image from the staged public tree with Docker buildx on Oven
 (build-only, then `--load` for the Compose gate); `pgvector / phase-one` runs
 `scripts/test-ce-embed.py`, the RFC 0120 cold Compose gate with every network
 internal (ready within budget, private network only, no outbound connect,

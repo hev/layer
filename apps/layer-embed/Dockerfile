@@ -1,4 +1,4 @@
-# Build context: apps/layer-embed. Build-only Depot validation is a later gate.
+# Build context: apps/layer-embed. Build-only Oven validation is a later gate.
 FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS artifacts
 WORKDIR /package
 COPY artifacts.lock.json manifest.json ./
