@@ -92,8 +92,6 @@ console.log(response.data.rows);
 - `hintCacheWarm`
 - `importNamespace`
 - `initNamespace`
-- `inspectCdcBinding`
-- `inspectCdcMutation`
 - `listCheckpoints`
 - `listClickstream`
 - `listKeys`
@@ -130,7 +128,6 @@ console.log(response.data.rows);
 - `queryMetricsRangeApiV1`
 - `queryNamespace`
 - `queryTurbopufferNamespace`
-- `replayCdcMutation`
 - `resetFailedUdf`
 - `resumeUdf`
 - `revokeKey`

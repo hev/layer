@@ -71,8 +71,6 @@ and pipeline/scan/warm-cache helper methods.
 - `HintCacheWarm`
 - `ImportNamespace`
 - `InitNamespace`
-- `InspectCdcBinding`
-- `InspectCdcMutation`
 - `ListCheckpoints`
 - `ListClickstream`
 - `ListKeys`
@@ -109,7 +107,6 @@ and pipeline/scan/warm-cache helper methods.
 - `QueryMetricsRangeApiV1`
 - `QueryNamespace`
 - `QueryTurbopufferNamespace`
-- `ReplayCdcMutation`
 - `ResetFailedUdf`
 - `ResumeUdf`
 - `RevokeKey`
