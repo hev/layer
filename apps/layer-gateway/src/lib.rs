@@ -130,6 +130,7 @@ pub struct AppState {
     pub restore_runs: Arc<DashMap<String, RestoreRunState>>,
     pub aerospike_set_prefix: String,
     pub pipeline_store: Option<Arc<dyn PipelineStore>>,
+    pub bundle_max_rows: usize,
     pub udf_store: Option<Arc<dyn UdfStore>>,
     pub function_layer_only_namespaces: std::collections::HashSet<String>,
     pub write_trigger: Option<Arc<dyn WriteTrigger>>,

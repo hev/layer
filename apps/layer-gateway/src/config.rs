@@ -42,6 +42,8 @@ pub struct Config {
     pub key_pepper: Option<String>,
     /// Fixed-window cap on `/v2/keys/authenticate` calls per minute.
     pub keys_auth_rate_limit_per_min: u32,
+    /// Bundle row ceiling (`LAYER_BUNDLE_MAX_ROWS`), positive; default 100,000.
+    pub bundle_max_rows: usize,
     pub port: u16,
     pub database_url: Option<String>,
     /// Namespaces whose Function paths must never dispatch provider reads.
@@ -187,6 +189,15 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|limit| *limit > 0)
                 .unwrap_or(120),
+            bundle_max_rows: env::var("LAYER_BUNDLE_MAX_ROWS")
+                .ok()
+                .map(|s| {
+                    s.parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .expect("LAYER_BUNDLE_MAX_ROWS must be a positive integer")
+                })
+                .unwrap_or(100_000),
             aerospike_hosts: env::var("AEROSPIKE_HOSTS").ok().and_then(trimmed_non_empty),
             aerospike_namespace: env::var("AEROSPIKE_NAMESPACE")
                 .unwrap_or_else(|_| "hevlayer".to_string()),
