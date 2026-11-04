@@ -77,6 +77,7 @@ class HevlayerProtocol(Protocol):
     async def discover_udf(self, udf_id: str, body: UdfDiscoverRequest | dict[str, Any], *, with_perf: bool = False) -> UdfDiscoverResponse | LayerResponse[UdfDiscoverResponse]: ...
     async def evaluate_turbopuffer_recall(self, namespace: str, body: TurbopufferRecallRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferRecallResponse | LayerResponse[TurbopufferRecallResponse]: ...
     async def explain_turbopuffer_query(self, namespace: str, body: TurbopufferQueryRequest | dict[str, Any], *, with_perf: bool = False) -> TurbopufferExplainQueryResponse | LayerResponse[TurbopufferExplainQueryResponse]: ...
+    async def export_bundle(self, namespace: str, body: BundleRequest | dict[str, Any], *, with_perf: bool = False) -> EdgeBundle | LayerResponse[EdgeBundle]: ...
     async def fail_udf_items(self, udf_id: str, body: UdfFailRequest | dict[str, Any], *, with_perf: bool = False) -> UdfItemsResponse | LayerResponse[UdfItemsResponse]: ...
     async def fetch_document(self, namespace: str, doc_id: str, *, include_attributes: list[str] | None = None, with_perf: bool = False) -> Document | LayerResponse[Document]: ...
     async def fetch_documents(self, namespace: str, body: FetchDocumentsRequest | dict[str, Any], *, with_perf: bool = False) -> FetchDocumentsResponse | LayerResponse[FetchDocumentsResponse]: ...
@@ -427,6 +428,15 @@ class AsyncHevlayer:
             "POST",
             f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/explain_query",
             json=body, result_type=TurbopufferExplainQueryResponse,
+            with_perf=with_perf,
+        )
+
+
+    async def export_bundle(self, namespace: str, body: BundleRequest | dict[str, Any], *, with_perf: bool = False) -> EdgeBundle | LayerResponse[EdgeBundle]:
+        return await self._request_json(
+            "POST",
+            f"/v2/namespaces/{quote(str(namespace), safe='').replace('.', '%2E')}/bundle",
+            json=body, result_type=EdgeBundle,
             with_perf=with_perf,
         )
 

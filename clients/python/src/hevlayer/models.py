@@ -6,6 +6,28 @@ from pydantic import BaseModel, ConfigDict, Field
 
 JSONValue = Any
 
+class BundleRequest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    filters: list[Any]
+    include_attributes: list[str]
+    max_rows: int
+
+class EdgeBundle(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    content: str
+    manifest: BundleManifest
+
+class BundleManifest(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    version: Literal[1]
+    namespace: str
+    stable_as_of: int
+    consistency: Literal["observed"]
+    row_count: int
+    schema: dict[str, Any]
+    tokenizers: dict[str, Literal["word_v2"]]
+    content_hash: str
+
 class ProjectedSourceRequest(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     include_attributes: list[str]
@@ -1251,8 +1273,18 @@ class FieldStat(BaseModel):
     state: Literal["exact", "approximate"]
     approximate_since: int | None = None
 
+class NamespaceSyncHealth(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    last_success_at: str | None
+    last_attempt_at: str
+    last_status: Literal["succeeded", "partial", "failed"]
+    rows_seen: int
+    source_kind: Literal["rest", "clouddrive"]
+    pipeline: str
+
 class NamespaceMetadataLayer(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+    sync: NamespaceSyncHealth | None = None
     title: str | None = None
     description: str | None = None
     field_stats: NamespaceFieldStats | None = None

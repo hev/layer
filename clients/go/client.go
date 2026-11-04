@@ -1163,6 +1163,24 @@ func (client *Client) ExplainTurbopufferQueryWithPerf(ctx context.Context, names
 }
 
 
+func (client *Client) ExportBundle(ctx context.Context, namespace string, body *BundleRequest, options ...RequestOption) (*EdgeBundle, error) {
+	out := EdgeBundle{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/bundle", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ExportBundleWithPerf(ctx context.Context, namespace string, body *BundleRequest, options ...RequestOption) (*LayerResponse[EdgeBundle], error) {
+	out := EdgeBundle{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/bundle", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[EdgeBundle]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) FailUdfItems(ctx context.Context, udfID string, body *UdfFailRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {

@@ -5076,10 +5076,53 @@ components:
         approximate_since:
           type: integer
           format: int64
+    NamespaceSyncHealth:
+      type: object
+      description: Durable completed source sweep, including sweeps with zero upserts.
+      required:
+      - last_success_at
+      - last_attempt_at
+      - last_status
+      - rows_seen
+      - source_kind
+      - pipeline
+      properties:
+        last_success_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Last wholly successful sweep completion; null before first
+            success.
+        last_attempt_at:
+          type: string
+          format: date-time
+          description: Most recent sweep completion, successful or failed.
+        last_status:
+          type: string
+          enum:
+          - succeeded
+          - partial
+          - failed
+        rows_seen:
+          type: integer
+          format: int64
+          minimum: 0
+        source_kind:
+          type: string
+          enum:
+          - rest
+          - clouddrive
+        pipeline:
+          type: string
     NamespaceMetadataLayer:
       type: object
       description: Gateway-computed namespace freshness and readiness signals.
       properties:
+        sync:
+          description: Omitted until a source reports; absence means unknown. Uses
+            namespace read authorization.
+          "$ref": "#/components/schemas/NamespaceSyncHealth"
         title:
           type: string
           description: 'Human-readable name from the namespace''s Index `spec.metadata.title`.

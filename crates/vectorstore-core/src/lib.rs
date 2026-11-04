@@ -16,3 +16,5 @@ pub mod search;
 pub mod search_profile;
 pub mod turbopuffer;
 pub mod vector_store;
+
+pub mod source_sync;

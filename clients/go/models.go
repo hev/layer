@@ -2,6 +2,28 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type BundleRequest struct {
+	Filters []interface{} `json:"filters"`
+	IncludeAttributes []string `json:"include_attributes"`
+	MaxRows int64 `json:"max_rows"`
+}
+
+type EdgeBundle struct {
+	Content string `json:"content"`
+	Manifest BundleManifest `json:"manifest"`
+}
+
+type BundleManifest struct {
+	Version string `json:"version"`
+	Namespace string `json:"namespace"`
+	StableAsOf int64 `json:"stable_as_of"`
+	Consistency string `json:"consistency"`
+	RowCount int64 `json:"row_count"`
+	Schema map[string]interface{} `json:"schema"`
+	Tokenizers map[string]string `json:"tokenizers"`
+	ContentHash string `json:"content_hash"`
+}
+
 type ProjectedSourceRequest struct {
 	IncludeAttributes []string `json:"include_attributes"`
 	Scan map[string]interface{} `json:"scan"`
@@ -1241,7 +1263,17 @@ type FieldStat struct {
 	ApproximateSince int64 `json:"approximate_since,omitempty"`
 }
 
+type NamespaceSyncHealth struct {
+	LastSuccessAt *string `json:"last_success_at"`
+	LastAttemptAt string `json:"last_attempt_at"`
+	LastStatus string `json:"last_status"`
+	RowsSeen int64 `json:"rows_seen"`
+	SourceKind string `json:"source_kind"`
+	Pipeline string `json:"pipeline"`
+}
+
 type NamespaceMetadataLayer struct {
+	Sync NamespaceSyncHealth `json:"sync,omitempty"`
 	Title string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
 	FieldStats NamespaceFieldStats `json:"field_stats,omitempty"`
