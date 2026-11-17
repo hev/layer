@@ -20,18 +20,17 @@ If your harness has no skill directory, paste the body of the relevant
 
 ## Orientation
 
-Layer is a turbopuffer-shaped gateway: one HTTP API in front of whichever store
-holds the data. Locally that store is Postgres, in the same Compose file, with
-no account and no API key.
+Layer is a turbopuffer-shaped gateway: one HTTP API in front of the store
+that holds the data. Community Edition runs it on your turbopuffer account.
 
 ```sh
-export TURBOPUFFER_API_KEY=""
+export TURBOPUFFER_API_KEY="tpuf_..."
 docker compose up -d --wait
 curl --fail http://localhost:8080/health
 ```
 
-An empty `TURBOPUFFER_API_KEY` selects local Postgres; a nonblank one selects
-turbopuffer and doubles as the gateway bearer token.
+The gateway exits at startup if `TURBOPUFFER_API_KEY` is unset. The same key
+is the gateway bearer token: send `Authorization: Bearer $TURBOPUFFER_API_KEY`.
 
 ## The one rule
 
