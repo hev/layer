@@ -461,6 +461,7 @@ search:
       memory: 2Gi
       ephemeral-storage: 40Gi
 
+
 rbac:
   # Bindings for the hevlayer-key-admin / hevlayer-key-viewer ClusterRoles.
   # The roles always render; binding them is the cluster operator's

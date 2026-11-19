@@ -102,6 +102,31 @@ pub(crate) async fn query_ungrouped(
     mut body: Value,
 ) -> Result<Response, AppError> {
     if state.turbopuffer().requires_native_wire(&namespace)
+        && matches!(
+            crate::routes::hybrid_text::rank_by_operator(&body),
+            Some("HybridText" | "Auto")
+        )
+    {
+        // Native-wire adapters need not implement the Postgres hybrid route.
+        state
+            .turbopuffer()
+            .capabilities_for_namespace(&namespace)
+            .require(vectorstore_core::capabilities::WireFeature::Hybrid)
+            .map_err(|error| {
+                AppError::from_store_support_error(
+                    error,
+                    Some(
+                        state
+                            .turbopuffer()
+                            .capabilities_for_namespace(&namespace)
+                            .kind
+                            .into(),
+                    ),
+                    Some("query".into()),
+                )
+            })?;
+    }
+    if state.turbopuffer().requires_native_wire(&namespace)
         && !matches!(
             crate::routes::hybrid_text::rank_by_operator(&body),
             Some("HybridText" | "Auto")
@@ -131,7 +156,10 @@ pub(crate) async fn query_ungrouped(
                             _ => (key.as_str(), String::new()),
                         };
                     return Err(AppError::unsupported_feature(
-                        "pgvector",
+                        state
+                            .turbopuffer()
+                            .capabilities_for_namespace(&namespace)
+                            .kind,
                         Some(uri.path().into()),
                         feature,
                         detail,

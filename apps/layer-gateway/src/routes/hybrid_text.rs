@@ -1368,9 +1368,13 @@ pub(crate) async fn run_hybrid_text(
     // explicit exact-only request uses the BM25 anchor (plus Auto's ANN leg);
     // it does not manufacture support for the vendor Fuzzy filter.
     let phase_one = state.turbopuffer().requires_native_wire(namespace);
+    let store = state
+        .turbopuffer()
+        .capabilities_for_namespace(namespace)
+        .kind;
     if phase_one && expr.fuzziness != Fuzziness::Fixed(0) {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             None,
             WireFeature::Fuzzy.id(),
             "phase-one hybrid requires fuzziness: 0",
@@ -1378,7 +1382,7 @@ pub(crate) async fn run_hybrid_text(
     }
     if phase_one && request.cursor.is_some() {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             None,
             WireFeature::Pagination.id(),
             "phase-one hybrid takes no cursor",
@@ -1386,7 +1390,7 @@ pub(crate) async fn run_hybrid_text(
     }
     if phase_one && request.temporal_filter.is_some() {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             None,
             WireFeature::Temporal.id(),
             "phase-one hybrid takes no temporal_filter",

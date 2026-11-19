@@ -209,6 +209,28 @@ pub(crate) async fn prepare_write(
     store: EmbedStore,
 ) -> Result<WritePreparation, AppError> {
     if store == EmbedStore::NativeWire {
+        let caps = state.turbopuffer().capabilities_for_namespace(namespace);
+        let declares_embed = body
+            .get("schema")
+            .and_then(Value::as_object)
+            .is_some_and(|schema| {
+                schema
+                    .values()
+                    .any(|field| field.get("embed").is_some_and(|embed| !embed.is_null()))
+            });
+        if declares_embed
+            && caps
+                .get(vectorstore_core::capabilities::WireFeature::Embed)
+                .support
+                == vectorstore_core::capabilities::Support::Unsupported
+        {
+            return Err(AppError::unsupported_feature(
+                caps.kind,
+                Some(format!("/v2/namespaces/{namespace}")),
+                "schema.embed",
+                "store does not persist gateway embedding profiles",
+            ));
+        }
         // Reserved for the gateway; a client value never reaches the store.
         if let Some(body) = body.as_object_mut() {
             body.remove(EMBEDDING_PROFILES_KEY);
@@ -271,7 +293,17 @@ async fn prepare_write_profiles(
                 .find(|profile| profile.source == attribute)
                 .cloned();
             if native_wire {
-                prepare_native_wire_profile(state, &route, &mut parsed, previous.as_ref()).await?;
+                prepare_native_wire_profile(
+                    state,
+                    state
+                        .turbopuffer()
+                        .capabilities_for_namespace(namespace)
+                        .kind,
+                    &route,
+                    &mut parsed,
+                    previous.as_ref(),
+                )
+                .await?;
             }
             if parsed.serving == ServingPreference::Worker {
                 pin_worker_profile(state, &mut parsed, previous.as_ref()).await?;
@@ -381,7 +413,15 @@ async fn prepare_write_profiles(
 
     reject_source_patches(body, &gateway_profiles)?;
     if native_wire {
-        reject_native_wire_shape(body, &route, &gateway_profiles)?;
+        reject_native_wire_shape(
+            state
+                .turbopuffer()
+                .capabilities_for_namespace(namespace)
+                .kind,
+            body,
+            &route,
+            &gateway_profiles,
+        )?;
     }
 
     if gateway_profiles.is_empty() || !row_write {
@@ -604,6 +644,25 @@ pub(crate) async fn prepare_query(
 ) -> Result<QueryPreparation, AppError> {
     if !contains_embed_expression(body) {
         return Ok(QueryPreparation::default());
+    }
+    if store == EmbedStore::NativeWire {
+        state
+            .turbopuffer()
+            .capabilities_for_namespace(namespace)
+            .require(vectorstore_core::capabilities::WireFeature::Embed)
+            .map_err(|error| {
+                AppError::from_store_support_error(
+                    error,
+                    Some(
+                        state
+                            .turbopuffer()
+                            .capabilities_for_namespace(namespace)
+                            .kind
+                            .into(),
+                    ),
+                    Some("query".into()),
+                )
+            })?;
     }
     let profiles = load_profiles(state, namespace).await?;
     let mut preparation = QueryPreparation {
@@ -1212,6 +1271,7 @@ fn map_worker_error(error: EmbeddingError, attribute: &str) -> AppError {
 /// namespace holds vectors (rule 9).
 async fn prepare_native_wire_profile(
     state: &AppState,
+    store: &str,
     route: &str,
     parsed: &mut EmbeddingProfile,
     previous: Option<&EmbeddingProfile>,
@@ -1223,7 +1283,7 @@ async fn prepare_native_wire_profile(
         )
     {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             Some(route.to_string()),
             "embed.chunk",
             "chunked embedding requires embed.serving.prefer: turbopuffer or worker",
@@ -1239,7 +1299,7 @@ async fn prepare_native_wire_profile(
                 .is_some_and(|(dims, before)| dims != before);
         if changed {
             return Err(AppError::unsupported_feature(
-                "pgvector",
+                store,
                 Some(route.to_string()),
                 "schema.embed",
                 format!(
@@ -1293,13 +1353,14 @@ async fn resolve_native_wire_serving(
 /// RFC 0118 rules 6 and 7 on a store that cannot embed, before any provider
 /// call: one embedded attribute per namespace, and no client vector beside it.
 fn reject_native_wire_shape(
+    store: &str,
     body: &Value,
     route: &str,
     profiles: &[&EmbeddingProfile],
 ) -> Result<(), AppError> {
     if profiles.len() > 1 {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             Some(route.to_string()),
             "schema.embed",
             "one embedded attribute per namespace",
@@ -1335,7 +1396,7 @@ fn reject_native_wire_shape(
                 .is_some_and(|columns| columns.get("vector").is_some()));
     if declares_vector || client_vector {
         return Err(AppError::unsupported_feature(
-            "pgvector",
+            store,
             Some(route.to_string()),
             "max_vector_fields",
             "one vector field per namespace; this namespace's is its gateway-embedded attribute",
