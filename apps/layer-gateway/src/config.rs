@@ -15,6 +15,9 @@ pub struct Config {
     pub aerospike_cluster_name: Option<String>,
     /// `None` means no object store is configured: the gateway composes a
     /// noop S3 client instead of walking the AWS credential chain.
+    /// `OBJECT_STORE_URL` (`s3://bucket/prefix` or `az://container/prefix`).
+    /// When set it selects the backend and location; `S3_BUCKET` is ignored.
+    pub object_store_url: Option<String>,
     pub s3_bucket: Option<String>,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
@@ -204,6 +207,9 @@ impl Config {
             aerospike_set_prefix: env::var("AEROSPIKE_SET_PREFIX")
                 .unwrap_or_else(|_| "tpuf_".to_string()),
             aerospike_cluster_name: env::var("AEROSPIKE_CLUSTER_NAME").ok(),
+            object_store_url: env::var("OBJECT_STORE_URL")
+                .ok()
+                .and_then(trimmed_non_empty),
             s3_bucket: env::var("S3_BUCKET").ok().and_then(trimmed_non_empty),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT").ok(),

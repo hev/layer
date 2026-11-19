@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod blob_store;
 pub mod capabilities;
 pub mod delete_timing;
 pub mod document_cache;

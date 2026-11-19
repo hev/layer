@@ -8,7 +8,8 @@ use dashmap::DashMap;
 use tracing::{info, warn};
 
 use crate::clients::aerospike::{AerospikeClient, AerospikeRuntime};
-use crate::clients::s3::{AwsS3Client, NoopS3Client, S3Client};
+use crate::clients::s3::{NoopS3Client, ObjectStoreClient, S3Client};
+use vectorstore_core::blob_store::GATEWAY_ENV;
 use crate::clients::search::HttpSearchClient;
 use crate::clients::turbopuffer::{
     HttpTurbopufferClient, RoutingTurbopufferClient, TurbopufferClient,
@@ -264,19 +265,19 @@ pub async fn run_with_options(options: ServerOptions) {
     info!("Document cache disabled in public gateway composition");
     let aerospike: Arc<dyn AerospikeClient> = aerospike_runtime.clone();
 
-    let s3_inner: Arc<dyn S3Client> = match config.s3_bucket.as_deref() {
-        Some(bucket) => Arc::new(
-            AwsS3Client::new(bucket, &config.s3_region, config.s3_endpoint.as_deref()).await,
-        ),
+    let s3_inner: Arc<dyn S3Client> = match ObjectStoreClient::from_env(GATEWAY_ENV)
+        .unwrap_or_else(|error| panic!("object store configuration refused: {error}"))
+    {
+        Some(client) => Arc::new(client),
         None => {
             if config.s3_endpoint.is_some() {
                 warn!(
-                    "S3_ENDPOINT is set but S3_BUCKET is not; ignoring the endpoint and \
-                     running without an object store"
+                    "S3_ENDPOINT is set but neither OBJECT_STORE_URL nor S3_BUCKET is; ignoring \
+                     the endpoint and running without an object store"
                 );
             }
             info!(
-                "S3_BUCKET is unset; object store disabled — snapshots, search history, \
+                "OBJECT_STORE_URL and S3_BUCKET are unset; object store disabled — snapshots, search history, \
                  checkpoints, and blobs over the store's cap degrade or report \"object store not configured\""
             );
             Arc::new(NoopS3Client)
