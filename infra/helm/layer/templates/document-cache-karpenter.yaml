@@ -1,4 +1,4 @@
-{{- if and .Values.documentCache.enabled .Values.documentCache.karpenter.enabled }}
+{{- if and .Values.documentCache.enabled .Values.documentCache.karpenter.enabled (not (include "layer.azure" .)) }}
 {{- if not .Values.documentCache.karpenter.clusterName }}
 {{- fail "documentCache.karpenter.clusterName is required when documentCache.karpenter.enabled=true" }}
 {{- end }}

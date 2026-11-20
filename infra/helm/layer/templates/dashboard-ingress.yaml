@@ -8,6 +8,9 @@ metadata:
     {{- include "layer.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
   annotations:
+    {{- if include "layer.azure" . }}
+    {{- include "layer.azureIngressAnnotations" (dict "root" $ "values" .Values.dashboard.ingress) | nindent 4 }}
+    {{- else }}
     alb.ingress.kubernetes.io/group.name: {{ .Values.dashboard.ingress.groupName | quote }}
     alb.ingress.kubernetes.io/group.order: {{ .Values.dashboard.ingress.groupOrder | quote }}
     {{- if .Values.dashboard.ingress.tags }}
@@ -19,8 +22,12 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/healthcheck-path: /healthz
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    {{- end }}
 spec:
-  ingressClassName: alb
+  ingressClassName: {{ ternary .Values.azure.ingress.className "alb" (eq (include "layer.cloud" .) "azure") }}
+  {{- if include "layer.azure" . }}
+  {{- include "layer.azureIngressTls" (dict "root" $ "values" .Values.dashboard.ingress "host" .Values.dashboard.ingress.host "component" "dashboard") | nindent 2 }}
+  {{- end }}
   rules:
     - host: {{ .Values.dashboard.ingress.host | quote }}
       http:

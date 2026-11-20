@@ -157,7 +157,7 @@ spec:
         accessModes:
           - ReadWriteOnce
         {{- if .Values.documentCache.storage.pvc.storageClass }}
-        storageClassName: {{ .Values.documentCache.storage.pvc.storageClass | quote }}
+        storageClassName: {{ include "layer.storageClass" (dict "root" $ "class" .Values.documentCache.storage.pvc.storageClass) | quote }}
         {{- end }}
         resources:
           requests:

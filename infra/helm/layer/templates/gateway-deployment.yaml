@@ -30,6 +30,7 @@
 {{- fail "gateway.localModels.enabled requires gateway.embed.enabled=true; the bundle mounts into the embedding sidecar, not the gateway" }}
 {{- end }}
 {{- $embedPort := int .Values.gateway.embed.port -}}
+{{- $azure := include "layer.azure" . -}}
 {{- $metricsEmbedded := and .Values.metrics.enabled .Values.metrics.embedded (not .Values.metrics.externalEndpoint) -}}
 {{- $indexNamespace := default .Release.Namespace (default .Values.operator.discovery.indexNamespace .Values.gateway.indexNamespace) -}}
 apiVersion: apps/v1
@@ -67,6 +68,9 @@ spec:
         {{- include "layer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
         layer.hev.dev/component: gateway
+        {{- if and (include "layer.azure" .) .Values.serviceAccount.clientId }}
+        azure.workload.identity/use: "true"
+        {{- end }}
     spec:
       serviceAccountName: {{ include "layer.serviceAccountName" . }}
       terminationGracePeriodSeconds: {{ .Values.gateway.drain.terminationGracePeriodSeconds }}
@@ -79,6 +83,23 @@ spec:
       initContainers:
         {{- if .Values.gateway.lattice.enabled }}
         - name: lattice-model
+          {{- if $azure }}
+          image: {{ .Values.azure.artifactCopier.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+          env:
+            {{- include "layer.rcloneEnv" . | nindent 12 }}
+          args:
+            - |
+              set -eu
+              artifact_dir=/var/lib/hevlayer/lattice
+              artifact_uri={{ include "layer.rcloneRemote" (required "gateway.lattice.artifact.uri is required when gateway.lattice.enabled=true and cloud=azure" .Values.gateway.lattice.artifact.uri) | quote }}
+              rclone copyto "$artifact_uri/model.safetensors" "$artifact_dir/model.safetensors"
+              rclone copyto "$artifact_uri/tokenizer.json" "$artifact_dir/tokenizer.json"
+              echo "{{ required "gateway.lattice.artifact.modelSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.modelSha256 }}  $artifact_dir/model.safetensors" | sha256sum -c -
+              echo "{{ required "gateway.lattice.artifact.tokenizerSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.tokenizerSha256 }}  $artifact_dir/tokenizer.json" | sha256sum -c -
+          {{- else }}
           image: {{ required "gateway.lattice.artifact.image is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.image | quote }}
           command:
             - /bin/sh
@@ -91,24 +112,40 @@ spec:
               aws s3 cp "{{ .Values.gateway.lattice.artifact.s3Uri }}/tokenizer.json" "$artifact_dir/tokenizer.json" --only-show-errors
               echo "{{ required "gateway.lattice.artifact.modelSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.modelSha256 }}  $artifact_dir/model.safetensors" | sha256sum -c -
               echo "{{ required "gateway.lattice.artifact.tokenizerSha256 is required when gateway.lattice.enabled=true" .Values.gateway.lattice.artifact.tokenizerSha256 }}  $artifact_dir/tokenizer.json" | sha256sum -c -
+          {{- end }}
           volumeMounts:
             - name: lattice-model
               mountPath: /var/lib/hevlayer/lattice
         {{- end }}
         {{- if .Values.gateway.localClip.enabled }}
         - name: local-clip-model
+          {{- if $azure }}
+          image: {{ .Values.azure.artifactCopier.image | quote }}
+          {{- else }}
           image: {{ required "gateway.localClip.artifact.image is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.image | quote }}
+          {{- end }}
           command:
             - /bin/sh
             - -c
+          {{- if $azure }}
+          env:
+            {{- include "layer.rcloneEnv" . | nindent 12 }}
+          {{- end }}
           args:
             - |
               set -eu
               artifact_dir=/var/lib/hevlayer/clip
+              {{- if $azure }}
+              artifact_uri={{ include "layer.rcloneRemote" (required "gateway.localClip.artifact.uri is required when gateway.localClip.enabled=true and cloud=azure" .Values.gateway.localClip.artifact.uri) | quote }}
+              for file in model.safetensors tokenizer.json config.json preprocessor_config.json; do
+                rclone copyto "$artifact_uri/$file" "$artifact_dir/$file"
+              done
+              {{- else }}
               artifact_uri={{ required "gateway.localClip.artifact.s3Uri is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.s3Uri | quote }}
               for file in model.safetensors tokenizer.json config.json preprocessor_config.json; do
                 aws s3 cp "$artifact_uri/$file" "$artifact_dir/$file" --only-show-errors
               done
+              {{- end }}
               echo "{{ required "gateway.localClip.artifact.modelSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.modelSha256 }}  $artifact_dir/model.safetensors" | sha256sum -c -
               echo "{{ required "gateway.localClip.artifact.tokenizerSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.tokenizerSha256 }}  $artifact_dir/tokenizer.json" | sha256sum -c -
               echo "{{ required "gateway.localClip.artifact.configSha256 is required when gateway.localClip.enabled=true" .Values.gateway.localClip.artifact.configSha256 }}  $artifact_dir/config.json" | sha256sum -c -
@@ -121,18 +158,33 @@ spec:
         # RFC 0120 offline bundle: fetch manifest.json and the files it lists,
         # pin the manifest, and let the sidecar verify each file against it.
         - name: local-models
+          {{- if $azure }}
+          image: {{ .Values.azure.artifactCopier.image | quote }}
+          {{- else }}
           image: {{ required "gateway.localModels.artifact.image is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.image | quote }}
+          {{- end }}
           command:
             - /bin/sh
             - -c
+          {{- if $azure }}
+          env:
+            {{- include "layer.rcloneEnv" . | nindent 12 }}
+          {{- end }}
           args:
             - |
               set -eu
               bundle_dir=/models
+              {{- if $azure }}
+              bundle_uri={{ include "layer.rcloneRemote" (required "gateway.localModels.artifact.uri is required when gateway.localModels.enabled=true and cloud=azure" .Values.gateway.localModels.artifact.uri) | quote }}
+              rclone copyto "$bundle_uri/manifest.json" "$bundle_dir/manifest.json"
+              echo "{{ required "gateway.localModels.artifact.manifestSha256 is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.manifestSha256 }}  $bundle_dir/manifest.json" | sha256sum -c -
+              rclone copy "$bundle_uri" "$bundle_dir" --exclude /manifest.json
+              {{- else }}
               bundle_uri={{ required "gateway.localModels.artifact.s3Uri is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.s3Uri | quote }}
               aws s3 cp "$bundle_uri/manifest.json" "$bundle_dir/manifest.json" --only-show-errors
               echo "{{ required "gateway.localModels.artifact.manifestSha256 is required when gateway.localModels.enabled=true" .Values.gateway.localModels.artifact.manifestSha256 }}  $bundle_dir/manifest.json" | sha256sum -c -
               aws s3 sync "$bundle_uri/" "$bundle_dir/" --only-show-errors --exclude 'manifest.json'
+              {{- end }}
               chmod -R a-w "$bundle_dir"
           volumeMounts:
             - name: local-models
@@ -263,6 +315,11 @@ spec:
         - name: gateway
           image: {{ .Values.gateway.image }}
           imagePullPolicy: {{ default "Always" .Values.gateway.imagePullPolicy | quote }}
+          {{- with .Values.objectStore.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . | quote }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.gateway.port }}
               name: http
@@ -327,7 +384,7 @@ spec:
             - name: LAYER_VECTORSTORE_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: LAYER_AWS_COST_EXPLORER_ENABLED
-              value: {{ .Values.gateway.cost.costExplorerEnabled | quote }}
+              value: {{ ternary "false" .Values.gateway.cost.costExplorerEnabled (eq (include "layer.cloud" .) "azure") | quote }}
             - name: LAYER_AWS_COST_REGION
               value: {{ .Values.gateway.cost.region | quote }}
             - name: LAYER_AWS_COST_TAG_KEY
@@ -366,12 +423,15 @@ spec:
               value: {{ .Values.license.grace.gatewaySeconds | quote }}
             {{- end }}
             - name: S3_BUCKET
-              value: {{ .Values.s3.bucket | quote }}
+              value: {{ include "layer.s3Bucket" . | quote }}
             - name: S3_REGION
               value: {{ .Values.s3.region | quote }}
             {{- if .Values.s3.endpoint }}
             - name: S3_ENDPOINT
               value: {{ .Values.s3.endpoint | quote }}
+            {{- end }}
+            {{- with include "layer.objectStoreEnv" . }}
+            {{- . | trim | nindent 12 }}
             {{- end }}
             {{- if .Values.gateway.queue.embedded }}
             - name: DATABASE_URL
@@ -510,7 +570,7 @@ spec:
         accessModes:
           - ReadWriteOnce
         {{- if .Values.gateway.queue.persistence.storageClassName }}
-        storageClassName: {{ .Values.gateway.queue.persistence.storageClassName | quote }}
+        storageClassName: {{ include "layer.storageClass" (dict "root" $ "class" .Values.gateway.queue.persistence.storageClassName) | quote }}
         {{- end }}
         resources:
           requests:

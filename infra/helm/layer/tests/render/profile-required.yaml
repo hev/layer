@@ -1,0 +1,8 @@
+# Required values the chart's values-*.yaml profiles leave to the installer.
+# Layered after aws-minimum.yaml and each profile by helm-aws-render-diff.sh.
+gateway:
+  image: example/layer-gateway:test
+documentCache:
+  karpenter:
+    clusterName: c
+    instanceProfile: p

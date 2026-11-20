@@ -1,4 +1,7 @@
-{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) (not .Values.metrics.embedded) .Values.metrics.backup.enabled .Values.s3.bucket }}
+{{- /* An az:// objectStore.url backs up to Blob; anything else to S3. */ -}}
+{{- $azure := include "layer.azureContainer" . -}}
+{{- $destination := default (include "layer.s3Bucket" .) $azure -}}
+{{- if and .Values.metrics.enabled (not .Values.metrics.externalEndpoint) (not .Values.metrics.embedded) .Values.metrics.backup.enabled $destination }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -20,6 +23,9 @@ spec:
             {{- include "layer.selectorLabels" . | nindent 12 }}
             app.kubernetes.io/component: vmbackup
             layer.hev.dev/component: metrics
+            {{- if and (include "layer.azure" .) .Values.serviceAccount.clientId }}
+            azure.workload.identity/use: "true"
+            {{- end }}
         spec:
           serviceAccountName: {{ include "layer.serviceAccountName" . }}
           restartPolicy: OnFailure
@@ -42,7 +48,19 @@ spec:
                 - "-storageDataPath=/vm-data"
                 - "-snapshot.createURL=http://{{ include "layer.fullname" . }}-vmsingle:8429/snapshot/create"
                 - "-snapshot.deleteURL=http://{{ include "layer.fullname" . }}-vmsingle:8429/snapshot/delete"
-                - "-dst=s3://{{ .Values.s3.bucket }}/{{ .Values.metrics.backup.s3Prefix }}/latest"
+                {{- if $azure }}
+                - "-dst=azblob://{{ $destination }}/{{ .Values.metrics.backup.s3Prefix }}/latest"
+                {{- else }}
+                - "-dst=s3://{{ $destination }}/{{ .Values.metrics.backup.s3Prefix }}/latest"
+                {{- end }}
+              {{- if $azure }}
+              env:
+                # vmbackup signs in to Blob with the pod's Workload Identity.
+                - name: AZURE_STORAGE_ACCOUNT_NAME
+                  value: {{ required "azure.storageAccountName is required for an az:// objectStore.url" .Values.azure.storageAccountName | quote }}
+                - name: AZURE_USE_DEFAULT_CREDENTIAL
+                  value: "true"
+              {{- end }}
               volumeMounts:
                 - name: data
                   mountPath: /vm-data

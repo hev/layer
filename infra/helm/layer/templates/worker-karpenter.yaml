@@ -1,4 +1,4 @@
-{{- if .Values.workerKarpenter.enabled }}
+{{- if and .Values.workerKarpenter.enabled (not (include "layer.azure" .)) }}
 {{- if not .Values.workerKarpenter.clusterName }}
 {{- fail "workerKarpenter.clusterName is required when workerKarpenter.enabled=true" }}
 {{- end }}

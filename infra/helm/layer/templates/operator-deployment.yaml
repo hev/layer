@@ -32,6 +32,9 @@ spec:
       labels:
         {{- include "layer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
+        {{- if and (include "layer.azure" .) .Values.operator.serviceAccount.clientId }}
+        azure.workload.identity/use: "true"
+        {{- end }}
         layer.hev.dev/component: operator
     spec:
       serviceAccountName: {{ $saName }}
@@ -44,6 +47,11 @@ spec:
         - name: operator
           image: {{ .Values.operator.image | quote }}
           imagePullPolicy: {{ .Values.operator.imagePullPolicy | quote }}
+          {{- with .Values.objectStore.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . | quote }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8082
@@ -60,15 +68,18 @@ spec:
               value: {{ include "layer.gatewayApiSecretKey" . | quote }}
             - name: GATEWAY_BASE_URL
               value: {{ $gatewayBaseURL | quote }}
-            {{- if .Values.s3.bucket }}
+            {{- with include "layer.s3Bucket" . }}
             - name: HEVLAYER_SNAPSHOT_BUCKET
-              value: {{ .Values.s3.bucket | quote }}
+              value: {{ . | quote }}
             - name: HEVLAYER_SNAPSHOT_REGION
-              value: {{ .Values.s3.region | quote }}
-            {{- if .Values.s3.endpoint }}
+              value: {{ $.Values.s3.region | quote }}
+            {{- if $.Values.s3.endpoint }}
             - name: HEVLAYER_SNAPSHOT_ENDPOINT
-              value: {{ .Values.s3.endpoint | quote }}
+              value: {{ $.Values.s3.endpoint | quote }}
             {{- end }}
+            {{- end }}
+            {{- with include "layer.objectStoreEnv" . }}
+            {{- . | trim | nindent 12 }}
             {{- end }}
             - name: LAYER_LICENSE
               valueFrom:

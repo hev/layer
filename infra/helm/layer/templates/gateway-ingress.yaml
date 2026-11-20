@@ -8,6 +8,9 @@ metadata:
     {{- include "layer.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
   annotations:
+    {{- if include "layer.azure" . }}
+    {{- include "layer.azureIngressAnnotations" (dict "root" $ "values" .Values.ingress) | nindent 4 }}
+    {{- else }}
     alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName | quote }}
     alb.ingress.kubernetes.io/group.order: {{ .Values.ingress.groupOrder | quote }}
     {{- if .Values.ingress.tags }}
@@ -30,8 +33,12 @@ metadata:
     alb.ingress.kubernetes.io/healthy-threshold-count: {{ .healthyThresholdCount | quote }}
     {{- end }}
     {{- end }}
+    {{- end }}
 spec:
-  ingressClassName: alb
+  ingressClassName: {{ ternary .Values.azure.ingress.className "alb" (eq (include "layer.cloud" .) "azure") }}
+  {{- if include "layer.azure" . }}
+  {{- include "layer.azureIngressTls" (dict "root" $ "values" .Values.ingress "host" .Values.ingress.host "component" "gateway") | nindent 2 }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:

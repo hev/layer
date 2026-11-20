@@ -1,0 +1,78 @@
+# layer-azure: hev mind's AKS parity cluster for Layer on Azure (Linear
+# project "Layer on Azure", milestone 3). Same shape as layer-prod on EKS:
+# Blob for durable state, Workload Identity instead of IRSA, turbopuffer's
+# Azure region, and NAP worker pools that scale to zero.
+#
+#   helm upgrade --install layer infra/helm/layer -n layer --create-namespace \
+#     -f infra/helm/layer/values-azure.yaml \
+#     --set vectorStore.credential.apiKey=... \
+#     --set dashboard.basicAuth.password=... \
+#     --set serviceAccount.clientId=... \
+#     --set dashboard.serviceAccount.clientId=... \
+#     --set operator.serviceAccount.clientId=...
+#
+# Cluster prerequisites (Terraform, milestone 4): AKS with Node Auto
+# Provisioning, the application routing add-on, Workload Identity and the OIDC
+# issuer; a system pool of Standard_L8as_v3 labelled and tainted
+# layer.hev.dev/node-role=system with the node initialization taint
+# layer.hev.dev/nvme=pending:NoSchedule; cert-manager with a ClusterIssuer
+# named letsencrypt; the storage account and container below; and federated
+# credentials for the layer, layer-dashboard and layer-operator service
+# accounts. DNS for *.az.hevlayer.com stays in Cloudflare.
+cloud: azure
+
+azure:
+  storageAccountName: hevlayeraz
+  ingress:
+    clusterIssuer: letsencrypt
+
+# Blob container for snapshots, history and witness (object_store az:// URL).
+objectStore:
+  url: az://layer
+
+gateway:
+  # Docker Hub, the customer pull path (no ACR to start). Blob storage needs a
+  # gateway built with the Azure object store backend (Linear milestone 2);
+  # move these pins to the first release that carries it.
+  image: hevlayer/layer-gateway-pro:0.8.0
+  telemetry:
+    enabled: false
+
+dashboard:
+  image: hevlayer/layer-dashboard:0.8.0
+  basicAuth:
+    user: hev
+  ingress:
+    enabled: true
+    host: dashboard.az.hevlayer.com
+
+operator:
+  enabled: true
+  image: hevlayer/layer-operator:0.8.0
+
+ingress:
+  enabled: true
+  host: eastus2.az.hevlayer.com
+
+mcpIngress:
+  host: mcp.az.hevlayer.com
+
+vectorStore:
+  endpoint:
+    url: https://azure-eastus2.turbopuffer.com
+    region: azure-eastus2
+
+# AKS already marks its own default StorageClass; keep local-path non-default.
+localStorage:
+  defaultClass: false
+
+documentCache:
+  # Lean install, like layer-prod: the cache runs on the system node's NVMe.
+  # Set nodeRole: document-cache and karpenter.enabled: true for the dedicated
+  # Standard_L8as_v3 pool.
+  nodeRole: system
+  karpenter:
+    enabled: false
+
+workerKarpenter:
+  enabled: true

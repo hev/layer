@@ -1,0 +1,41 @@
+# layer-prod, as scripts/deploy-layer.sh installs it (DOCUMENT_CACHE_KARPENTER=0),
+# with placeholder secrets and ARNs. Used by scripts/helm-aws-render-diff.sh to
+# prove the cloud: azure work leaves the AWS render byte-for-byte unchanged.
+gateway:
+  image: 186219257916.dkr.ecr.us-east-1.amazonaws.com/layer-gateway:latest
+dashboard:
+  image: 186219257916.dkr.ecr.us-east-1.amazonaws.com/layer-dashboard:latest
+  serviceAccount:
+    name: layer-dashboard
+    roleArn: arn:aws:iam::000000000000:role/layer-dashboard
+  ingress:
+    enabled: true
+  basicAuth:
+    user: hev
+    password: placeholder
+operator:
+  enabled: true
+  image: 186219257916.dkr.ecr.us-east-1.amazonaws.com/layer-operator:latest
+vectorStore:
+  credential:
+    apiKey: placeholder
+serviceAccount:
+  name: layer
+  roleArn: arn:aws:iam::000000000000:role/layer-gateway
+s3:
+  bucket: layer-prod-bucket
+ingress:
+  enabled: true
+documentCache:
+  enabled: true
+  keda:
+    enabled: true
+  nodeRole: system
+  karpenter:
+    enabled: false
+workerKarpenter:
+  enabled: true
+  clusterName: layer-prod
+  instanceProfile: layer-prod-karpenter-node
+keys:
+  pepper: placeholder-pepper

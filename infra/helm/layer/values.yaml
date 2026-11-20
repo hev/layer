@@ -1,3 +1,77 @@
+# Target cloud: aws (default) or azure. aws is layer-prod on EKS: ALB ingress,
+# EBS gp3, Karpenter EC2NodeClass, IRSA, aws-cli artifact copies and S3
+# backups. azure is AKS: app-routing nginx ingress with cert-manager TLS,
+# managed-csi-premium disks, Node Auto Provisioning AKSNodeClass pools,
+# Workload Identity, rclone artifact copies, azblob backups and the local NVMe
+# DaemonSet. Settings for the azure branch live under `azure:` below; the aws
+# render does not read them.
+cloud: aws
+
+# Durable object storage root for Layer state (snapshots, history, witness),
+# rendered as OBJECT_STORE_URL on the gateway and operator: s3://<bucket>[/prefix]
+# or az://<container>[/prefix]. Blank keeps the S3_* settings under `s3:`
+# alone. With an s3:// URL and a blank s3.bucket, S3_BUCKET is taken from the
+# URL, so MinIO and S3 installs can set one value (plus s3.endpoint for MinIO).
+objectStore:
+  url: ""
+  # Optional Secret loaded with envFrom into the gateway and operator, for
+  # static object store credentials where no workload identity applies, e.g.
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for in-cluster MinIO. Leave blank
+  # with IRSA or Azure Workload Identity.
+  credentialsSecret: ""
+
+azure:
+  # Storage account holding the objectStore.url container. Rendered as
+  # AZURE_STORAGE_ACCOUNT_NAME on every pod that reaches Blob storage.
+  storageAccountName: ""
+  # Optional Blob endpoint override, rendered as AZURE_STORAGE_ENDPOINT. Blank
+  # uses https://<storageAccountName>.blob.core.windows.net.
+  storageEndpoint: ""
+  # Disk class for chart PVCs that default to the AWS gp3 class (the document
+  # cache and queue PVC options). The chart creates no StorageClass on Azure;
+  # managed-csi-premium ships with AKS.
+  storageClassName: managed-csi-premium
+  # Applied to the gateway, MCP and dashboard Ingresses. The AKS application
+  # routing add-on (managed nginx) serves the class below; cert-manager issues
+  # each host's certificate into <fullname>-<component>-tls.
+  ingress:
+    className: webapprouting.kubernetes.azure.com
+    clusterIssuer: letsencrypt
+    annotations:
+      # The gateway accepts bodies up to 512 MiB (DefaultBodyLimit).
+      nginx.ingress.kubernetes.io/proxy-body-size: 512m
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+  # Cloud-neutral copier for the gateway artifact init containers
+  # (lattice, localClip, localModels). Artifact URIs are az://<container>/<path>
+  # and read through Workload Identity (rclone azureblob env_auth).
+  artifactCopier:
+    image: rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+  # Node Auto Provisioning (Karpenter on AKS) node class defaults.
+  karpenter:
+    imageFamily: Ubuntu2204
+  # Lasv3 local NVMe. A privileged DaemonSet on the system and document-cache
+  # nodes RAID0s the NVMe Direct Disks (one disk is formatted as is), mounts the
+  # result at /mnt/k8s-disks/0 and links /mnt/nvme to it, matching the AWS i4i
+  # bootstrap, so hostPath users and local-path work unchanged. It then removes
+  # startupTaint from its node. Give NAP pools that taint as a startup taint
+  # (the chart does for the document-cache pool) and the AKS system pool the
+  # same taint as a node initialization taint, so no pod writes /mnt/nvme
+  # before the disk is mounted.
+  localNvme:
+    enabled: true
+    image: alpine/k8s:1.33.13@sha256:e521cee1f1cb8699bc6e906b4ce6fe50e84addae97f52d5dcf05d3974002ac26
+    mountPath: /mnt/k8s-disks/0
+    linkPath: /mnt/nvme
+    filesystem: ext4
+    nodeRoles:
+      - system
+      - document-cache
+    startupTaint:
+      key: layer.hev.dev/nvme
+      value: pending
+      effect: NoSchedule
+
 # PriorityClasses that keep platform pods ahead of colocated tenant workloads
 # when the shared system node hits disk/memory pressure (GH #92). The gateway is
 # the single write path and must outrank everything; the document cache is
@@ -53,6 +127,9 @@ gateway:
     artifact:
       image: amazon/aws-cli:2.27.49@sha256:1b7003e3ecb737b7533d8e16a547b4bc36e912508c3532ae51003aad8d0cd41d
       s3Uri: ""
+      # cloud: azure reads az://<container>/<path> from uri instead of s3Uri
+      # and copies with azure.artifactCopier.
+      uri: ""
       modelSha256: ""
       tokenizerSha256: ""
   # Optional in-process CLIP model directory. When enabled, an init container
@@ -64,6 +141,8 @@ gateway:
     artifact:
       image: amazon/aws-cli:2.27.49@sha256:1b7003e3ecb737b7533d8e16a547b4bc36e912508c3532ae51003aad8d0cd41d
       s3Uri: ""
+      # cloud: azure reads az://<container>/<path> from uri instead of s3Uri.
+      uri: ""
       modelSha256: ""
       tokenizerSha256: ""
       configSha256: ""
@@ -105,6 +184,8 @@ gateway:
       # S3 prefix holding manifest.json and the model files at the relative
       # paths the manifest lists, e.g. s3://my-bucket/layer-embed/bundle-2026-09
       s3Uri: ""
+      # cloud: azure reads az://<container>/<prefix> from uri instead of s3Uri.
+      uri: ""
       manifestSha256: ""
       sizeLimit: 4Gi
   drain:
@@ -174,7 +255,8 @@ gateway:
   indexGc:
     enabled: true
   cost:
-    # Enables AWS Cost Explorer reads in the gateway cost API.
+    # Enables AWS Cost Explorer reads in the gateway cost API. cloud: azure
+    # always renders false: there is no Cost Explorer outside AWS.
     costExplorerEnabled: true
     # Cost Explorer is filtered by this activated cost-allocation tag so AWS
     # invoice lines match the Layer stack instead of the whole account.
@@ -215,6 +297,8 @@ operator:
     create: true
     name: layer-operator
     roleArn: ""
+    # cloud: azure Workload Identity: user-assigned identity client id.
+    clientId: ""
 
 # Dynamic volumes on the system node's i4i instance-store NVMe. The
 # provisioner uses WaitForFirstConsumer plus an allowed topology so claims bind
@@ -324,6 +408,14 @@ documentCache:
       type: gp3
       iops: 3000
       throughput: 125
+    # cloud: azure renders an AKSNodeClass + NodePool (Node Auto Provisioning)
+    # instead of the EC2NodeClass above; clusterName, instanceProfile, AMI and
+    # rootVolume are AWS only.
+    azure:
+      arch: amd64
+      skus:
+        - Standard_L8as_v3
+      osDiskSizeGB: 64
 
 workerKarpenter:
   enabled: false
@@ -334,10 +426,18 @@ workerKarpenter:
   capacityType: on-demand
   consolidateAfter: 2m
   expireAfter: 24h
+  # cloud: azure renders AKSNodeClass + NodePool pairs for the same two pools
+  # with the same labels, taints and scale-to-zero, sized by each pool's
+  # azure: block. clusterName, instanceProfile and AMI settings are AWS only.
   cpu:
     nodePoolName: worker-cpu
     nodeClassName: worker-cpu
     amiSsmParameter: ""
+    azure:
+      skus:
+        - Standard_D2as_v5
+        - Standard_D4as_v5
+      osDiskSizeGB: 64
     instanceTypes:
       - m6a.large
       - m6a.xlarge
@@ -356,6 +456,10 @@ workerKarpenter:
     amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/nvidia/recommended/image_id
     instanceTypes:
       - g5.xlarge
+    azure:
+      skus:
+        - Standard_NC4as_T4_v3
+      osDiskSizeGB: 128
     limits:
       cpu: "32"
       memory: 256Gi
@@ -372,7 +476,9 @@ vectorStore:
   default: true
   endpoint:
     # When search.enabled=true and this is blank, vectorstore.yaml points at
-    # the in-chart hev search Service.
+    # the in-chart hev search Service. turbopuffer's Azure region is
+    # https://azure-eastus2.turbopuffer.com (region azure-eastus2); see
+    # values-azure.yaml.
     url: "https://aws-us-east-1.turbopuffer.com"
     region: aws-us-east-1
   turbopuffer:
@@ -480,6 +586,10 @@ serviceAccount:
   create: true
   name: layer
   roleArn: ""  # gateway IRSA for S3 and Cost Explorer access
+  # cloud: azure Workload Identity: the gateway identity's client id
+  # (azure.workload.identity/client-id). Pods using it get
+  # azure.workload.identity/use: "true".
+  clientId: ""
 
 ingress:
   enabled: false
@@ -496,6 +606,11 @@ ingress:
     intervalSeconds: 5
     timeoutSeconds: 2
     healthyThresholdCount: 2
+  # cloud: azure only (the ALB settings above are AWS only): extra annotations
+  # merged over azure.ingress.annotations, and the TLS Secret cert-manager
+  # fills (blank: <fullname>-gateway-tls).
+  annotations: {}
+  tlsSecretName: ""
 
 dashboard:
   enabled: true
@@ -512,6 +627,7 @@ dashboard:
     create: true
     name: layer-dashboard  # set from terraform output: layer_dashboard_service_account_name
     roleArn: ""  # set from terraform output: layer_dashboard_role_arn
+    clientId: ""  # cloud: azure Workload Identity client id
   # When blank, defaults to the in-cluster gateway service.
   # Override only if pointing at an external gateway.
   gatewayUrl: ""
@@ -533,6 +649,9 @@ dashboard:
     tags: "hev=public"
     # Sits one slot after the gateway in the shared ALB IngressGroup.
     groupOrder: 31
+    # cloud: azure only; see ingress.annotations.
+    annotations: {}
+    tlsSecretName: ""
 
 # Bundled VictoriaMetrics. Customers running their own Prometheus can set
 # externalEndpoint instead and the chart skips installing vmsingle.
@@ -558,7 +677,8 @@ metrics:
     enabled: true
     # vmbackup writes latest to s3://<s3.bucket>/<prefix>/latest; bucket is the
     # same bucket used by the gateway, so no extra IRSA wiring beyond the
-    # existing SA.
+    # existing SA. cloud: azure writes azblob://<objectStore.url container>/
+    # <prefix>/latest with the gateway's Workload Identity.
     s3Prefix: "vm-backups"
     intervalHours: 1
   # When set, the chart does NOT install vmsingle; dashboard points here.
@@ -579,4 +699,9 @@ workerLabels:
 mcpIngress:
   enabled: false
   host: mcp.hevlayer.com
+  # AWS only: ACM certificate for the ALB listener. cloud: azure uses
+  # cert-manager (azure.ingress.clusterIssuer) instead.
   certificateArn: ""
+  # cloud: azure only; see ingress.annotations.
+  annotations: {}
+  tlsSecretName: ""

@@ -1,0 +1,59 @@
+# Every cloud: azure branch at once; layer on values-azure.yaml. Rendered and
+# validated with kubeconform (see the PR) and kept here for the next change.
+vectorStore:
+  credential:
+    apiKey: k
+dashboard:
+  basicAuth:
+    password: p
+  serviceAccount:
+    clientId: 00000000-0000-0000-0000-000000000002
+  ingress:
+    annotations:
+      nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+serviceAccount:
+  clientId: 00000000-0000-0000-0000-000000000001
+operator:
+  serviceAccount:
+    clientId: 00000000-0000-0000-0000-000000000003
+keys:
+  pepper: x
+gateway:
+  lattice:
+    enabled: true
+    artifact:
+      uri: az://artifacts/lattice
+      modelSha256: aaaa
+      tokenizerSha256: bbbb
+  localClip:
+    enabled: true
+    artifact:
+      uri: az://artifacts/clip
+      modelSha256: a
+      tokenizerSha256: b
+      configSha256: c
+      preprocessorSha256: d
+  embed:
+    enabled: true
+    image: hevlayer/layer-embed:0.8.0
+  localModels:
+    enabled: true
+    artifact:
+      uri: az://artifacts/models/bundle-1/
+      manifestSha256: ffff
+  queue:
+    persistence:
+      type: pvc
+      storageClassName: gp3
+mcpIngress:
+  enabled: true
+metrics:
+  embedded: false
+documentCache:
+  nodeRole: document-cache
+  storage:
+    pvc:
+      enabled: true
+      storageClass: gp3
+  karpenter:
+    enabled: true

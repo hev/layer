@@ -19,6 +19,9 @@ spec:
       labels:
         {{- include "layer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: dashboard
+        {{- if and (include "layer.azure" .) .Values.dashboard.serviceAccount.clientId }}
+        azure.workload.identity/use: "true"
+        {{- end }}
         layer.hev.dev/component: dashboard
     spec:
       serviceAccountName: {{ include "layer.dashboardServiceAccountName" . }}

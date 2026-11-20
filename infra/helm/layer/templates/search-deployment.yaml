@@ -1,4 +1,7 @@
 {{- if .Values.search.enabled }}
+{{- if include "layer.azure" . }}
+{{- fail "search.enabled is not supported with cloud=azure: hev search reads S3 only." }}
+{{- end }}
 {{- if not (.Values.search.image | default "" | trim) }}
 {{- fail "search.image is required when search.enabled=true; use the mesh-account ECR image, never ghcr.io/hev/*." }}
 {{- end }}
