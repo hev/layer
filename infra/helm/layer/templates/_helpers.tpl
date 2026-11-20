@@ -277,3 +277,4 @@ Renders "true" or nothing.
 {{- define "layer.workerIdentity" -}}
 {{- if and (include "layer.azure" .) .Values.operator.enabled .Values.workerIdentity.clientId -}}true{{- end -}}
 {{- end }}
+

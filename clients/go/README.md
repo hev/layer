@@ -21,6 +21,8 @@ and pipeline/scan/warm-cache helper methods.
 - `CompareUdfCandidate`
 - `CompleteUdfItems`
 - `CopyNamespace`
+- `CreateArchiveExport`
+- `CreateArchiveRestore`
 - `CreateCheckpoint`
 - `CreatePipeline`
 - `CreateScan`
@@ -40,6 +42,8 @@ and pipeline/scan/warm-cache helper methods.
 - `FailUdfItems`
 - `FetchDocument`
 - `FetchDocuments`
+- `GetArchiveNamespace`
+- `GetArchiveRun`
 - `GetBlob`
 - `GetCheckpoint`
 - `GetCostRateCard`

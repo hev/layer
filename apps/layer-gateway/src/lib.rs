@@ -872,6 +872,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             post(cdc_capture::replay),
         );
 
+
     let host_routes = mcp.clone().filter(|registry| registry.has_host_routes());
     if let Some(registry) = mcp {
         router = router

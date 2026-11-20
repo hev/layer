@@ -1554,6 +1554,86 @@ type SearchPerformance struct {
 	TotalMs int64 `json:"total_ms"`
 }
 
+type ArchiveExportRequest struct {
+	Namespace string `json:"namespace"`
+	Store string `json:"store,omitempty"`
+	DistanceMetric string `json:"distanceMetric,omitempty"`
+	Resume string `json:"resume,omitempty"`
+}
+
+type ArchiveRestoreRequest struct {
+	Namespace string `json:"namespace"`
+	Store string `json:"store,omitempty"`
+}
+
+type ArchiveRunPhase struct {
+	Name string `json:"name"`
+	Seconds float64 `json:"seconds"`
+	Detail map[string]interface{} `json:"detail,omitempty"`
+}
+
+type ArchiveRun struct {
+	ID string `json:"id"`
+	Kind string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Store string `json:"store"`
+	State string `json:"state"`
+	StartedAt string `json:"startedAt"`
+	HeartbeatAt string `json:"heartbeatAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Error string `json:"error,omitempty"`
+	Phases []ArchiveRunPhase `json:"phases,omitempty"`
+	Rows int64 `json:"rows,omitempty"`
+	Checkpoint map[string]interface{} `json:"checkpoint,omitempty"`
+	Result map[string]interface{} `json:"result,omitempty"`
+}
+
+type ArchiveTable struct {
+	Format string `json:"format"`
+	Location string `json:"location"`
+	MetadataVersion int64 `json:"metadataVersion"`
+	SnapshotID int64 `json:"snapshotId"`
+	CompactedSeq int64 `json:"compactedSeq"`
+	RowCount int64 `json:"rowCount"`
+	LogicalBytes int64 `json:"logicalBytes"`
+}
+
+type ArchiveEngine struct {
+	Store string `json:"store"`
+	Kind string `json:"kind"`
+	EngineVersion string `json:"engineVersion"`
+	AppliedSeq int64 `json:"appliedSeq"`
+	LoadedAt string `json:"loadedAt"`
+	LoadedFromSnapshot int64 `json:"loadedFromSnapshot"`
+}
+
+type ArchiveManifestSummary struct {
+	FormatVersion int64 `json:"formatVersion"`
+	Incarnation string `json:"incarnation"`
+	CreatedAt string `json:"createdAt"`
+	Mode string `json:"mode"`
+	SchemaVersion int64 `json:"schemaVersion"`
+	Attributes int64 `json:"attributes"`
+	Vectors map[string]interface{} `json:"vectors"`
+	Table ArchiveTable `json:"table,omitempty"`
+	Engines []ArchiveEngine `json:"engines"`
+	DeletedAt string `json:"deletedAt,omitempty"`
+}
+
+type ArchiveNamespace struct {
+	Namespace string `json:"namespace"`
+	Archived bool `json:"archived"`
+	ManifestUrl string `json:"manifestUrl"`
+	Manifest ArchiveManifestSummary `json:"manifest,omitempty"`
+	Runs []ArchiveRun `json:"runs"`
+}
+
+type ArchiveLicenseRequired struct {
+	Error string `json:"error"`
+	Feature string `json:"feature"`
+	RenewalUrl string `json:"renewal_url,omitempty"`
+}
+
 type Error struct {
 	Reason string `json:"reason,omitempty"`
 	Disposition string `json:"disposition,omitempty"`

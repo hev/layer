@@ -27,6 +27,9 @@ Usage:
   layer [global flags] <command> [args]
 
 Commands:
+  archive export NS          Export a namespace into the index archive (experimental)
+  archive restore NS         Rebuild a namespace in an empty engine from the archive
+  archive status NS          Show a namespace's archived table and recent runs
   ask <command>              Query the Layer docs digest
   query|search|read NS -f JSON  Retrieve rows (JSON receipt)
   capabilities NS           Report store capabilities and namespace schema
@@ -185,6 +188,7 @@ func (app App) newRootCommand() *cobra.Command {
 	})
 
 	addRetrievalCommands(root, app, flags)
+	root.AddCommand(newArchiveCommand(app, flags))
 	root.AddCommand(newAskCommand(app, flags))
 	root.AddCommand(newBrowseCommand(app, flags))
 	root.AddCommand(newEnvCommand(app, flags))

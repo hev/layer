@@ -293,6 +293,7 @@ pub struct LayerMetrics {
     embedder_demand: IntGaugeVec,
     embedder_requests: DashMap<String, Vec<Instant>>,
     embed_tokens_total: IntCounterVec,
+    embed_requests_total: IntCounterVec,
     embed_compute_seconds_total: CounterVec,
     embed_model_hints: DashMap<String, String>,
     embed_serving_hints: DashMap<String, String>,
@@ -630,6 +631,12 @@ impl LayerMetrics {
             &registry,
             "hevlayer_embed_tokens_total",
             "Embedding tokens echoed by the serving provider.",
+            &["namespace", "store_kind", "model", "serving"],
+        );
+        let embed_requests_total = counter(
+            &registry,
+            "hevlayer_embed_requests_total",
+            "Embedding requests the gateway made: one per provider call and one per store request that embeds natively. Cache hits make none.",
             &["namespace", "store_kind", "model", "serving"],
         );
         let embed_compute_seconds_total = float_counter(
@@ -996,6 +1003,7 @@ impl LayerMetrics {
             embedder_demand,
             embedder_requests: DashMap::new(),
             embed_tokens_total,
+            embed_requests_total,
             embed_compute_seconds_total,
             embed_model_hints: DashMap::new(),
             embed_serving_hints: DashMap::new(),
@@ -1325,6 +1333,32 @@ impl LayerMetrics {
         self.agent_tokens_total
             .with_label_values(&[agent, turn, "total"])
             .inc_by(total);
+    }
+
+    /// One embedding request: a provider call, or a store request that embeds
+    /// natively. Counted when the request is made, whatever its outcome.
+    pub fn observe_embed_request(&self, namespace: &str, model: &str, serving: &str) {
+        let namespace = self.labels.namespace(namespace);
+        let store_kind = self.store_kind();
+        self.embed_requests_total
+            .with_label_values(&[&namespace, &store_kind, model, serving])
+            .inc();
+    }
+
+    /// Embedding requests made for `namespace` since start, across models.
+    pub fn embed_requests(&self, namespace: &str) -> u64 {
+        let namespace = self.labels.namespace(namespace);
+        prometheus::core::Collector::collect(&self.embed_requests_total)
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "namespace" && label.value() == namespace)
+            })
+            .map(|metric| metric.get_counter().value() as u64)
+            .sum()
     }
 
     pub fn observe_embed_performance(
@@ -2289,6 +2323,10 @@ impl TurbopufferClient for MetricsTurbopufferClient {
             body.as_ref()
                 .and_then(|body| native_embedding_model(&self.metrics, namespace, body))
         });
+        if let (Some(namespace), Some((model, serving))) = (namespace, embedding.as_ref()) {
+            self.metrics
+                .observe_embed_request(namespace, model, serving);
+        }
         self.metrics.inc_tpuf_inflight();
         let result = self.inner.passthrough(method, path, query, body).await;
         self.metrics.dec_tpuf_inflight();

@@ -2237,6 +2237,9 @@ async fn resolve_vectors(
         } else {
             None
         };
+        state
+            .metrics
+            .observe_embed_request(namespace, &profile.model, profile.serving.label());
         let batch = vectorstore_core::turbopuffer::scope_read_billing(observer, async {
             if let Some(images) = &images {
                 provider.embed_images(&request, images).await
