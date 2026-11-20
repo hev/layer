@@ -2,7 +2,7 @@
 {{- fail "configure one shared writer authority: functionReadCache or fieldStatsCapture" }}
 {{- end }}
 {{- if gt (int .Values.gateway.replicas) 1 }}
-{{- fail "gateway.replicas must be 1: the embedded queue is pod-local, and an external queue Postgres only decouples storage from gateway rolls; steady-state replicas>1 waits for the singleton-loop audit (docs/learnings/functions/gateway-roll-survival.md)" }}
+{{- fail "gateway.replicas must be 1: the embedded queue is pod-local, and an external queue Postgres only decouples storage from gateway rolls; steady-state replicas>1 waits for the singleton-loop audit (docs/archive/learnings/functions/gateway-roll-survival.md)" }}
 {{- end }}
 {{- if and .Values.gateway.queue.embedded (not (or (eq .Values.gateway.queue.persistence.type "hostPath") (eq .Values.gateway.queue.persistence.type "pvc"))) }}
 {{- fail "gateway.queue.persistence.type must be hostPath or pvc" }}

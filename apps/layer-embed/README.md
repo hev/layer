@@ -1,6 +1,6 @@
 # Layer CPU embedding sidecar
 
-Standalone implementation of [RFC 0120](../../docs/rfcs/0120-cpu-embedding-sidecar.md)
+Standalone implementation of [RFC 0120](../../docs/archive/rfcs/0120-cpu-embedding-sidecar.md)
 (private protocol v1), based on reviewed commit
 `36de7479562b758baca257bcbebe46a23a3c5bce`. This nested Cargo workspace is
 independently runnable. Packaging is wired: the CE Compose bundle

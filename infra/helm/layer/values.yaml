@@ -127,7 +127,7 @@ gateway:
         key: url
       # Optional: render the queue Postgres as its own StatefulSet on the SAME
       # node-local hostPath directory the embedded sidecar used (no data copy).
-      # Off by default. See docs/learnings/functions/gateway-roll-survival.md
+      # Off by default. See docs/archive/learnings/functions/gateway-roll-survival.md
       # for the cutover, which is a manual, announced step.
       standalone:
         enabled: false
