@@ -76,7 +76,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.gateway.drain.terminationGracePeriodSeconds }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "gateway") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       {{- if or .Values.gateway.lattice.enabled .Values.gateway.localClip.enabled .Values.gateway.localModels.enabled }}
@@ -554,16 +554,21 @@ spec:
             sizeLimit: {{ .Values.gateway.queue.postgres.shmSize | quote }}
         {{- end }}
         {{- if $metricsEmbedded }}
+        {{- if ne (default "hostPath" .Values.metrics.storage.type) "pvc" }}
         - name: vm-data
           hostPath:
             path: {{ .Values.metrics.storage.hostPath | quote }}
             type: DirectoryOrCreate
+        {{- end }}
         - name: scrape-config
           configMap:
             name: {{ include "layer.fullname" . }}-vmsingle-scrape
         {{- end }}
-  {{- if and .Values.gateway.queue.embedded (eq .Values.gateway.queue.persistence.type "pvc") }}
+  {{- $pgPvc := and .Values.gateway.queue.embedded (eq .Values.gateway.queue.persistence.type "pvc") }}
+  {{- $vmPvc := and $metricsEmbedded (eq (default "hostPath" .Values.metrics.storage.type) "pvc") }}
+  {{- if or $pgPvc $vmPvc }}
   volumeClaimTemplates:
+    {{- if $pgPvc }}
     - metadata:
         name: pg-data
       spec:
@@ -575,4 +580,18 @@ spec:
         resources:
           requests:
             storage: {{ .Values.gateway.queue.persistence.size | quote }}
+    {{- end }}
+    {{- if $vmPvc }}
+    - metadata:
+        name: vm-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.metrics.storage.storageClassName }}
+        storageClassName: {{ include "layer.storageClass" (dict "root" $ "class" .Values.metrics.storage.storageClassName) | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.metrics.storage.size | quote }}
+    {{- end }}
   {{- end }}

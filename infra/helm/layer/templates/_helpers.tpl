@@ -82,10 +82,17 @@ calling the gateway.
 {{/*
 Node selector for a layer.hev.dev/node-role pool ("system",
 "document-cache", …). Terraform labels the pools (node-groups.tf);
-templates call this with (dict "role" "<role>").
+templates call this with (dict "root" $ "role" "<role>"). cloud: azure adds
+the local-nvme readyLabel for the roles whose NVMe the DaemonSet mounts.
 */}}
 {{- define "layer.nodeSelector" -}}
 layer.hev.dev/node-role: {{ .role | quote }}
+{{- with .root }}
+{{- $nvme := .Values.azure.localNvme }}
+{{- if and (include "layer.azure" .) $nvme.enabled $nvme.readyLabel (has $.role $nvme.nodeRoles) }}
+{{ $nvme.readyLabel.key }}: {{ $nvme.readyLabel.value | quote }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -260,4 +267,13 @@ Env for the rclone artifact copier on Azure.
   value: {{ required "azure.storageAccountName is required when cloud=azure" .Values.azure.storageAccountName | quote }}
 - name: RCLONE_AZUREBLOB_ENV_AUTH
   value: "true"
+{{- end }}
+
+{{/*
+Operator-created worker pods (pipelines, Functions) run under their own
+federated service account on AKS: cloud=azure with workerIdentity.clientId.
+Renders "true" or nothing.
+*/}}
+{{- define "layer.workerIdentity" -}}
+{{- if and (include "layer.azure" .) .Values.operator.enabled .Values.workerIdentity.clientId -}}true{{- end -}}
 {{- end }}

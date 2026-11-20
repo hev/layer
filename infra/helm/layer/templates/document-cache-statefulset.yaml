@@ -1,4 +1,5 @@
 {{- if .Values.documentCache.enabled }}
+{{- $memoryEngine := eq (default "device" .Values.documentCache.storage.engine) "memory" }}
 {{- $documentCacheNodeRole := default "system" .Values.documentCache.nodeRole }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -25,9 +26,10 @@ spec:
       serviceAccountName: {{ include "layer.serviceAccountName" . }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" $documentCacheNodeRole) | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" $documentCacheNodeRole) | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" $documentCacheNodeRole) | nindent 8 }}
+      {{- if not $memoryEngine }}
       initContainers:
         - name: init-document-cache-data
           image: busybox:latest
@@ -59,6 +61,7 @@ spec:
           volumeMounts:
             - name: document-cache-data
               mountPath: {{ .Values.documentCache.storage.mountPath | quote }}
+      {{- end }}
       containers:
         - name: aerospike
           image: {{ .Values.documentCache.image | quote }}
@@ -70,8 +73,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if not $memoryEngine }}
             - name: document-cache-data
               mountPath: {{ .Values.documentCache.storage.mountPath | quote }}
+            {{- end }}
             - name: document-cache-config
               mountPath: /opt/aerospike/etc
           args:
@@ -140,7 +145,7 @@ spec:
           {{- end }}
         {{- end }}
       volumes:
-        {{- if not .Values.documentCache.storage.pvc.enabled }}
+        {{- if not (or $memoryEngine .Values.documentCache.storage.pvc.enabled) }}
         - name: document-cache-data
           hostPath:
             path: {{ .Values.documentCache.storage.hostPath | quote }}
@@ -149,7 +154,7 @@ spec:
         - name: document-cache-config
           configMap:
             name: {{ include "layer.fullname" . }}-document-cache
-  {{- if .Values.documentCache.storage.pvc.enabled }}
+  {{- if and .Values.documentCache.storage.pvc.enabled (not $memoryEngine) }}
   volumeClaimTemplates:
     - metadata:
         name: document-cache-data

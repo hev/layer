@@ -1373,7 +1373,7 @@ fn reject_native_wire_shape(
         declaration
             .as_str()
             .or_else(|| declaration.get("type").and_then(Value::as_str))
-            .is_some_and(|kind| kind.starts_with('['))
+            .is_some_and(|kind| kind.starts_with('[') && !kind.starts_with("[]"))
     };
     let declares_vector = body
         .get("schema")

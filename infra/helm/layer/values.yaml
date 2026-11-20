@@ -54,9 +54,9 @@ azure:
   # nodes RAID0s the NVMe Direct Disks (one disk is formatted as is), mounts the
   # result at /mnt/k8s-disks/0 and links /mnt/nvme to it, matching the AWS i4i
   # bootstrap, so hostPath users and local-path work unchanged. It then removes
-  # startupTaint from its node. Give NAP pools that taint as a startup taint
-  # (the chart does for the document-cache pool) and the AKS system pool the
-  # same taint as a node initialization taint, so no pod writes /mnt/nvme
+  # startupTaint from its node and sets readyLabel. NAP pools carry the taint
+  # as a startup taint (the chart does for the document-cache pool); the AKS
+  # system pool relies on readyLabel (see below), so no pod writes /mnt/nvme
   # before the disk is mounted.
   localNvme:
     enabled: true
@@ -71,6 +71,14 @@ azure:
       key: layer.hev.dev/nvme
       value: pending
       effect: NoSchedule
+    # Set on the node once /mnt/nvme is mounted. Pods pinned to nodeRoles
+    # (system, document-cache) also select it, so nothing writes /mnt/nvme
+    # before the disk is in place. This is the gate on the static AKS system
+    # pool, where AKS refuses both node initialization taints (a subscription
+    # preview feature) and removing a pool-configured taint.
+    readyLabel:
+      key: layer.hev.dev/nvme
+      value: ready
 
 # PriorityClasses that keep platform pods ahead of colocated tenant workloads
 # when the shared system node hits disk/memory pressure (GH #92). The gateway is
@@ -300,6 +308,18 @@ operator:
     # cloud: azure Workload Identity: user-assigned identity client id.
     clientId: ""
 
+# cloud: azure only. Identity for operator-created pipeline and Function worker
+# pods. With clientId set, the operator runs workers as serviceAccount.name
+# with the azure.workload.identity/use label (so pipelines reach Blob), and
+# creates that service account in other namespaces when missing. Each
+# namespace needs a federated credential for
+# system:serviceaccount:<namespace>:<name> on the identity.
+workerIdentity:
+  clientId: ""
+  serviceAccount:
+    create: true
+    name: layer-worker
+
 # Dynamic volumes on the system node's i4i instance-store NVMe. The
 # provisioner uses WaitForFirstConsumer plus an allowed topology so claims bind
 # to the system node that physically owns their data. These volumes are erased
@@ -336,6 +356,11 @@ documentCache:
     # Aerospike is an ephemeral cache. Clearing the backing file on pod start
     # makes a restart a valid stop-writes recovery action.
     resetOnStart: true
+    # device (default): a file of fileSize on the data volume above. memory:
+    # Aerospike's in-memory storage engine with dataSize of RAM and no data
+    # volume; size resources to dataSize plus the primary index (64 B/record).
+    engine: device
+    dataSize: 12G
   resources:
     requests:
       cpu: 500m
@@ -451,6 +476,9 @@ workerKarpenter:
       iops: 3000
       throughput: 125
   gpu:
+    # cloud: azure only: false skips the worker-gpu AKSNodeClass/NodePool
+    # (the AWS pool always renders).
+    enabled: true
     nodePoolName: worker-gpu
     nodeClassName: worker-gpu
     amiSsmParameter: /aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/nvidia/recommended/image_id
@@ -670,6 +698,10 @@ metrics:
   retentionPeriod: "7d"
   scrapeIntervalSeconds: 30
   storage:
+    # hostPath (default): the embedded vmsingle writes hostPath below on the
+    # system node. pvc: a gateway volumeClaimTemplate of size on
+    # storageClassName (e.g. an AKS managed disk class).
+    type: hostPath
     storageClassName: "local-path"
     size: "10Gi"
     hostPath: /mnt/nvme/layer-gateway-vm

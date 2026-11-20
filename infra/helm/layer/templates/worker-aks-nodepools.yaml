@@ -8,6 +8,7 @@ minimum; empty nodes are consolidated after consolidateAfter).
 {{- $root := . -}}
 {{- range $class := list (dict "key" "cpu" "role" "worker-cpu" "compute" "cpu" "values" .Values.workerKarpenter.cpu) (dict "key" "gpu" "role" "worker-gpu" "compute" "gpu" "values" .Values.workerKarpenter.gpu) }}
 {{- $values := $class.values }}
+{{- if ne $values.enabled false }}
 {{- $azure := required (printf "workerKarpenter.%s.azure is required when cloud=azure" $class.key) $values.azure }}
 apiVersion: karpenter.azure.com/v1beta1
 kind: AKSNodeClass
@@ -85,6 +86,7 @@ spec:
 {{- end }}
 {{- if ne $class.key "gpu" }}
 ---
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

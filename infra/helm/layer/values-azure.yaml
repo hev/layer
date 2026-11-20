@@ -11,35 +11,50 @@
 #     --set dashboard.serviceAccount.clientId=... \
 #     --set operator.serviceAccount.clientId=...
 #
-# Cluster prerequisites (Terraform, milestone 4): AKS with Node Auto
-# Provisioning, the application routing add-on, Workload Identity and the OIDC
-# issuer; a system pool of Standard_L8as_v3 labelled and tainted
-# layer.hev.dev/node-role=system with the node initialization taint
-# layer.hev.dev/nvme=pending:NoSchedule; cert-manager with a ClusterIssuer
-# named letsencrypt; the storage account and container below; and federated
-# credentials for the layer, layer-dashboard and layer-operator service
-# accounts. DNS for *.az.hevlayer.com stays in Cloudflare.
+# Cluster prerequisites come from infra/terraform/azure (runbook:
+# docs/runbooks/layer-azure.md): AKS with Node Auto Provisioning, KEDA, the
+# application routing add-on, Workload Identity and the OIDC issuer; a Layer
+# system pool of Standard_L8as_v3 labelled and tainted
+# layer.hev.dev/node-role=system plus the layer.hev.dev/nvme=pending:NoSchedule
+# startup taint (a pool taint there; the local-nvme DaemonSet keeps lifting
+# it); cert-manager with a ClusterIssuer named letsencrypt; the storage
+# account and container below; and federated credentials for the layer,
+# layer-dashboard, layer-operator and layer-worker service accounts.
+# infra/terraform/azure/scripts/helm-values.sh writes the per-cluster values
+# (Workload Identity client ids) from Terraform outputs. DNS for
+# *.az.hevlayer.com is in Cloudflare.
 cloud: azure
-
-azure:
-  storageAccountName: hevlayeraz
-  ingress:
-    clusterIssuer: letsencrypt
 
 # Blob container for snapshots, history and witness (object_store az:// URL).
 objectStore:
   url: az://layer
 
 gateway:
-  # Docker Hub, the customer pull path (no ACR to start). Blob storage needs a
-  # gateway built with the Azure object store backend (Linear milestone 2);
-  # move these pins to the first release that carries it.
-  image: hevlayer/layer-gateway-pro:0.8.0
+  # Dev images in the cluster's ACR: Blob storage needs a gateway built with
+  # the Azure object store backend, which no release carries yet. Move these
+  # pins to Docker Hub (hevlayer/*) with the first release that does.
+  image: hevlayeraz.azurecr.io/layer-gateway:59ce5a17
   telemetry:
     enabled: false
+  # CPU embeddings: the bundled layer-embed sidecar (no GPU on this cluster).
+  embed:
+    enabled: true
+    image: hevlayer/layer-embed:0.8.0
+    # One E4as_v7 node: request less than the chart's 1 CPU default.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        memory: 3Gi
+  queue:
+    persistence:
+      type: pvc
+      storageClassName: managed-csi-premium
+      size: 16Gi
 
 dashboard:
-  image: hevlayer/layer-dashboard:0.8.0
+  image: hevlayeraz.azurecr.io/layer-dashboard:59ce5a17
   basicAuth:
     user: hev
   ingress:
@@ -48,7 +63,11 @@ dashboard:
 
 operator:
   enabled: true
-  image: hevlayer/layer-operator:0.8.0
+  # Index CRs only for this cluster's own namespaces, never layer-prod's
+  # (the turbopuffer org is shared while the endpoint above is aws-us-east-1).
+  discovery:
+    prefix: az-
+  image: hevlayeraz.azurecr.io/layer-operator:59ce5a17
 
 ingress:
   enabled: true
@@ -58,21 +77,68 @@ mcpIngress:
   host: mcp.az.hevlayer.com
 
 vectorStore:
+  # TEMPORARY (2026-11-17): turbopuffer has not enabled azure-eastus2 for our
+  # org yet (401 "organization is not authorized to access this environment"),
+  # so this cluster talks to aws-us-east-1, cross-cloud, and only to az-*
+  # namespaces (operator.discovery.prefix below). Flip back once Azure access
+  # lands: url https://azure-eastus2.turbopuffer.com, region azure-eastus2.
   endpoint:
-    url: https://azure-eastus2.turbopuffer.com
-    region: azure-eastus2
+    url: https://aws-us-east-1.turbopuffer.com
+    region: aws-us-east-1
 
-# AKS already marks its own default StorageClass; keep local-path non-default.
+# One always-on node, no local NVMe: Adam, 2026-11-17 ("NVMe isn't used
+# enough to be worth an always-on L8as_v3"). Durable gateway state lives on
+# AKS managed disks, the document cache in memory. The local-path provisioner,
+# the local-nvme DaemonSet and the L8as_v3 document-cache pool stay in the
+# chart, off here.
 localStorage:
+  enabled: false
   defaultClass: false
 
+metrics:
+  storage:
+    type: pvc
+    storageClassName: managed-csi
+    size: 16Gi
+
 documentCache:
-  # Lean install, like layer-prod: the cache runs on the system node's NVMe.
-  # Set nodeRole: document-cache and karpenter.enabled: true for the dedicated
-  # Standard_L8as_v3 pool.
+  # Aerospike as the hot chunk cache (Blob is the durable chunk backing), in
+  # memory on the system node; KEDA pins it at one replica as on layer-prod.
   nodeRole: system
+  storage:
+    engine: memory
+    dataSize: 12G
+  resources:
+    requests:
+      cpu: 250m
+      memory: 13Gi
+    limits:
+      memory: 15Gi
   karpenter:
+    enabled: false
+
+azure:
+  storageAccountName: hevlayeraz
+  ingress:
+    clusterIssuer: letsencrypt
+  karpenter:
+    # Kubernetes 1.37 node images; NAP picks the current Ubuntu LTS.
+    imageFamily: Ubuntu
+  localNvme:
     enabled: false
 
 workerKarpenter:
   enabled: true
+  cpu:
+    # eastus2 quota: Dasv7 10 vCPU, shared with the 2 vCPU AKS system node.
+    azure:
+      skus:
+        - Standard_D4as_v7
+      osDiskSizeGB: 64
+    limits:
+      cpu: "8"
+      memory: 32Gi
+      nodes: "2"
+  gpu:
+    # GPU quota is 0 (NCasT4v3 request pending). Flip to true once granted.
+    enabled: false

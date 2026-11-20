@@ -10,8 +10,9 @@ privileged DaemonSet does the same from inside the cluster:
   3. format once (label layer-nvme), mount at mountPath, add a nofail fstab
      entry so a reboot remounts it,
   4. link linkPath (/mnt/nvme) to mountPath,
-  5. remove startupTaint from its node so pods with /mnt/nvme hostPaths can
-     schedule only after the disk is in place.
+  5. remove startupTaint from its node (NAP pools) and set readyLabel, which
+     pods pinned to these node roles also select, so pods with /mnt/nvme
+     hostPaths schedule only after the disk is in place.
 
 It runs host tools through nsenter into PID 1's namespaces, so the node image
 must provide mkfs.<filesystem> (and mdadm for multi-disk SKUs).
@@ -80,6 +81,11 @@ data:
     if host mountpoint -q "$MOUNT"; then
       log "$MOUNT already mounted"
     else
+      {{- with $nvme.readyLabel }}
+      # A reimaged node keeps its Node object (and this label) but not the
+      # mount: drop the label until the disk is back.
+      kubectl label node "$NODE_NAME" {{ printf "%s-" .key | quote }} >/dev/null 2>&1 || true
+      {{- end }}
       # shellcheck disable=SC2016  # expanded by the host shell
       disks="$(host sh -c 'for d in /sys/block/nvme*n*; do
         [ -e "$d/device/model" ] || continue
@@ -136,6 +142,10 @@ data:
       kubectl taint node "$NODE_NAME" "$TAINT"
       log "removed startup taint"
     fi
+    {{- with $nvme.readyLabel }}
+    kubectl label node "$NODE_NAME" --overwrite {{ printf "%s=%s" .key .value | quote }} >/dev/null
+    log "labelled {{ .key }}={{ .value }}"
+    {{- end }}
     log "ready"
     trap 'exit 0' TERM INT
     sleep infinity &

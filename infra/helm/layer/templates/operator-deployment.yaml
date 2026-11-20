@@ -40,7 +40,7 @@ spec:
       serviceAccountName: {{ $saName }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       containers:
@@ -80,6 +80,12 @@ spec:
             {{- end }}
             {{- with include "layer.objectStoreEnv" . }}
             {{- . | trim | nindent 12 }}
+            {{- end }}
+            {{- if include "layer.workerIdentity" . }}
+            - name: LAYER_WORKER_SERVICE_ACCOUNT
+              value: {{ .Values.workerIdentity.serviceAccount.name | quote }}
+            - name: LAYER_WORKER_AZURE_CLIENT_ID
+              value: {{ .Values.workerIdentity.clientId | quote }}
             {{- end }}
             - name: LAYER_LICENSE
               valueFrom:

@@ -30,7 +30,7 @@ spec:
           serviceAccountName: {{ include "layer.serviceAccountName" . }}
           restartPolicy: OnFailure
           nodeSelector:
-            {{- include "layer.nodeSelector" (dict "role" "system") | nindent 12 }}
+            {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 12 }}
           tolerations:
             {{- include "layer.roleToleration" (dict "role" "system") | nindent 12 }}
           affinity:
