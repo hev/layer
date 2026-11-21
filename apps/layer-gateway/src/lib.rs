@@ -10,6 +10,7 @@ pub mod consistency;
 pub mod cost;
 pub mod embedding;
 pub mod error;
+pub mod federated;
 #[cfg(feature = "pro")]
 pub mod field_stats;
 #[cfg(feature = "field-stats-capture")]
