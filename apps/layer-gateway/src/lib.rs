@@ -96,8 +96,10 @@ pub struct RestoreRunState;
 /// Operator ceiling: half of the FDE-confirmed pinned concurrency budget.
 pub const PINNED_THREADS_MAX: u32 = 512;
 pub const DEFAULT_PINNED_SCAN_THREADS: u32 = 32;
+// work-identity:begin
 #[cfg(feature = "work-identity")]
 mod work_identity;
+// work-identity:end
 
 pub struct AppState {
     #[cfg(feature = "cdc-capture")]
@@ -1253,17 +1255,26 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         auth::require_api_key,
     ));
 
+    // work-identity:begin
     #[cfg(feature = "work-identity")]
-    let identity = work_identity::configured_router(Arc::clone(&state));
+    let identity = work_identity::configured_router(Arc::clone(&state)).map(|router| {
+        router.layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            reject_while_draining,
+        ))
+    });
+    // work-identity:end
     let app = public
         .merge(router)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+    // work-identity:begin
     #[cfg(feature = "work-identity")]
     let app = match identity {
         Some(identity) => app.merge(identity),
         None => app,
     };
+    // work-identity:end
     if let Some(registry) = host_routes {
         Router::new()
             .fallback_service(app)

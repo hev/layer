@@ -45,13 +45,13 @@ struct Gateway {
     _child: Child,
     client: Client,
     endpoint: String,
+    drain_marker: std::path::PathBuf,
+    _runtime: tempfile::TempDir,
 }
 
-impl Gateway {
-    async fn start(keys: &[Value]) -> Self {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        serde_json::to_writer(file.as_file(), keys).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_hevlayer-gateway"))
+fn gateway_command(keys_file: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hevlayer-gateway"));
+    command
             .env("PORT", "0")
             .env("LAYER_BIND_HOST", "127.0.0.1")
             .env("LAYER_TELEMETRY", "off")
@@ -59,9 +59,24 @@ impl Gateway {
             .env("NO_COLOR", "1")
             .env_remove("LAYER_STORE_FILE")
             .env("LAYER_STORE_JSON", r#"{"default":{"kind":"search","endpoint":{"url":"http://127.0.0.1:9"},"credential":{"apiKey":"synthetic-gateway-admin"},"inboundAuth":{"mode":"deriveFromStore"}}}"#)
-            .env("LAYER_WORK_IDENTITY_KEYS_FILE", file.path())
+            .env("LAYER_WORK_IDENTITY_KEYS_FILE", keys_file)
             .stdout(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+    command
+}
+
+impl Gateway {
+    async fn start(keys: &[Value]) -> Self {
+        Self::start_with_grants(&serde_json::to_vec(keys).unwrap()).await
+    }
+
+    async fn start_with_grants(grants: &[u8]) -> Self {
+        let runtime = tempfile::tempdir().unwrap();
+        let keys_file = runtime.path().join("grants.json");
+        let drain_marker = runtime.path().join("draining");
+        std::fs::write(&keys_file, grants).unwrap();
+        let mut child = gateway_command(&keys_file)
+            .env("LAYER_DRAIN_MARKER_PATH", &drain_marker)
             .spawn()
             .unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -90,6 +105,8 @@ impl Gateway {
                 .build()
                 .unwrap(),
             endpoint: format!("http://{addr}"),
+            drain_marker,
+            _runtime: runtime,
         }
     }
 
@@ -101,6 +118,22 @@ impl Gateway {
             .unwrap()
             .status()
     }
+}
+
+async fn assert_invalid_grants(grants: &[u8], diagnostic: &str) {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), grants).unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        gateway_command(file.path()).output(),
+    )
+    .await
+    .expect("gateway hung while loading invalid grants")
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(diagnostic), "{stderr}");
+    assert!(!stderr.contains(KEY));
 }
 
 async fn call(
@@ -160,6 +193,33 @@ async fn work_identity_authenticated_transactions() {
         .await
         .unwrap();
     let keys = fixture_keys();
+    let mut max_keys = keys.clone();
+    for index in max_keys.len()..128 {
+        max_keys.push(grant(
+            &format!("hvl_fixture_{index}"),
+            "default",
+            WORKSPACE,
+            &["read"],
+        ));
+    }
+    let mut max_bytes = serde_json::to_vec(&max_keys).unwrap();
+    max_bytes.resize(64 * 1024, b' ');
+    let bounded = Gateway::start_with_grants(&max_bytes).await;
+    ok(read(&bounded, json!({"op":"list"})).await);
+    std::fs::write(&bounded.drain_marker, "").unwrap();
+    assert_eq!(
+        read(&bounded, json!({"op":"list"})).await.1["error"],
+        "gateway_draining"
+    );
+    drop(bounded);
+    max_bytes.push(b' ');
+    assert_invalid_grants(&max_bytes, "failed to read LAYER_WORK_IDENTITY_KEYS_FILE").await;
+    max_keys.push(grant("hvl_extra", "default", WORKSPACE, &["read"]));
+    assert_invalid_grants(
+        &serde_json::to_vec(&max_keys).unwrap(),
+        "invalid, duplicate or excessive local work identity bearer grants",
+    )
+    .await;
     let app = Gateway::start(&keys).await;
     assert_eq!(
         call(&app, WORKSPACE, "", true, json!({"op":"list"}))
@@ -342,7 +402,7 @@ async fn work_identity_authenticated_transactions() {
     assert_eq!(promoted["request_ref"], child["request_ref"]);
     assert_eq!(promoted["origin_address"], child["address"]);
     assert_eq!(promoted["links"], child["links"]);
-    for alias in ["hev-1.1", "hev-2.9", "hev-2.8", "hev-17", "hev-1.1"] {
+    for alias in ["hev-1.1", "hev-2.9", "hev-2.8", "hev-17"] {
         assert_eq!(ok(read(&app, resolve(alias)).await), promoted);
     }
     for alias in ["hev-1.1.1", "hev-2.9.1", "hev-2.8.1", "hev-17.1"] {
@@ -356,6 +416,29 @@ async fn work_identity_authenticated_transactions() {
         write(&app, movement(&tenth, Some(&root["id"]), 1)).await.0,
         409
     );
+    let restored = ok(write(&app, movement(&promoted, Some(&root["id"]), 1)).await);
+    assert_eq!(restored["address"], "hev-1.1");
+    assert_eq!(
+        ok(read(&app, resolve("hev-17.1")).await)["id"],
+        grandchild["id"]
+    );
+    let restored_descendant = ok(read(&app, resolve("hev-1.1.1")).await);
+    let renamed_descendant = ok(write(
+        &app,
+        movement(&restored_descendant, Some(&restored["id"]), 2),
+    )
+    .await);
+    assert_eq!(
+        write(&app, movement(&tenth, Some(&restored["id"]), 1))
+            .await
+            .0,
+        409
+    );
+    assert_eq!(
+        ok(read(&app, resolve("hev-1.1.1")).await),
+        renamed_descendant
+    );
+    let promoted = ok(write(&app, movement(&restored, None, 17)).await);
     assert_eq!(
         call(&app, OTHER, KEY, true, resolve("hev-1.1")).await,
         call(&app, ABSENT, KEY, true, resolve("hev-1.1")).await
@@ -423,6 +506,26 @@ async fn work_identity_authenticated_transactions() {
         400
     );
     assert_eq!(read(&app, json!({"op":"history","limit":101})).await.0, 400);
+    let mut at_body_limit = r#"{"op":"list"}"#.to_owned();
+    at_body_limit.extend(std::iter::repeat_n(' ', 4096 - at_body_limit.len()));
+    for (body, status) in [
+        (at_body_limit.clone(), StatusCode::OK),
+        (at_body_limit + " ", StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .client
+            .post(format!(
+                "{}/v2/namespaces/work-{WORKSPACE}/work-identity/query",
+                app.endpoint
+            ))
+            .bearer_auth(KEY)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
     let page = ok(read(&app, json!({"op":"history","limit":2})).await);
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
     assert_eq!(page["has_more"], true);
@@ -525,6 +628,48 @@ async fn work_identity_authenticated_transactions() {
         .await
         .unwrap();
     let committed = ok(write(&app, unavailable.clone()).await);
+    assert_eq!(committed, ok(write(&app, unavailable.clone()).await));
+
+    // Seed reservations and the history cursor directly in the disposable DB
+    // to exercise both allocation edges without thousands of HTTP writes.
+    let workspace = WORKSPACE.parse::<Uuid>().unwrap();
+    sqlx::query(
+        "INSERT INTO work_identity_address (workspace, address, id)
+         SELECT $1, 'hev-' || n, $2 FROM generate_series(1, 8191) AS n
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace)
+    .bind(root["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE work_identity_workspace SET next_change = 8191 WHERE id = $1")
+        .bind(workspace)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_eq!(ok(write(&app, create(None)).await)["address"], "hev-8192");
+
+    let subtree = ok(read(&app, resolve("hev-17")).await);
+    let descendant = ok(read(&app, resolve("hev-17.1")).await);
+    let history = json!({"op":"history","after":8191});
+    let before = ok(read(&app, history.clone()).await);
+    let capacity = (
+        StatusCode::CONFLICT,
+        json!({"error":"capacity","retryable":false}),
+    );
+    assert_eq!(write(&app, movement(&subtree, None, 8193)).await, capacity);
+    assert_eq!(ok(read(&app, resolve("hev-17")).await), subtree);
+    assert_eq!(ok(read(&app, resolve("hev-17.1")).await), descendant);
+    assert_eq!(read(&app, resolve("hev-8193")).await.0, 404);
+    assert_eq!(read(&app, resolve("hev-8193.1")).await.0, 404);
+    assert_eq!(ok(read(&app, history.clone()).await), before);
+    assert_eq!(ok(write(&app, create(None)).await)["address"], "hev-8193");
+    let last = ok(read(&app, history).await);
+    assert_eq!(last["items"].as_array().unwrap().len(), 1);
+    assert_eq!(last["next_after"], 8192);
+    assert_eq!(write(&app, create(None)).await, capacity);
+    assert_eq!(read(&app, resolve("hev-8194")).await.0, 404);
     assert_eq!(committed, ok(write(&app, unavailable).await));
 }
 

@@ -7,6 +7,10 @@ use uuid::Uuid;
 use super::{Failure, LinkKind, Query, Write};
 
 const MAX_ASKS: i64 = 512;
+const MAX_CHANGES: i32 = 8192;
+// Every new reservation records a change in the same transaction. One more
+// candidate than the history budget guarantees a free slot at any prefix.
+const ALLOCATION_CANDIDATES: i32 = MAX_CHANGES + 1;
 const MAX_DEPTH: usize = 12;
 const MAX_LINKS: usize = 32;
 
@@ -331,12 +335,13 @@ impl WorkspaceWrite<'_> {
             format!("{}.", address(&self.label, &segments))
         };
         let segment = sqlx::query_scalar::<_, i32>(
-            "SELECT n FROM generate_series(1, 2048) n WHERE NOT EXISTS
+            "SELECT n FROM generate_series(1, $3::integer) n WHERE NOT EXISTS
                (SELECT 1 FROM work_identity_address WHERE workspace = $1 AND address = $2 || n::text)
                ORDER BY n LIMIT 1",
         )
         .bind(self.workspace)
         .bind(prefix)
+        .bind(ALLOCATION_CANDIDATES)
         .fetch_optional(&mut *self.db)
         .await?
         .ok_or(Failure::Capacity)?;
@@ -468,6 +473,9 @@ impl WorkspaceWrite<'_> {
     }
 
     async fn record(&mut self, ask: &Ask, event: &str) -> Result<(), Failure> {
+        if self.cursor > i64::from(MAX_CHANGES) {
+            return Err(Failure::Capacity);
+        }
         sqlx::query("INSERT INTO work_identity_change (workspace, ordinal, id, event, body) VALUES ($1, $2, $3, $4, $5)")
             .bind(self.workspace)
             .bind(self.cursor)

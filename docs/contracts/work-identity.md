@@ -1,14 +1,17 @@
 # Shared work identity
 
-Hosted Layer uses PlanetScale Postgres for identity. Kit,
+The opt-in Layer Pro API uses PlanetScale Postgres for hosted identity. Kit,
 agents and workers use the same authenticated HTTP API with hosted or local
 Layer. The test stack installs an isolated schema and seeds workspace grants.
 Deployment and workspace provisioning are separate from this slice.
 
 The namespace is `work-<workspace UUID>`. Clients need a minted key with an
-explicit grant for that namespace on its routed Layer store. Read and write
-scopes are checked before any identity database access. Use bearer credentials
-in the Authorization header.
+explicit grant for that namespace on its routed Layer store. In Pro, a Layer
+administrator provisions the `work-identity` claim on that store entitlement
+alongside the exact namespace and required read or write scope. Delegated
+vector-store minters cannot issue claims. In CE, the local identity grant file
+supplies the store, exact namespace and scopes. Both adapters check grants
+before database access. Use bearer credentials in the Authorization header.
 
 POST to `/v2/namespaces/{namespace}/work-identity` to write and
 `/v2/namespaces/{namespace}/work-identity/query` to read. Bodies are JSON
@@ -41,7 +44,12 @@ revision clears the previous acceptance while preserving its history.
 
 Each used address remains reserved for the original ask. Old addresses
 resolve directly to the ask ID and return its current address. The slice has
-no history pruning. Any future history retention must preserve the address
+a history budget of 8,192 changes per workspace, including one change per
+affected ask in a subtree move. This also bounds permanent alias reservations
+to 8,192 per workspace. A mutation that exceeds the budget returns
+`409 capacity` and rolls back in full. Reads and idempotent create replays
+remain available. Automatic allocation considers segments 1 through 8,193
+at the selected prefix. Any future history retention must preserve the address
 ledger and must publish a cursor expiry policy before deleting history.
 
 A Layer or database outage yields an explicit retryable failure. A timed-out
@@ -103,7 +111,7 @@ the desired UUID and address label as part of isolated fixture setup.
 
 CE seeds local bearer grants from the file named by
 `LAYER_WORK_IDENTITY_KEYS_FILE`. Keep the file private to the gateway process.
-Each JSON array entry has a locally minted `hvl_` bearer in `token`, the
+The file accepts up to 128 grants and 64 KiB. Each JSON array entry has a locally minted `hvl_` bearer in `token`, the
 Layer store name in `store`, exact workspace namespace names in `namespaces`,
 and `read` and/or `write` in `scopes`. Generate each bearer from fresh random
 bytes, for example with `printf hvl_; openssl rand -hex 24`. Start the gateway

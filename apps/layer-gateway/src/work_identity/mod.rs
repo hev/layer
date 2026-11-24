@@ -12,18 +12,18 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-use crate::{
-    auth::{constant_time_eq, ApiScope},
-    AppState,
-};
+use crate::{auth::ApiScope, AppState};
 
+mod adapter;
 mod store;
+
+use adapter::Authorization;
 
 const QUERY_ROUTE: &str = "/v2/namespaces/{namespace}/work-identity/query";
 const WRITE_ROUTE: &str = "/v2/namespaces/{namespace}/work-identity";
 
 #[derive(Clone)]
-pub(super) struct Database(Option<PgPool>);
+struct Database(Option<PgPool>);
 
 fn configured_pool() -> Option<Database> {
     let url = std::env::var_os("LAYER_WORK_IDENTITY_DATABASE_URL")?;
@@ -43,83 +43,17 @@ fn configured_pool() -> Option<Database> {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LocalKey {
-    token: String,
-    store: String,
-    namespaces: Vec<String>,
-    scopes: Vec<String>,
-}
-
-#[derive(Clone)]
-struct Authorization {
-    state: Arc<AppState>,
-    keys: Arc<[LocalKey]>,
-}
-
-pub fn configured_router(state: Arc<AppState>) -> Option<Router> {
+pub(super) fn configured_router(state: Arc<AppState>) -> Option<Router> {
     let database = configured_pool()?;
-    let keys: Vec<LocalKey> = match std::env::var_os("LAYER_WORK_IDENTITY_KEYS_FILE") {
-        None => Vec::new(),
-        Some(path) => std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .expect("failed to read LAYER_WORK_IDENTITY_KEYS_FILE as work identity key grants"),
-    };
-    assert!(
-        keys.iter().enumerate().all(|(index, key)| {
-            is_local_token(&key.token)
-                && keys[..index]
-                    .iter()
-                    .all(|previous| previous.token != key.token)
-        }),
-        "invalid or duplicate local work identity bearer token"
-    );
-    Some(router(
-        Authorization {
-            state,
-            keys: keys.into(),
-        },
-        database,
-    ))
-}
-
-fn is_local_token(token: &str) -> bool {
-    token.len() <= 256
-        && token.strip_prefix("hvl_").is_some_and(|value| {
-            !value.is_empty()
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        })
-}
-
-fn router(auth: Authorization, database: Database) -> Router {
-    Router::new()
-        .route(WRITE_ROUTE, post(write))
-        .route(QUERY_ROUTE, post(query))
-        .layer(DefaultBodyLimit::max(4096))
-        .layer(Extension(database))
-        .layer(axum::middleware::from_fn_with_state(auth, authorize))
-}
-
-// Resolve grants against the immutable namespace before processing a body
-// or opening a transaction. Broad gateway and wildcard grants are insufficient.
-fn workspace_grant(
-    state: &AppState,
-    key: &LocalKey,
-    namespace: &str,
-    scope: ApiScope,
-) -> Option<Uuid> {
-    let workspace = namespace.strip_prefix("work-")?.parse::<Uuid>().ok()?;
-    if namespace != format!("work-{workspace}") {
-        return None;
-    }
-    (key.store == state.store_for_namespace(namespace)
-        && key.namespaces.iter().any(|name| name == namespace)
-        && key.scopes.iter().any(|s| s == scope.as_str()))
-    .then_some(workspace)
+    let auth = Authorization::new(state);
+    Some(
+        Router::new()
+            .route(WRITE_ROUTE, post(write))
+            .route(QUERY_ROUTE, post(query))
+            .layer(DefaultBodyLimit::max(4096))
+            .layer(Extension(database))
+            .layer(axum::middleware::from_fn_with_state(auth, authorize)),
+    )
 }
 
 async fn authorize(
@@ -138,21 +72,24 @@ async fn authorize(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| is_local_token(token))
-        .and_then(|token| {
-            auth.keys
-                .iter()
-                .find(|key| constant_time_eq(token.as_bytes(), key.token.as_bytes()))
-        });
+        .filter(|token| token.len() <= 256)
+        .and_then(|token| auth.authenticate(token));
     let Some(key) = key else {
         return Failure::Unauthorized.into_response();
     };
     let Ok(Path(namespace)) = namespace else {
         return Failure::NotFound.into_response();
     };
-    let Some(workspace) = workspace_grant(&auth.state, key, &namespace, scope) else {
+    let Ok(workspace) = namespace
+        .strip_prefix("work-")
+        .unwrap_or("")
+        .parse::<Uuid>()
+    else {
         return Failure::NotFound.into_response();
     };
+    if namespace != format!("work-{workspace}") || !auth.grants(&key, &namespace, scope) {
+        return Failure::NotFound.into_response();
+    }
     request.extensions_mut().insert(workspace);
     next.run(request).await
 }
