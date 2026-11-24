@@ -87,7 +87,7 @@ async fn authorize(
     else {
         return Failure::NotFound.into_response();
     };
-    if namespace != format!("work-{workspace}") || !auth.grants(&key, &namespace, scope) {
+    if namespace != format!("work-{workspace}") || !auth.grants(key, &namespace, scope) {
         return Failure::NotFound.into_response();
     }
     request.extensions_mut().insert(workspace);

@@ -727,19 +727,23 @@ impl AppState {
     }
 }
 
-async fn reject_while_draining(
+async fn reject_while_draining<const WORK_IDENTITY: bool>(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
     if state.is_draining() {
+        let mut body = serde_json::json!({
+            "error": "gateway_draining",
+            "message": "gateway pod is draining; retry on another endpoint"
+        });
+        if WORK_IDENTITY {
+            body["retryable"] = true.into();
+        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [("connection", "close")],
-            axum::Json(serde_json::json!({
-                "error": "gateway_draining",
-                "message": "gateway pod is draining; retry on another endpoint"
-            })),
+            axum::Json(body),
         )
             .into_response();
     }
@@ -1241,7 +1245,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            reject_while_draining,
+            reject_while_draining::<false>,
         ));
 
     #[cfg(feature = "cdc-capture")]
@@ -1260,7 +1264,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
     let identity = work_identity::configured_router(Arc::clone(&state)).map(|router| {
         router.layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            reject_while_draining,
+            reject_while_draining::<true>,
         ))
     });
     // work-identity:end

@@ -207,10 +207,10 @@ async fn work_identity_authenticated_transactions() {
     let bounded = Gateway::start_with_grants(&max_bytes).await;
     ok(read(&bounded, json!({"op":"list"})).await);
     std::fs::write(&bounded.drain_marker, "").unwrap();
-    assert_eq!(
-        read(&bounded, json!({"op":"list"})).await.1["error"],
-        "gateway_draining"
-    );
+    let (status, body) = read(&bounded, json!({"op":"list"})).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "gateway_draining");
+    assert_eq!(body["retryable"], true);
     drop(bounded);
     max_bytes.push(b' ');
     assert_invalid_grants(&max_bytes, "failed to read LAYER_WORK_IDENTITY_KEYS_FILE").await;
