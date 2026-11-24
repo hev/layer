@@ -7,6 +7,7 @@ autotests = false
 [features]
 default = ["pgvector"]
 pgvector = ["vectorstore-core/pgvector"]
+work-identity = ["dep:sqlx", "uuid/serde"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pro", "field-stats-capture", "cdc-capture"))'] }
@@ -39,6 +40,7 @@ candle-nn = "0.11"
 candle-transformers = "0.11"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "json"], optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1"
 prometheus = { version = "0.14", features = ["process"] }
@@ -57,6 +59,7 @@ http-body-util = "0.1"
 serde_yaml = "0.9"
 ed25519-dalek = "3"
 safetensors = "0.8"
+tempfile = "3"
 
 [[test]]
 name = "search_ce"
@@ -70,3 +73,8 @@ path = "tests/integration/standalone_boot.rs"
 name = "typeahead_ce"
 path = "tests/integration/typeahead_ce.rs"
 required-features = ["pgvector"]
+
+[[test]]
+name = "work_identity"
+path = "tests/integration/work_identity.rs"
+required-features = ["work-identity"]
