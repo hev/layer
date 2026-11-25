@@ -655,6 +655,15 @@ pub trait TurbopufferClient: Send + Sync {
             .unimplemented(crate::capabilities::WireFeature::Facet)
     }
 
+    /// Prepare `namespace` for strong scan pages that project vectors. A
+    /// store that binds a vector projection to independently read metadata
+    /// (turbopuffer: the id type and vector dimension, valid for a minute)
+    /// refreshes it here; a caller repeats the call during a long scan.
+    /// Stores with nothing to prepare accept it as a no-op.
+    async fn prepare_strong_scan(&self, _namespace: &str) -> Result<(), TurbopufferError> {
+        Ok(())
+    }
+
     /// Exhaustive strong pages for an owner-guarded complete capture. Unsupported
     /// adapters must refuse, never silently use eventual scan_page.
     async fn scan_page_strong(
@@ -1226,6 +1235,12 @@ impl TurbopufferClient for RoutingTurbopufferClient {
     ) -> Result<Option<String>, TurbopufferError> {
         self.client_for_namespace(Some(namespace))?
             .reconcile_change_token(namespace)
+            .await
+    }
+
+    async fn prepare_strong_scan(&self, namespace: &str) -> Result<(), TurbopufferError> {
+        self.client_for_namespace(Some(namespace))?
+            .prepare_strong_scan(namespace)
             .await
     }
 
@@ -3884,6 +3899,12 @@ impl TurbopufferClient for HttpTurbopufferClient {
             false,
         )
         .await
+    }
+
+    async fn prepare_strong_scan(&self, namespace: &str) -> Result<(), TurbopufferError> {
+        self.head_namespace_for_strong_scan(namespace)
+            .await
+            .map(|_| ())
     }
 
     async fn scan_page_strong(

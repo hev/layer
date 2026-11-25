@@ -21,6 +21,8 @@ and pipeline/scan/warm-cache helper methods.
 - `CompareUdfCandidate`
 - `CompleteUdfItems`
 - `CopyNamespace`
+- `CreateArchiveExport`
+- `CreateArchiveRestore`
 - `CreateCheckpoint`
 - `CreatePipeline`
 - `CreateScan`
@@ -36,9 +38,12 @@ and pipeline/scan/warm-cache helper methods.
 - `DiscoverUdf`
 - `EvaluateTurbopufferRecall`
 - `ExplainTurbopufferQuery`
+- `ExportBundle`
 - `FailUdfItems`
 - `FetchDocument`
 - `FetchDocuments`
+- `GetArchiveNamespace`
+- `GetArchiveRun`
 - `GetBlob`
 - `GetCheckpoint`
 - `GetCostRateCard`
@@ -116,5 +121,6 @@ and pipeline/scan/warm-cache helper methods.
 - `UpdateTurbopufferNamespaceMetadata`
 - `UpdateTurbopufferNamespaceSchema`
 - `UpsertUdf`
+- `VerifyKey`
 - `WarmCache`
 - `WriteNamespace`

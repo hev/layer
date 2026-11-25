@@ -1,0 +1,85 @@
+{{- /*
+cloud: azure document-cache pool on AKS Node Auto Provisioning: the
+AKSNodeClass + NodePool twin of document-cache-karpenter.yaml. Lasv3 local
+NVMe replaces the i4g instance store; the local NVMe DaemonSet mounts it at
+/mnt/k8s-disks/0 and then lifts the startup taint below.
+*/}}
+{{- if and .Values.documentCache.enabled .Values.documentCache.karpenter.enabled (include "layer.azure" .) }}
+{{- $azure := required "documentCache.karpenter.azure is required when cloud=azure" .Values.documentCache.karpenter.azure }}
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: {{ .Values.documentCache.karpenter.nodeClassName }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  imageFamily: {{ .Values.azure.karpenter.imageFamily | quote }}
+  {{- with $azure.osDiskSizeGB }}
+  osDiskSizeGB: {{ . }}
+  {{- end }}
+  tags:
+    Environment: {{ default .Release.Namespace .Values.environment | quote }}
+    ManagedBy: karpenter
+    Project: hevlayer
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ .Values.documentCache.karpenter.nodePoolName }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-cache
+spec:
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ .Values.documentCache.karpenter.consolidateAfter | quote }}
+    budgets:
+      - nodes: 100%
+  limits:
+    cpu: {{ .Values.documentCache.karpenter.limits.cpu | quote }}
+    memory: {{ .Values.documentCache.karpenter.limits.memory | quote }}
+    nodes: {{ .Values.documentCache.karpenter.limits.nodes | quote }}
+  template:
+    metadata:
+      labels:
+        layer.hev.dev/node-role: document-cache
+    spec:
+      expireAfter: {{ .Values.documentCache.karpenter.expireAfter | quote }}
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: {{ .Values.documentCache.karpenter.nodeClassName }}
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - {{ default "amd64" $azure.arch | quote }}
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - {{ .Values.documentCache.karpenter.capacityType | quote }}
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            {{- range (required "documentCache.karpenter.azure.skus is required when cloud=azure" $azure.skus) }}
+            - {{ . | quote }}
+            {{- end }}
+      taints:
+        - key: layer.hev.dev/node-role
+          value: document-cache
+          effect: NoSchedule
+      {{- if and .Values.azure.localNvme.enabled (has "document-cache" .Values.azure.localNvme.nodeRoles) }}
+      {{- with .Values.azure.localNvme.startupTaint }}
+      # Lifted by the local NVMe DaemonSet once /mnt/k8s-disks/0 is mounted.
+      startupTaints:
+        - key: {{ .key | quote }}
+          value: {{ .value | quote }}
+          effect: {{ .effect | quote }}
+      {{- end }}
+      {{- end }}
+{{- end }}

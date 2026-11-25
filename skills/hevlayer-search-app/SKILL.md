@@ -1,12 +1,12 @@
 ---
 name: hevlayer-search-app
 description: >-
-  Build a working search application on hev layer, locally, with no account
-  and no API key. Use when the user wants search over a corpus — a Hugging
+  Build a working search application on hev layer, running locally in front
+  of the user's turbopuffer account. Use when the user wants search over a corpus — a Hugging
   Face dataset, their own documents, a product catalog — and needs the schema
   designed, the source connected, the text chunked and embedded, the queries
-  written, and a UI generated. Covers the local Docker Compose stack (gateway,
-  Postgres, and the CPU embedding service), the Warehouse and Pipeline configuration shapes, chunking
+  written, and a UI generated. Covers the local Docker Compose stack (gateway
+  and the CPU embedding service), the Warehouse and Pipeline configuration shapes, chunking
   strategies, filter and full-text schema design, the turbopuffer-shaped query
   wire, and generating the front end from the namespace schema.
 ---
@@ -14,9 +14,9 @@ description: >-
 # Build a search app on hev layer
 
 You are building a search application. hev layer is the gateway it talks to:
-one HTTP API, turbopuffer-shaped, in front of whichever store holds the data.
-Locally that store is Postgres, running in the same Compose file, with no
-account and no key.
+one HTTP API, turbopuffer-shaped, in front of the store that holds the data.
+Community Edition runs the gateway on your machine in front of the user's
+turbopuffer account; the rows live there.
 
 **The most important rule in this skill:** the gateway owns retrieval. Ranking,
 fusion, tokenization, typo tolerance, facet counting, and query routing happen
@@ -46,21 +46,20 @@ changing it once rows are written means a reindex.
 ```sh
 git clone https://github.com/hev/layer.git
 cd layer
-export TURBOPUFFER_API_KEY=""
+export TURBOPUFFER_API_KEY="tpuf_..."   # the user's turbopuffer API key
 docker compose up -d --wait
 curl --fail http://localhost:8080/health
 ```
 
-The gateway is on `localhost:8080`. Compose also starts Postgres with
-`pgvector` and `pg_search`, and `embed`, the bundled CPU embedding service.
-The Compose file runs the latest release. An unset, empty, or whitespace-only
-`TURBOPUFFER_API_KEY` selects local Postgres; a nonblank key selects
-turbopuffer instead and is sent as `Authorization: Bearer <key>`. Nothing
-leaves the machine in the local configuration.
+The gateway is on `localhost:8080`. Compose also starts `embed`, the bundled
+CPU embedding service, on an internal network with no route out of the
+machine. The Compose file runs the latest release. The gateway exits at
+startup with a one-line error if `TURBOPUFFER_API_KEY` is unset; ask the user
+for the key rather than inventing one.
 
-No `Authorization` header is needed against the local stack. Every `curl` in
-this skill omits it; add it when the user has pointed the gateway at their own
-turbopuffer account.
+The same key is the gateway's bearer token. Every request except `/health`
+sends `-H "Authorization: Bearer $TURBOPUFFER_API_KEY"`; the `curl` examples
+below carry it.
 
 ---
 
@@ -87,27 +86,24 @@ Decide each field deliberately:
 | Want | Declare | Unlocks |
 | --- | --- | --- |
 | Rank text by relevance | `"full_text_search": true` | `BM25` rank expressions on that field |
-| Tolerate typos in that text | `"fuzzy": true` as well | Fuzzy `HybridText` legs — turbopuffer only |
+| Tolerate typos in that text | `"fuzzy": true` as well | Fuzzy `HybridText` legs |
 | Narrow results | `"filterable": true` | `filters` predicates, and facet rails over the field |
 | Only display it | neither | returned via `include_attributes`, nothing else |
 | Semantic similarity | a schema `embed` (or a `vector` on the row) | `ANN` rank expressions |
 
 Rules worth knowing before you commit:
 
-- **Typo tolerance is a turbopuffer feature.** On turbopuffer, `HybridText`
-  runs a BM25 leg plus one fuzzy leg per token and fuses them, so the field
-  needs both `full_text_search` and `fuzzy`. The local Postgres store has no
-  fuzzy index: it serves `HybridText` with `fuzziness: 0` only, which ranks by
-  BM25 without typo tolerance.
+- **Typo tolerance needs `fuzzy`.** `HybridText` runs a BM25 leg plus one
+  fuzzy leg per token and fuses them, so the field needs both
+  `full_text_search` and `fuzzy`.
 - **The id type is fixed by the first write** — string or integer. Later
   writes with the other type are rejected.
 - **`_hevlayer_*` attribute names are reserved.** The gateway stamps its own;
   a write that sets one is rejected.
 - **Nested JSON objects are not an attribute type.** Flatten, or carry the
   value as a serialized string that you do not filter on.
-- **Filterable does not mean every operator.** Locally, equality, comparison,
-  `In`, `Not`, `NotIn`, and boolean composition work; array-containment,
-  regex, and the advanced operators do not. The matrix is authoritative.
+- **Check the matrix before relying on an operator.** Filter support is
+  listed per feature in `store-capabilities.md`; it is authoritative.
 
 Ask the user what the app needs to *do* — "filter by year and category, search
 the body with typo tolerance, show the title and a link" — and derive the
@@ -222,8 +218,8 @@ Two things differ locally and you must account for both:
   the bundled CPU service serves: `BAAI/bge-small-en-v1.5` (384 dimensions) is
   a good default and needs no GPU and no API key. Send rows with no vector,
   and query with `["Embed", "…"]`; the gateway embeds the query with the same
-  model. Postgres takes one embedded attribute per namespace, and a namespace
-  holds either gateway vectors or row vectors, never both. If your indexer
+  model. A namespace holds either gateway vectors or row vectors, never both.
+  If your indexer
   already computes vectors, send them on the row as `vector` and leave `embed`
   out.
 - **Rows are written straight to the namespace.** Post to
@@ -232,6 +228,7 @@ Two things differ locally and you must account for both:
 
 ```sh
 curl --fail-with-body http://localhost:8080/v2/namespaces/squad \
+  -H "Authorization: Bearer $TURBOPUFFER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "distance_metric": "cosine_distance",
@@ -253,7 +250,8 @@ never partially applied.
 Watch the index catch up:
 
 ```sh
-curl http://localhost:8080/v2/namespaces/squad/metadata
+curl http://localhost:8080/v2/namespaces/squad/metadata \
+  -H "Authorization: Bearer $TURBOPUFFER_API_KEY"
 ```
 
 The `layer` block reports `indexed` and `index_lag_rows`. Rows can be present
@@ -269,16 +267,14 @@ One route: `POST /v2/namespaces/{ns}/query`. What kind of search you get is
 decided by the `rank_by` expression, not by a different endpoint.
 
 ```sh
+# Each body is posted to /v2/namespaces/squad/query with the bearer header.
 # Lexical — BM25 over an indexed text field
 -d '{"rank_by": ["text", "BM25", "wireless earbuds"], "top_k": 10, "include_attributes": true}'
 
 # Semantic — ANN over the embedded text; the gateway embeds the query
 -d '{"rank_by": ["text", "ANN", ["Embed", "wireless earbuds"]], "top_k": 10}'
 
-# Hybrid text, locally — Postgres serves HybridText with fuzziness 0 only
--d '{"rank_by": ["text", "HybridText", "rainforest climate", {"fuzziness": 0}], "top_k": 10}'
-
-# Typo-tolerant, on turbopuffer — BM25 plus per-token fuzzy legs, RRF-fused
+# Typo-tolerant hybrid text — BM25 plus per-token fuzzy legs, RRF-fused
 -d '{"rank_by": ["text", "HybridText", "conection timout"], "top_k": 10}'
 ```
 
@@ -286,7 +282,7 @@ Add predicates and projection with `filters` and `include_attributes`:
 
 ```json
 {
-  "rank_by": ["text", "HybridText", "rainforest climate", {"fuzziness": 0}],
+  "rank_by": ["text", "HybridText", "rainforest climate"],
   "top_k": 20,
   "filters": ["title", "Eq", "Amazon rainforest"],
   "include_attributes": ["title", "text", "source_url"]
@@ -302,8 +298,7 @@ segmented the text at index time — expands it into one BM25 leg plus a fuzzy
 leg per token, and fuses them with RRF. One expression in, typo-tolerant
 ranked results out. Defaults: `fuzziness: "auto"`, `rank_constant: 60`,
 `per_leg_limit: clamp(5 × top_k, 50, 200)`. Pass a fourth tuple element to
-tune them. Locally the default `"auto"` returns `422 UnsupportedByStore`, so
-pass `{"fuzziness": 0}`; the fuzzy legs need turbopuffer. Set
+tune them. Set
 `include_leg_breakdown: true` to get per-row `$fused.legs`
 attribution — which is what you render when the UI shows *why* a row matched.
 
@@ -314,11 +309,11 @@ is more convincing than the result itself.
 
 ### Before reaching for anything else
 
-Read [`store-capabilities.md`](store-capabilities.md). A `no` in the local
-column means the gateway returns:
+Read [`store-capabilities.md`](store-capabilities.md). A `no` in the
+turbopuffer column means the gateway returns:
 
 ```json
-{"error": "UnsupportedByStore", "store": "pgvector", "route": "…", "message": "…"}
+{"error": "UnsupportedByStore", "store": "turbopuffer", "route": "…", "message": "…"}
 ```
 
 That is a declared gap, not a bug and not something to route around. **Do not
@@ -327,11 +322,9 @@ the store serves, or tell the user the namespace needs a backend that serves
 it. Silently reimplementing facets, fusion, or filtering in the app is the
 failure mode this whole boundary exists to prevent.
 
-Locally that notably rules out: fuzzy `HybridText` (`fuzziness` other than
-`0`), array-containment and regex filters, facets, `searchAfter` cursors,
-multi-vector and sparse ranking, `aggregate_by`, chunked `embed`, and automatic
-query routing. Plan the app's features against
-the matrix, not against the docs index.
+On turbopuffer that notably rules out sparse ranking and Arrow IPC import;
+facets and delete-by-filter work only as native wire requests. Plan the app's
+features against the matrix, not against the docs index.
 
 ### The wire itself
 
@@ -392,7 +385,7 @@ re-serve rather than rebuilding the page by hand. It is a spec, not a scaffold.
 
 ## 7. Graduating to a cluster
 
-The local stack is the same gateway, the same wire, and the same
+The local gateway is the same gateway, the same wire, and the same
 Warehouse/Pipeline configuration the Kubernetes deployment uses. Moving up
 means handing the config to the operator instead of running the worker
 yourself:
@@ -423,4 +416,5 @@ Reference: <https://hevlayer.com/docs/kubernetes/warehouse-crd> and
 - [ ] Chunk hits are grouped or deduplicated by `_hevlayer_parent_id` in the UI.
 - [ ] The gateway's decision is visible in the UI — the `hybrid` echo, a
       surfacing badge, or leg attribution.
-- [ ] No API key is required to run the app locally.
+- [ ] The turbopuffer key is exported as `TURBOPUFFER_API_KEY` before
+      `docker compose up`, and every request sends it as the bearer token.

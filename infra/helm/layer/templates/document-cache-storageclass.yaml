@@ -1,4 +1,5 @@
-{{- if and .Values.documentCache.enabled .Values.documentCache.storage.pvc.enabled (eq .Values.documentCache.storage.pvc.storageClass "gp3") }}
+{{- /* AWS only: on Azure the gp3 default maps to azure.storageClassName, which AKS ships. */}}
+{{- if and (not (include "layer.azure" .)) .Values.documentCache.enabled .Values.documentCache.storage.pvc.enabled (eq .Values.documentCache.storage.pvc.storageClass "gp3") }}
 {{- if not (lookup "storage.k8s.io/v1" "StorageClass" "" "gp3") }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass

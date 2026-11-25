@@ -160,7 +160,7 @@ pub async fn put_blob(
     } else if storage.native && !state.s3.is_configured() {
         return Err(AppError::BlobExceedsStoreCap(format!(
             "blob is {} bytes; this namespace's store holds blobs up to {} bytes, and \
-             larger blobs need an S3-compatible object store (set S3_BUCKET)",
+             larger blobs need an object store (set OBJECT_STORE_URL or S3_BUCKET)",
             body.len(),
             storage.max_value_bytes.unwrap_or_default()
         )));

@@ -1,0 +1,77 @@
+# Every AWS-specific branch the cloud: azure work touches, switched on at once.
+gateway:
+  image: example/layer-gateway:test
+  lattice:
+    enabled: true
+    artifact:
+      s3Uri: s3://bucket/lattice
+      modelSha256: aaaa
+      tokenizerSha256: bbbb
+  localClip:
+    enabled: true
+    artifact:
+      s3Uri: s3://bucket/clip
+      modelSha256: a
+      tokenizerSha256: b
+      configSha256: c
+      preprocessorSha256: d
+  embed:
+    enabled: true
+    image: example/layer-embed:test
+  localModels:
+    enabled: true
+    artifact:
+      s3Uri: s3://bucket/models
+      manifestSha256: ffff
+  queue:
+    persistence:
+      type: pvc
+      storageClassName: gp3
+dashboard:
+  image: example/layer-dashboard:test
+  serviceAccount:
+    roleArn: arn:aws:iam::000000000000:role/layer-dashboard
+  ingress:
+    enabled: true
+  basicAuth:
+    user: u
+    password: p
+operator:
+  enabled: true
+  image: example/layer-operator:test
+  serviceAccount:
+    roleArn: arn:aws:iam::000000000000:role/layer-operator
+vectorStore:
+  credential:
+    apiKey: k
+serviceAccount:
+  roleArn: arn:aws:iam::000000000000:role/layer-gateway
+s3:
+  bucket: bucket
+  endpoint: http://minio:9000
+ingress:
+  enabled: true
+mcpIngress:
+  enabled: true
+  certificateArn: arn:aws:acm:us-east-1:000000000000:certificate/x
+search:
+  enabled: true
+  image: example/search:test
+metrics:
+  embedded: false
+documentCache:
+  nodeRole: document-cache
+  storage:
+    pvc:
+      enabled: true
+      storageClass: gp3
+  karpenter:
+    enabled: true
+    clusterName: c
+    instanceProfile: p
+workerKarpenter:
+  enabled: true
+  clusterName: c
+  instanceProfile: p
+keys:
+  pepper: x

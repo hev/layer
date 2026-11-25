@@ -72,7 +72,7 @@ spec:
       # hostPath data exists on one node only: pin to the node that holds it, or
       # Postgres would start on an empty directory elsewhere.
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
         kubernetes.io/hostname: {{ required "gateway.queue.external.standalone.nodeHostname is required (the node whose hostPath holds the queue data)" $sa.nodeHostname | quote }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}

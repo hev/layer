@@ -38,6 +38,12 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
+  {{- if include "layer.workerIdentity" . }}
+  # Worker service accounts in pipeline/Function namespaces (Workload Identity).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "create"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

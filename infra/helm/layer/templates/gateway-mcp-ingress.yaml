@@ -8,6 +8,9 @@ metadata:
     {{- include "layer.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
   annotations:
+    {{- if include "layer.azure" . }}
+    {{- include "layer.azureIngressAnnotations" (dict "root" $ "values" .Values.mcpIngress) | nindent 4 }}
+    {{- else }}
     alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName | quote }}
     alb.ingress.kubernetes.io/group.order: "29"
     {{- if .Values.ingress.tags }}
@@ -20,8 +23,12 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/healthcheck-path: /ready
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    {{- end }}
 spec:
-  ingressClassName: alb
+  ingressClassName: {{ ternary .Values.azure.ingress.className "alb" (eq (include "layer.cloud" .) "azure") }}
+  {{- if include "layer.azure" . }}
+  {{- include "layer.azureIngressTls" (dict "root" $ "values" .Values.mcpIngress "host" .Values.mcpIngress.host "component" "mcp") | nindent 2 }}
+  {{- end }}
   rules:
     - host: {{ .Values.mcpIngress.host | quote }}
       http:

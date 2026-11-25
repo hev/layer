@@ -1,0 +1,10 @@
+# CI's minimum required values.
+vectorStore:
+  credential:
+    apiKey: ci-test-key
+dashboard:
+  basicAuth:
+    user: ci
+    password: ci-pass
+keys:
+  pepper: x

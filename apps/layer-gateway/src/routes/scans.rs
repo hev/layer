@@ -4303,7 +4303,7 @@ const SUPPORTED_OPS: &[&str] = &["Eq", "NotEq", "Gt", "Gte", "Lt", "Lte", "In", 
 /// Check whether every leaf op in `filter` is one we can evaluate. Used by
 /// auto-mode to short-circuit to origin when a filter would otherwise force a
 /// fallback after a full set scan.
-fn filter_supported(filter: &Value) -> bool {
+pub(crate) fn filter_supported(filter: &Value) -> bool {
     let arr = match filter.as_array() {
         Some(a) => a,
         None => return false,

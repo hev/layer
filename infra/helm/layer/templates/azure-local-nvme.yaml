@@ -1,0 +1,246 @@
+{{- /*
+cloud: azure local NVMe (RFC "Layer on Azure", node disk). On AWS the i4i
+bootstrap RAIDs instance-store NVMe to /mnt/k8s-disks/0 and links /mnt/nvme to
+it before kubelet starts. AKS has no such hook for Lasv3 nodes, so this
+privileged DaemonSet does the same from inside the cluster:
+
+  1. find the node's NVMe Direct Disks (local, ephemeral; remote disks on NVMe
+     controllers report "MSFT NVMe Accelerator" and are skipped),
+  2. RAID0 them with mdadm when there are several (one disk is used as is),
+  3. format once (label layer-nvme), mount at mountPath, add a nofail fstab
+     entry so a reboot remounts it,
+  4. link linkPath (/mnt/nvme) to mountPath,
+  5. remove startupTaint from its node (NAP pools) and set readyLabel, which
+     pods pinned to these node roles also select, so pods with /mnt/nvme
+     hostPaths schedule only after the disk is in place.
+
+It runs host tools through nsenter into PID 1's namespaces, so the node image
+must provide mkfs.<filesystem> (and mdadm for multi-disk SKUs).
+*/}}
+{{- if and (include "layer.azure" .) .Values.azure.localNvme.enabled }}
+{{- $nvme := .Values.azure.localNvme }}
+{{- $name := printf "%s-local-nvme" (include "layer.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-nvme
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-nvme
+rules:
+  # Lift the startup taint from the pod's own node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-nvme
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-nvme
+data:
+  setup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    MOUNT={{ $nvme.mountPath | quote }}
+    LINK={{ $nvme.linkPath | quote }}
+    FS={{ $nvme.filesystem | quote }}
+    LABEL=layer-nvme
+    TAINT={{ printf "%s:%s-" $nvme.startupTaint.key $nvme.startupTaint.effect | quote }}
+    host() { nsenter -t 1 -m -u -i -n -p -- "$@"; }
+    log() { echo "local-nvme[$NODE_NAME]: $*"; }
+
+    {{- if $nvme.requireLocalDisk }}
+    {{- with $nvme.readyLabel }}
+    kubectl label node "$NODE_NAME" {{ printf "%s-" .key | quote }} >/dev/null
+    {{- end }}
+    {{- end }}
+    if host mountpoint -q "$MOUNT"; then
+      log "$MOUNT already mounted"
+    else
+      {{- if not $nvme.requireLocalDisk }}
+      {{- with $nvme.readyLabel }}
+      # A reimaged node keeps its Node object (and this label) but not the
+      # mount: drop the label until the disk is back.
+      kubectl label node "$NODE_NAME" {{ printf "%s-" .key | quote }} >/dev/null 2>&1 || true
+      {{- end }}
+      {{- end }}
+      # shellcheck disable=SC2016  # expanded by the host shell
+      disks="$(host sh -c 'for d in /sys/block/nvme*n*; do
+        [ -e "$d/device/model" ] || continue
+        case "$(cat "$d/device/model")" in *"NVMe Direct Disk"*) echo "/dev/${d##*/}" ;; esac
+      done')"
+      if [ -z "$disks" ]; then
+        {{- if $nvme.requireLocalDisk }}
+        log "no local NVMe Direct Disks; readiness label withheld"
+        exit 1
+        {{- else }}
+        log "no local NVMe Direct Disks; leaving $MOUNT on the OS disk"
+        host mkdir -p "$MOUNT"
+        {{- end }}
+      else
+        count="$(echo "$disks" | wc -l)"
+        if [ "$count" -gt 1 ]; then
+          host sh -c 'command -v mdadm' >/dev/null || { log "mdadm missing on the node image"; exit 1; }
+          dev="$(host sh -c "readlink -f /dev/md/$LABEL 2>/dev/null || true")"
+          if [ -z "$dev" ] || ! host test -b "$dev"; then
+            host mdadm --assemble --scan >/dev/null 2>&1 || true
+            dev="$(host sh -c "readlink -f /dev/md/$LABEL 2>/dev/null || true")"
+          fi
+          if [ -z "$dev" ] || ! host test -b "$dev"; then
+            log "creating RAID0 over ${disks//$'\n'/ }"
+            # shellcheck disable=SC2086
+            host mdadm --create "/dev/md/$LABEL" --name="$LABEL" --level=0 --raid-devices="$count" --force --run $disks
+            dev="/dev/md/$LABEL"
+          fi
+        else
+          dev="$disks"
+        fi
+        if ! host blkid -s TYPE -o value "$dev" >/dev/null 2>&1; then
+          log "formatting $dev as $FS"
+          host "mkfs.$FS" -F -L "$LABEL" "$dev"
+        fi
+        host mkdir -p "$MOUNT"
+        host mount -o defaults,noatime "$dev" "$MOUNT"
+        host sh -c "grep -q 'LABEL=$LABEL ' /etc/fstab || echo 'LABEL=$LABEL $MOUNT $FS defaults,noatime,nofail 0 2' >> /etc/fstab"
+        log "mounted $dev at $MOUNT"
+      fi
+    fi
+
+    {{- if $nvme.requireLocalDisk }}
+    if [ "$(host findmnt -n -M "$MOUNT" -o LABEL)" != "$LABEL" ]; then
+      log "$MOUNT is not the Layer NVMe filesystem"
+      exit 1
+    fi
+    {{- end }}
+
+    if host test -L "$LINK"; then
+      log "$LINK -> $(host readlink "$LINK")"
+    elif host test -d "$LINK"; then
+      if host rmdir "$LINK" 2>/dev/null; then
+        host ln -s "$MOUNT" "$LINK"
+        log "replaced empty $LINK with a link to $MOUNT"
+      else
+        log "WARNING: $LINK is a non-empty directory on the OS disk; left in place"
+      fi
+    else
+      host mkdir -p "$(dirname "$LINK")"
+      host ln -s "$MOUNT" "$LINK"
+      log "linked $LINK -> $MOUNT"
+    fi
+
+    {{- if $nvme.requireLocalDisk }}
+    if [ "$(host readlink -f "$LINK")" != "$MOUNT" ]; then
+      log "$LINK does not resolve to the Layer NVMe mount"
+      exit 1
+    fi
+    {{- end }}
+
+    if kubectl get node "$NODE_NAME" -o jsonpath='{.spec.taints[*].key}' | tr ' ' '\n' | grep -qx {{ $nvme.startupTaint.key | quote }}; then
+      kubectl taint node "$NODE_NAME" "$TAINT"
+      log "removed startup taint"
+    fi
+    {{- with $nvme.readyLabel }}
+    kubectl label node "$NODE_NAME" --overwrite {{ printf "%s=%s" .key .value | quote }} >/dev/null
+    log "labelled {{ .key }}={{ .value }}"
+    {{- end }}
+    log "ready"
+    trap 'exit 0' TERM INT
+    sleep infinity &
+    wait
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "layer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-nvme
+spec:
+  selector:
+    matchLabels:
+      {{- include "layer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: local-nvme
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/script: {{ $nvme | toJson | sha256sum }}
+      labels:
+        {{- include "layer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: local-nvme
+    spec:
+      serviceAccountName: {{ $name }}
+      hostPID: true
+      priorityClassName: system-node-critical
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: layer.hev.dev/node-role
+                    operator: In
+                    values:
+                      {{- range $nvme.nodeRoles }}
+                      - {{ . | quote }}
+                      {{- end }}
+      tolerations:
+        # Run before anything else on the node, startup taint included.
+        - operator: Exists
+      containers:
+        - name: setup
+          image: {{ $nvme.image | quote }}
+          command: ["/bin/bash", "/scripts/setup.sh"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ $name }}
+            defaultMode: 0555
+{{- end }}

@@ -279,8 +279,8 @@ impl AppError {
 
     pub fn object_store_not_configured(feature: impl AsRef<str>) -> Self {
         Self::ObjectStoreNotConfigured(format!(
-            "{} requires an S3-compatible object store, and this gateway has none \
-             configured (set S3_BUCKET)",
+            "{} requires an object store, and this gateway has none configured \
+             (set OBJECT_STORE_URL or S3_BUCKET)",
             feature.as_ref()
         ))
     }

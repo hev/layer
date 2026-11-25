@@ -19,12 +19,15 @@ spec:
       labels:
         {{- include "layer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: dashboard
+        {{- if and (include "layer.azure" .) .Values.dashboard.serviceAccount.clientId }}
+        azure.workload.identity/use: "true"
+        {{- end }}
         layer.hev.dev/component: dashboard
     spec:
       serviceAccountName: {{ include "layer.dashboardServiceAccountName" . }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       containers:

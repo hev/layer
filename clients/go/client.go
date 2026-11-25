@@ -893,6 +893,42 @@ func (client *Client) CopyNamespaceWithPerf(ctx context.Context, namespace strin
 }
 
 
+func (client *Client) CreateArchiveExport(ctx context.Context, body *ArchiveExportRequest, options ...RequestOption) (*ArchiveRun, error) {
+	out := ArchiveRun{}
+	if _, err := client.request(ctx, "POST", "/v1/control/archive/exports", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CreateArchiveExportWithPerf(ctx context.Context, body *ArchiveExportRequest, options ...RequestOption) (*LayerResponse[ArchiveRun], error) {
+	out := ArchiveRun{}
+	perf, err := client.request(ctx, "POST", "/v1/control/archive/exports", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ArchiveRun]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) CreateArchiveRestore(ctx context.Context, body *ArchiveRestoreRequest, options ...RequestOption) (*ArchiveRun, error) {
+	out := ArchiveRun{}
+	if _, err := client.request(ctx, "POST", "/v1/control/archive/restores", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CreateArchiveRestoreWithPerf(ctx context.Context, body *ArchiveRestoreRequest, options ...RequestOption) (*LayerResponse[ArchiveRun], error) {
+	out := ArchiveRun{}
+	perf, err := client.request(ctx, "POST", "/v1/control/archive/restores", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ArchiveRun]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) CreateCheckpoint(ctx context.Context, namespace string, body *CreateCheckpointRequest, options ...RequestOption) (*Checkpoint, error) {
 	out := Checkpoint{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/checkpoints", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
@@ -1163,6 +1199,24 @@ func (client *Client) ExplainTurbopufferQueryWithPerf(ctx context.Context, names
 }
 
 
+func (client *Client) ExportBundle(ctx context.Context, namespace string, body *BundleRequest, options ...RequestOption) (*EdgeBundle, error) {
+	out := EdgeBundle{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/bundle", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ExportBundleWithPerf(ctx context.Context, namespace string, body *BundleRequest, options ...RequestOption) (*LayerResponse[EdgeBundle], error) {
+	out := EdgeBundle{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/bundle", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[EdgeBundle]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) FailUdfItems(ctx context.Context, udfID string, body *UdfFailRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
@@ -1222,6 +1276,42 @@ func (client *Client) FetchDocumentsWithPerf(ctx context.Context, namespace stri
 		return nil, err
 	}
 	return &LayerResponse[FetchDocumentsResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetArchiveNamespace(ctx context.Context, namespace string, options ...RequestOption) (*ArchiveNamespace, error) {
+	out := ArchiveNamespace{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/control/archive/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetArchiveNamespaceWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[ArchiveNamespace], error) {
+	out := ArchiveNamespace{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/control/archive/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ArchiveNamespace]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetArchiveRun(ctx context.Context, namespace string, runID string, options ...RequestOption) (*ArchiveRun, error) {
+	out := ArchiveRun{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/control/archive/namespaces/%s/runs/%s", url.PathEscape(namespace), url.PathEscape(runID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetArchiveRunWithPerf(ctx context.Context, namespace string, runID string, options ...RequestOption) (*LayerResponse[ArchiveRun], error) {
+	out := ArchiveRun{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/control/archive/namespaces/%s/runs/%s", url.PathEscape(namespace), url.PathEscape(runID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ArchiveRun]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -2846,6 +2936,24 @@ func (client *Client) UpsertUdfWithPerf(ctx context.Context, udfID string, body 
 		return nil, err
 	}
 	return &LayerResponse[Udf]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) VerifyKey(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*VerifyKeyResponse, error) {
+	out := VerifyKeyResponse{}
+	if _, err := client.request(ctx, "POST", "/v2/keys/verify", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) VerifyKeyWithPerf(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*LayerResponse[VerifyKeyResponse], error) {
+	out := VerifyKeyResponse{}
+	perf, err := client.request(ctx, "POST", "/v2/keys/verify", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[VerifyKeyResponse]{Data: out, Perf: *perf}, nil
 }
 
 

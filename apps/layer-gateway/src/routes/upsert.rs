@@ -594,7 +594,13 @@ pub(crate) async fn write_namespace(
                         if is_unsupported_by_store(&e) {
                             return Err(AppError::from_store_support_error(
                                 e,
-                                Some("search".to_string()),
+                                Some(
+                                    state
+                                        .turbopuffer()
+                                        .capabilities_for_namespace(&namespace)
+                                        .kind
+                                        .to_string(),
+                                ),
                                 Some("writeNamespace".to_string()),
                             ));
                         }
@@ -659,7 +665,13 @@ pub(crate) async fn write_namespace(
                     if is_unsupported_by_store(&e) {
                         return Err(AppError::from_store_support_error(
                             e,
-                            Some("search".to_string()),
+                            Some(
+                                state
+                                    .turbopuffer()
+                                    .capabilities_for_namespace(&namespace)
+                                    .kind
+                                    .to_string(),
+                            ),
                             Some("writeNamespace".to_string()),
                         ));
                     }
@@ -826,7 +838,13 @@ pub async fn import_arrow(
             if is_unsupported_by_store(&e) {
                 AppError::from_store_support_error(
                     e,
-                    Some("search".to_string()),
+                    Some(
+                        state
+                            .turbopuffer()
+                            .capabilities_for_namespace(&namespace)
+                            .kind
+                            .to_string(),
+                    ),
                     Some("importNamespace".to_string()),
                 )
             } else {

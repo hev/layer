@@ -42,10 +42,16 @@ data:
     namespace {{ .Values.documentCache.namespace }} {
       replication-factor 1
 
+      {{ if eq (default "device" .Values.documentCache.storage.engine) "memory" -}}
+      storage-engine memory {
+        data-size {{ .Values.documentCache.storage.dataSize }}
+      }
+      {{- else -}}
       storage-engine device {
         file {{ .Values.documentCache.storage.mountPath }}/{{ .Values.documentCache.namespace }}.dat
         filesize {{ .Values.documentCache.storage.fileSize }}
         read-page-cache true
       }
+      {{- end }}
     }
 {{- end }}

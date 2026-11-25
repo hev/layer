@@ -1,5 +1,7 @@
 name: CE quickstart
 on: [push, pull_request, workflow_dispatch]
+env:
+  DO_NOT_TRACK: "1"
 jobs:
   query:
     runs-on: ubuntu-latest
@@ -7,51 +9,88 @@ jobs:
       CARGO_BUILD_JOBS: '1'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
-    services:
-      postgres:
-        image: paradedb/paradedb:0.26.0@sha256:52fc9c95fdfd462201168d1d82334ed61f85cbd921957cab083ec39800a217ac
-        env:
-          POSTGRES_USER: layer
-          POSTGRES_PASSWORD: local-layer
-          POSTGRES_DB: layer
-        ports:
-          - 5432/tcp
-        options: >-
-          --health-cmd "pg_isready -U layer -d layer"
-          --health-interval 2s --health-timeout 3s --health-retries 30
+      LAYER_TELEMETRY: 'off'
+      AWS_EC2_METADATA_DISABLED: 'true'
+      # CE is the gateway on your turbopuffer account. Run-unique so concurrent
+      # runs never share a namespace; deleted (and checked gone) at the end.
+      NS: scratch-ce-quickstart-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Build this tree's CE gateway
+      - name: Build this tree's CE gateway (turbopuffer only)
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
-          cargo build -p hevlayer-gateway --bin hevlayer-gateway --no-default-features --features pgvector
-      - name: Start gateway
-        env:
-          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+          cargo build -p hevlayer-gateway --bin hevlayer-gateway --no-default-features
+      - name: Without TURBOPUFFER_API_KEY the gateway exits with one line
         run: |
-          PGVECTOR_URL="postgresql://layer:local-layer@127.0.0.1:$PG_PORT/layer" \
-            TURBOPUFFER_API_KEY= LAYER_TELEMETRY=off AWS_EC2_METADATA_DISABLED=true \
-            target/debug/hevlayer-gateway > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          set +e
+          env -u TURBOPUFFER_API_KEY timeout 60 target/debug/hevlayer-gateway > "$RUNNER_TEMP/missing-key.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/missing-key.log"
+          if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+            echo "::error::gateway without TURBOPUFFER_API_KEY exited $status; want a startup failure"
+            exit 1
+          fi
+          grep -Fx 'error: TURBOPUFFER_API_KEY is not set; export TURBOPUFFER_API_KEY=<your turbopuffer API key> and start the gateway again' "$RUNNER_TEMP/missing-key.log"
+      - name: Check for the turbopuffer CI key
+        id: key
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+        run: |
+          if [ -n "$TURBOPUFFER_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            # Forked PRs get no secrets. Skip the live leg rather than test a
+            # store CE does not ship.
+            echo "::notice::secrets.TURBOPUFFER_API_KEY is unavailable to this run; skipping the turbopuffer round trip."
+          fi
+      - name: Start gateway on turbopuffer
+        if: steps.key.outputs.present == 'true'
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+        run: |
+          target/debug/hevlayer-gateway > "$RUNNER_TEMP/gateway.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 60); do
-            if curl --fail --silent http://localhost:8080/health; then exit 0; fi
+            if curl --fail --silent http://localhost:8080/health; then
+              # The log is ANSI-coloured even when redirected; strip it first.
+              sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/gateway.log" | grep -Eq 'store_kind="turbopuffer"|kind=Turbopuffer' || {
+                cat "$RUNNER_TEMP/gateway.log"; echo "::error::default store is not turbopuffer"; exit 1; }
+              exit 0
+            fi
             sleep 2
           done
           cat "$RUNNER_TEMP/gateway.log"
           exit 1
       - name: Write and query vector and BM25
+        if: steps.key.outputs.present == 'true'
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
         run: |
-          curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products \
-            -H 'Content-Type: application/json' \
+          curl --fail-with-body "http://localhost:8080/v2/namespaces/$NS" \
+            -H "Authorization: Bearer $TURBOPUFFER_API_KEY" -H 'Content-Type: application/json' \
             -d '{"distance_metric":"cosine_distance","schema":{"text":{"type":"string","full_text_search":true}},"upsert_rows":[{"id":"earbuds","text":"wireless earbuds","vector":[1,0,0]}]}'
           for ranking in '["vector","ANN",[1,0,0]]' '["text","BM25","wireless"]'; do
-            curl --fail-with-body http://localhost:8080/v2/namespaces/ci-products/query \
-              -H 'Content-Type: application/json' \
+            curl --fail-with-body "http://localhost:8080/v2/namespaces/$NS/query" \
+              -H "Authorization: Bearer $TURBOPUFFER_API_KEY" -H 'Content-Type: application/json' \
               -d "{\"rank_by\":$ranking,\"top_k\":1}" | \
               python3 -c 'import json,sys; assert json.load(sys.stdin)["rows"][0]["id"] == "earbuds"'
           done
+      - name: Delete the scratch namespace
+        if: always() && steps.key.outputs.present == 'true'
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+        run: |
+          status="$(curl --silent --output "$RUNNER_TEMP/delete.json" --write-out '%{http_code}' -X DELETE \
+            "http://localhost:8080/v2/namespaces/$NS" -H "Authorization: Bearer $TURBOPUFFER_API_KEY")"
+          cat "$RUNNER_TEMP/delete.json"; echo
+          # 404: the write never landed, so there is nothing to clean up.
+          case "$status" in 200|202|404) ;; *) echo "::error::namespace delete returned $status"; exit 1 ;; esac
+          curl --fail-with-body --silent "http://localhost:8080/v1/namespaces?prefix=$NS" \
+            -H "Authorization: Bearer $TURBOPUFFER_API_KEY" | \
+            python3 -c 'import json,os,sys; names=[n.get("id") or n.get("name") for n in json.load(sys.stdin)["namespaces"]]; assert os.environ["NS"] not in names, names'
       - name: Stop gateway
         if: always()
         run: |

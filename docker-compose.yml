@@ -1,25 +1,14 @@
-# hev layer — community edition
+# hev layer — community edition: the Layer gateway on your turbopuffer account.
 #
-#   docker compose up
+#   export TURBOPUFFER_API_KEY=tpuf_...
+#   docker compose up -d --wait
+#
+# Your data lives in your turbopuffer account. The bundle runs no database:
+# CE keeps no queue or indexing state of its own. Without the key the gateway
+# exits at startup with one line telling you to export it.
 name: hevlayer-ce
 
 services:
-  postgres:
-    # Unmodified ParadeDB Community server (pg_search 0.26.0 + vector 0.8.6).
-    # Source/notices: https://github.com/paradedb/paradedb/tree/v0.26.0
-    image: paradedb/paradedb:0.26.0@sha256:52fc9c95fdfd462201168d1d82334ed61f85cbd921957cab083ec39800a217ac
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: layer
-      POSTGRES_PASSWORD: local-layer
-      POSTGRES_DB: layer
-    volumes:
-      - postgres18:/var/lib/postgresql
-    healthcheck:
-      test: [CMD-SHELL, "pg_isready -U layer -d layer"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
   embed:
     # Bundled CPU embedding sidecar (RFC 0120). The image bakes both stock
     # models (all-MiniLM-L6-v2 and bge-small-en-v1.5, 384 dimensions), so it
@@ -51,14 +40,11 @@ services:
       PORT: "8080"
       LAYER_LICENSE: ${HEVLAYER_LICENSE:-}
       TURBOPUFFER_API_KEY: ${TURBOPUFFER_API_KEY:-}
-      PGVECTOR_URL: postgresql://layer:local-layer@postgres:5432/layer
       LAYER_TELEMETRY: "off"
       AWS_EC2_METADATA_DISABLED: "true"
       TPUF_URL: ${TPUF_URL:-https://api.turbopuffer.com}
       LAYER_EMBED_URL: http://embed:8081
     depends_on:
-      postgres:
-        condition: service_healthy
       embed:
         condition: service_healthy
     healthcheck:
@@ -71,18 +57,6 @@ services:
       timeout: 3s
       retries: 5
 
-  clients:
-    profiles: [acceptance]
-    build:
-      # The public checkout is its own context; layer-pro sets this to its root.
-      context: ${ACCEPTANCE_CONTEXT:-.}
-      dockerfile: infra/compose/pgvector/Dockerfile.clients
-    environment:
-      PGVECTOR_GATEWAY_URL: http://gateway:8080
-      PGVECTOR_TEST_PREFIX: ${PGVECTOR_TEST_PREFIX:-scratch-lyr-35}
-    depends_on:
-      gateway:
-        condition: service_healthy
 
 networks:
   default: {}
@@ -91,6 +65,3 @@ networks:
   # the Compose project and the sidecar cannot reach the internet.
   embed:
     internal: true
-
-volumes:
-  postgres18:

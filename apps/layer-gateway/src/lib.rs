@@ -10,6 +10,7 @@ pub mod consistency;
 pub mod cost;
 pub mod embedding;
 pub mod error;
+pub mod federated;
 #[cfg(feature = "pro")]
 pub mod field_stats;
 #[cfg(feature = "field-stats-capture")]
@@ -96,11 +97,6 @@ pub struct RestoreRunState;
 /// Operator ceiling: half of the FDE-confirmed pinned concurrency budget.
 pub const PINNED_THREADS_MAX: u32 = 512;
 pub const DEFAULT_PINNED_SCAN_THREADS: u32 = 32;
-// work-identity:begin
-#[cfg(feature = "work-identity")]
-mod work_identity;
-// work-identity:end
-
 pub struct AppState {
     #[cfg(feature = "cdc-capture")]
     pub cdc_capture: Option<Arc<cdc_capture::Runtime>>,
@@ -135,6 +131,7 @@ pub struct AppState {
     pub restore_runs: Arc<DashMap<String, RestoreRunState>>,
     pub aerospike_set_prefix: String,
     pub pipeline_store: Option<Arc<dyn PipelineStore>>,
+    pub bundle_max_rows: usize,
     pub udf_store: Option<Arc<dyn UdfStore>>,
     pub function_layer_only_namespaces: std::collections::HashSet<String>,
     pub write_trigger: Option<Arc<dyn WriteTrigger>>,
@@ -727,23 +724,19 @@ impl AppState {
     }
 }
 
-async fn reject_while_draining<const WORK_IDENTITY: bool>(
+async fn reject_while_draining(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
     if state.is_draining() {
-        let mut body = serde_json::json!({
-            "error": "gateway_draining",
-            "message": "gateway pod is draining; retry on another endpoint"
-        });
-        if WORK_IDENTITY {
-            body["retryable"] = true.into();
-        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [("connection", "close")],
-            axum::Json(body),
+            axum::Json(serde_json::json!({
+                "error": "gateway_draining",
+                "message": "gateway pod is draining; retry on another endpoint"
+            })),
         )
             .into_response();
     }
@@ -880,6 +873,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             post(cdc_capture::replay),
         );
 
+
     let host_routes = mcp.clone().filter(|registry| registry.has_host_routes());
     if let Some(registry) = mcp {
         router = router
@@ -993,6 +987,11 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
     #[cfg(feature = "pro")]
     if state.agentic_enabled {
         router = router.route("/v2/agents/{name}/query", post(routes::agents::query_agent));
+    }
+
+    #[cfg(feature = "pro")]
+    if state.key_store.is_some() {
+        router = router.route("/v2/keys/verify", post(routes::keys::verify_key));
     }
 
     #[cfg(feature = "pro")]
@@ -1245,7 +1244,7 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            reject_while_draining::<false>,
+            reject_while_draining,
         ));
 
     #[cfg(feature = "cdc-capture")]
@@ -1259,26 +1258,10 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
         auth::require_api_key,
     ));
 
-    // work-identity:begin
-    #[cfg(feature = "work-identity")]
-    let identity = work_identity::configured_router(Arc::clone(&state)).map(|router| {
-        router.layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            reject_while_draining::<true>,
-        ))
-    });
-    // work-identity:end
     let app = public
         .merge(router)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    // work-identity:begin
-    #[cfg(feature = "work-identity")]
-    let app = match identity {
-        Some(identity) => app.merge(identity),
-        None => app,
-    };
-    // work-identity:end
     if let Some(registry) = host_routes {
         Router::new()
             .fallback_service(app)

@@ -261,6 +261,7 @@ pub(crate) async fn reset_namespace_layer_state(
         #[allow(unused_mut)]
         let mut keys = vec![
             crate::lineage::lineage_key(namespace),
+            vectorstore_core::source_sync::key(namespace),
             crate::routes::collapse::marker_key(namespace),
             // A finished blob move under this name says nothing about a
             // namespace that reuses it.

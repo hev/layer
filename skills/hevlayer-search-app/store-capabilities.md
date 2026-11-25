@@ -2,80 +2,70 @@
 
 # Store capability matrix
 
-Which wire features each backend serves. `no` means the gateway returns
+Which wire features the gateway serves on turbopuffer, the store Community
+Edition runs on. `no` means the gateway returns
 `422 UnsupportedByStore` naming the feature — it is a declared gap, not a bug,
 and not something to work around in the application tier.
 
 `partial` means the feature is served with the limit named in the notes below.
 
-Local Compose runs `pgvector`. The `turbopuffer` column is what the same
-request does once a turbopuffer key is set.
-
-
-| Feature | Docs | pgvector (local) | turbopuffer |
-| --- | --- | --- | --- |
-| Namespace/schema CRUD and listing | [api/namespace-metadata](https://hevlayer.com/docs/api/namespace-metadata) | yes | yes |
-| Row upserts | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Column upserts | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Delete by ID | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Single/batch fetch | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Dense top-k (ANN) | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Cosine / squared-Euclidean distance | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| BM25 text rank | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Explicit native Postgres text fallback | [api/query](https://hevlayer.com/docs/api/query) | no | no |
-| HybridText rank operator (gateway dense + text RRF) | [api/query](https://hevlayer.com/docs/api/query) | partial | yes |
-| Attribute projection (include_attributes / exclude_attributes) | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Eq / NotEq / Gt / Gte / Lt / Lte / In; And / Or | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Not / NotIn filters | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Contains / ContainsAny filters and their Not forms | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Regex filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Other filter operators | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Fuzzy text filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Advanced text rank expressions | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Multi-vector ANN | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Sparse rank | [api/query](https://hevlayer.com/docs/api/query) | no | no |
-| Multiple vector/text fields | [api/query](https://hevlayer.com/docs/api/query) | partial | yes |
-| Multi-query queries body / rerank_by (client-composed hybrid) | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Ranked cursor / searchAfter | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Ordered scans | [api/scans](https://hevlayer.com/docs/api/scans) | yes | yes |
-| Facets | [api/scans](https://hevlayer.com/docs/api/scans) | no | partial |
-| Latest-row relation and scalar aggregates | [api/latest-relation](https://hevlayer.com/docs/api/latest-relation) | no | partial |
-| Aggregates / group_by | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Delete by filter | [api/write](https://hevlayer.com/docs/api/write) | yes | partial |
-| Row patches | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Column patches | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Conditional writes | [api/write](https://hevlayer.com/docs/api/write) | yes | yes |
-| Copy namespace | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
-| Branch namespace | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
-| Vendor encryption controls | [api/write](https://hevlayer.com/docs/api/write) | no | yes |
-| Arrow IPC import | [api/write](https://hevlayer.com/docs/api/write) | no | no |
-| Export formats | [api/scans](https://hevlayer.com/docs/api/scans) | no | yes |
-| Backend warm hints | [api/warm-cache](https://hevlayer.com/docs/api/warm-cache) | no | yes |
-| Backend stability / watermark signals | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Backend snapshot integration | [api/snapshots](https://hevlayer.com/docs/api/snapshots) | no | yes |
-| UDF discovery / writeback primitives | [api/data-supply](https://hevlayer.com/docs/api/data-supply) | no | yes |
-| Arbitrary vendor administrative passthrough | [api/introduction](https://hevlayer.com/docs/api/introduction) | no | yes |
-| Embedding expressions / schema | [api/embed](https://hevlayer.com/docs/api/embed) | partial | yes |
-| Query by stored vector ID | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| as_of / between filters | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Collapse: one result per group (gateway-grouped) | [api/query](https://hevlayer.com/docs/api/query) | yes | yes |
-| Fused leg provenance | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Auto query routing | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Query scatter/gather | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| Wire vector encoding | [api/query](https://hevlayer.com/docs/api/query) | no | yes |
-| One-call search (embed, text legs, RRF, rerank) | [api/search](https://hevlayer.com/docs/api/search) | partial | yes |
+| Feature | Docs | turbopuffer |
+| --- | --- | --- |
+| Namespace/schema CRUD and listing | [api/namespace-metadata](https://hevlayer.com/docs/api/namespace-metadata) | yes |
+| Row upserts | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Column upserts | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Delete by ID | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Single/batch fetch | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Dense top-k (ANN) | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Cosine / squared-Euclidean distance | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| BM25 text rank | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| HybridText rank operator (gateway dense + text RRF) | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Attribute projection (include_attributes / exclude_attributes) | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Eq / NotEq / Gt / Gte / Lt / Lte / In; And / Or | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Not / NotIn filters | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Contains / ContainsAny filters and their Not forms | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Regex filters | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Other filter operators | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Fuzzy text filters | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Advanced text rank expressions | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Multi-vector ANN | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Sparse rank | [api/query](https://hevlayer.com/docs/api/query) | no |
+| Multiple vector/text fields | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Multi-query queries body / rerank_by (client-composed hybrid) | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Ranked cursor / searchAfter | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Ordered scans | [api/scans](https://hevlayer.com/docs/api/scans) | yes |
+| Facets | [api/scans](https://hevlayer.com/docs/api/scans) | partial |
+| Latest-row relation and scalar aggregates | [api/latest-relation](https://hevlayer.com/docs/api/latest-relation) | partial |
+| Aggregates / group_by | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Delete by filter | [api/write](https://hevlayer.com/docs/api/write) | partial |
+| Row patches | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Column patches | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Conditional writes | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Copy namespace | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Branch namespace | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Vendor encryption controls | [api/write](https://hevlayer.com/docs/api/write) | yes |
+| Arrow IPC import | [api/write](https://hevlayer.com/docs/api/write) | no |
+| Export formats | [api/scans](https://hevlayer.com/docs/api/scans) | yes |
+| Backend warm hints | [api/warm-cache](https://hevlayer.com/docs/api/warm-cache) | yes |
+| Backend stability / watermark signals | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Backend snapshot integration | [api/snapshots](https://hevlayer.com/docs/api/snapshots) | yes |
+| UDF discovery / writeback primitives | [api/data-supply](https://hevlayer.com/docs/api/data-supply) | yes |
+| Arbitrary vendor administrative passthrough | [api/introduction](https://hevlayer.com/docs/api/introduction) | yes |
+| Embedding expressions / schema | [api/embed](https://hevlayer.com/docs/api/embed) | yes |
+| Query by stored vector ID | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| as_of / between filters | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Collapse: one result per group (gateway-grouped) | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Fused leg provenance | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Auto query routing | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Query scatter/gather | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| Wire vector encoding | [api/query](https://hevlayer.com/docs/api/query) | yes |
+| One-call search (embed, text legs, RRF, rerank) | [api/search](https://hevlayer.com/docs/api/search) | yes |
 
 ## Notes
 
-- **HybridText rank operator (gateway dense + text RRF)** on pgvector (local): HybridText with fuzziness: 0 only (BM25 + dense legs, gateway RRF); auto/1/2 fuzziness and cursor/temporal_filter return 422
-- **Multiple vector/text fields** on pgvector (local): Any number of full_text_search fields, ranked one at a time by BM25; a second vector field returns 422
-- **Multi-query queries body / rerank_by (client-composed hybrid)** on pgvector (local): 422 for a queries or rerank_by body; hybrid retrieval is the HybridText rank operator
 - **Facets** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
 - **Latest-row relation and scalar aggregates** on turbopuffer: Complete bounded source scan with strong per-page reads; observed consistency only, no snapshot or joins.
 - **Delete by filter** on turbopuffer: Native wire request only; the optional portable adapter primitive is unavailable.
-- **Branch namespace** on pgvector (local): No native namespace branching; the gateway does not emulate one.
-- **Embedding expressions / schema** on pgvector (local): Gateway-resolved embedding only; one embedded attribute per namespace; chunked embedding requires explicit turbopuffer serving (autoscaler alias).
-- **One-call search (embed, text legs, RRF, rerank)** on pgvector (local): BM25 + dense subset: one BM25 leg per full-text attribute, no fuzzy legs (reported in hybrid.dropped_legs).
 
 ## Full-text ranking
 
@@ -84,9 +74,8 @@ BM25-class scoring; tokenization differs; fused order may differ across backends
 ## Reading a 422
 
 ```json
-{"error": "UnsupportedByStore", "store": "pgvector", "route": "/v2/namespaces/x/query", "message": "..."}
+{"error": "UnsupportedByStore", "store": "turbopuffer", "route": "/v2/namespaces/x/query", "message": "..."}
 ```
 
 The gateway never silently drops an unsupported predicate or substitutes a
-different backend. Either pick a supported shape, or move the namespace to a
-backend whose column says `yes`.
+different backend. Pick a supported shape.

@@ -145,6 +145,18 @@ pub async fn get_namespace_metadata(
             layer["description"] = Value::String(description);
         }
     }
+    if state.s3.is_configured() {
+        match vectorstore_core::source_sync::read(state.s3.as_ref(), &namespace).await {
+            Ok(Some(sync)) => {
+                layer["sync"] =
+                    serde_json::to_value(sync).map_err(|e| AppError::Upstream(e.to_string()))?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(namespace = %namespace, error = %error, "failed to load source sync health");
+            }
+        }
+    }
     body.insert("layer".into(), layer);
 
     Ok(Json(Value::Object(body)))

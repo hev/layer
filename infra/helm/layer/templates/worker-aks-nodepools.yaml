@@ -1,0 +1,92 @@
+{{- /*
+cloud: azure worker pools on AKS Node Auto Provisioning (Karpenter for Azure):
+the AKSNodeClass + NodePool twins of worker-karpenter.yaml, with the same
+layer.hev.dev/* labels and taints and the same scale-to-zero behaviour (no
+minimum; empty nodes are consolidated after consolidateAfter).
+*/}}
+{{- if and .Values.workerKarpenter.enabled (include "layer.azure" .) }}
+{{- $root := . -}}
+{{- range $class := list (dict "key" "cpu" "role" "worker-cpu" "compute" "cpu" "values" .Values.workerKarpenter.cpu) (dict "key" "gpu" "role" "worker-gpu" "compute" "gpu" "values" .Values.workerKarpenter.gpu) }}
+{{- $values := $class.values }}
+{{- if ne $values.enabled false }}
+{{- $azure := required (printf "workerKarpenter.%s.azure is required when cloud=azure" $class.key) $values.azure }}
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: {{ $values.nodeClassName }}
+  labels:
+    {{- include "layer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    layer.hev.dev/node-role: {{ $class.role | quote }}
+spec:
+  imageFamily: {{ $root.Values.azure.karpenter.imageFamily | quote }}
+  {{- with $azure.osDiskSizeGB }}
+  osDiskSizeGB: {{ . }}
+  {{- end }}
+  tags:
+    Environment: {{ default $root.Release.Namespace $root.Values.environment | quote }}
+    ManagedBy: karpenter
+    Project: hevlayer
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ $values.nodePoolName }}
+  labels:
+    {{- include "layer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    layer.hev.dev/node-role: {{ $class.role | quote }}
+spec:
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ $root.Values.workerKarpenter.consolidateAfter | quote }}
+    budgets:
+      - nodes: 100%
+  limits:
+    cpu: {{ $values.limits.cpu | quote }}
+    memory: {{ $values.limits.memory | quote }}
+    nodes: {{ $values.limits.nodes | quote }}
+  template:
+    metadata:
+      labels:
+        layer.hev.dev/node-role: {{ $class.role | quote }}
+        layer.hev.dev/compute: {{ $class.compute | quote }}
+    spec:
+      expireAfter: {{ $root.Values.workerKarpenter.expireAfter | quote }}
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: {{ $values.nodeClassName }}
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - {{ $root.Values.workerKarpenter.capacityType | quote }}
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            {{- range (required (printf "workerKarpenter.%s.azure.skus is required when cloud=azure" $class.key) $azure.skus) }}
+            - {{ . | quote }}
+            {{- end }}
+      taints:
+        - key: layer.hev.dev/node-role
+          value: {{ $class.role | quote }}
+          effect: NoSchedule
+{{- if eq $class.compute "gpu" }}
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+{{- end }}
+{{- if ne $class.key "gpu" }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

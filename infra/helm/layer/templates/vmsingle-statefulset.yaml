@@ -26,7 +26,7 @@ spec:
       serviceAccountName: {{ include "layer.serviceAccountName" . }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       containers:

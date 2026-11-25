@@ -15,6 +15,9 @@ pub struct Config {
     pub aerospike_cluster_name: Option<String>,
     /// `None` means no object store is configured: the gateway composes a
     /// noop S3 client instead of walking the AWS credential chain.
+    /// `OBJECT_STORE_URL` (`s3://bucket/prefix` or `az://container/prefix`).
+    /// When set it selects the backend and location; `S3_BUCKET` is ignored.
+    pub object_store_url: Option<String>,
     pub s3_bucket: Option<String>,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
@@ -42,6 +45,8 @@ pub struct Config {
     pub key_pepper: Option<String>,
     /// Fixed-window cap on `/v2/keys/authenticate` calls per minute.
     pub keys_auth_rate_limit_per_min: u32,
+    /// Bundle row ceiling (`LAYER_BUNDLE_MAX_ROWS`), positive; default 100,000.
+    pub bundle_max_rows: usize,
     pub port: u16,
     pub database_url: Option<String>,
     /// Namespaces whose Function paths must never dispatch provider reads.
@@ -187,12 +192,24 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|limit| *limit > 0)
                 .unwrap_or(120),
+            bundle_max_rows: env::var("LAYER_BUNDLE_MAX_ROWS")
+                .ok()
+                .map(|s| {
+                    s.parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .expect("LAYER_BUNDLE_MAX_ROWS must be a positive integer")
+                })
+                .unwrap_or(100_000),
             aerospike_hosts: env::var("AEROSPIKE_HOSTS").ok().and_then(trimmed_non_empty),
             aerospike_namespace: env::var("AEROSPIKE_NAMESPACE")
                 .unwrap_or_else(|_| "hevlayer".to_string()),
             aerospike_set_prefix: env::var("AEROSPIKE_SET_PREFIX")
                 .unwrap_or_else(|_| "tpuf_".to_string()),
             aerospike_cluster_name: env::var("AEROSPIKE_CLUSTER_NAME").ok(),
+            object_store_url: env::var("OBJECT_STORE_URL")
+                .ok()
+                .and_then(trimmed_non_empty),
             s3_bucket: env::var("S3_BUCKET").ok().and_then(trimmed_non_empty),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT").ok(),
@@ -477,24 +494,38 @@ fn default_store_json() -> Option<String> {
 
 #[cfg(not(feature = "pro"))]
 fn default_store_json() -> Option<String> {
-    Some(
-        ce_default_store_json(
-            env::var("TURBOPUFFER_API_KEY").ok().as_deref(),
-            env::var("TPUF_URL").ok().as_deref(),
-            env::var("TURBOPUFFER_REGION").ok().as_deref(),
-            env::var("PGVECTOR_URL").ok().as_deref(),
-        )
-        .to_string(),
-    )
+    match ce_default_store_json(
+        env::var("TURBOPUFFER_API_KEY").ok().as_deref(),
+        env::var("TPUF_URL").ok().as_deref(),
+        env::var("TURBOPUFFER_REGION").ok().as_deref(),
+        env::var("PGVECTOR_URL").ok().as_deref(),
+    ) {
+        Ok(store) => Some(store.to_string()),
+        Err(message) => {
+            // Startup cannot continue without a store. One line on stderr, no
+            // panic backtrace, so `docker compose up` shows exactly what to do.
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
 }
 
+/// The one line a CE gateway prints when it has no store to serve.
+#[cfg(not(feature = "pro"))]
+pub(crate) const CE_MISSING_TURBOPUFFER_KEY: &str = "error: TURBOPUFFER_API_KEY is not set; \
+export TURBOPUFFER_API_KEY=<your turbopuffer API key> and start the gateway again";
+
+/// The CE default store: the user's turbopuffer account. A gateway with no
+/// key and no explicit store refuses to start rather than inventing one.
+/// `PGVECTOR_URL` remains an explicit opt-in for the `pgvector` store kind;
+/// nothing selects it implicitly.
 #[cfg(not(feature = "pro"))]
 fn ce_default_store_json(
     api_key: Option<&str>,
     tpuf_url: Option<&str>,
     region: Option<&str>,
     pgvector_url: Option<&str>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, &'static str> {
     let non_empty = |value: Option<&str>| {
         value
             .map(str::trim)
@@ -512,19 +543,20 @@ fn ce_default_store_json(
                 .unwrap_or_else(|| DEFAULT_TURBOPUFFER_REGION.into())
                 .into();
         }
-        serde_json::json!({"default": {
+        Ok(serde_json::json!({"default": {
             "kind": "turbopuffer",
             "endpoint": endpoint,
             "credential": {"apiKey": key},
             "inboundAuth": {"mode": "deriveFromStore"}
-        }})
-    } else {
-        serde_json::json!({"default": {
+        }}))
+    } else if let Some(url) = non_empty(pgvector_url) {
+        Ok(serde_json::json!({"default": {
             "kind": "pgvector",
-            "endpoint": {"url": non_empty(pgvector_url)
-                .unwrap_or_else(|| "postgresql://layer:local-layer@postgres:5432/layer".into())},
+            "endpoint": {"url": url},
             "inboundAuth": {"mode": "open"}
-        }})
+        }}))
+    } else {
+        Err(CE_MISSING_TURBOPUFFER_KEY)
     }
 }
 
@@ -610,18 +642,51 @@ mod tests {
             Some("invalid-but-set"),
         ] {
             let store = super::ce_default_store_json(key, Some("http://upstream:8081"), None, None);
-            let set = key.is_some_and(|key| !key.trim().is_empty());
-            assert_eq!(
-                store["default"]["kind"],
-                if set { "turbopuffer" } else { "pgvector" }
-            );
-            if set {
+            if key.is_some_and(|key| !key.trim().is_empty()) {
+                let store = store.unwrap();
+                assert_eq!(store["default"]["kind"], "turbopuffer");
                 assert_eq!(store["default"]["credential"]["apiKey"], key.unwrap());
                 assert_eq!(store["default"]["endpoint"]["url"], "http://upstream:8081");
             } else {
-                assert_eq!(store["default"]["inboundAuth"]["mode"], "open");
+                // No silent local fallback: a keyless CE gateway refuses to start.
+                assert_eq!(store.unwrap_err(), super::CE_MISSING_TURBOPUFFER_KEY);
             }
         }
+    }
+
+    #[cfg(not(feature = "pro"))]
+    #[test]
+    fn ce_missing_key_message_is_one_actionable_line() {
+        let message = super::CE_MISSING_TURBOPUFFER_KEY;
+        assert!(!message.contains('\n'));
+        assert!(message.contains("export TURBOPUFFER_API_KEY="));
+    }
+
+    #[cfg(not(feature = "pro"))]
+    #[test]
+    fn ce_pgvector_store_requires_an_explicit_url() {
+        let store = super::ce_default_store_json(
+            Some(" "),
+            None,
+            None,
+            Some("postgresql://layer@db:5432/layer"),
+        )
+        .unwrap();
+        assert_eq!(store["default"]["kind"], "pgvector");
+        assert_eq!(
+            store["default"]["endpoint"]["url"],
+            "postgresql://layer@db:5432/layer"
+        );
+        assert_eq!(store["default"]["inboundAuth"]["mode"], "open");
+        // A key always wins over an explicit pgvector URL.
+        let store = super::ce_default_store_json(
+            Some("tpuf-valid"),
+            None,
+            None,
+            Some("postgresql://layer@db:5432/layer"),
+        )
+        .unwrap();
+        assert_eq!(store["default"]["kind"], "turbopuffer");
     }
 
     #[test]

@@ -8,7 +8,8 @@ use dashmap::DashMap;
 use tracing::{info, warn};
 
 use crate::clients::aerospike::{AerospikeClient, AerospikeRuntime};
-use crate::clients::s3::{AwsS3Client, NoopS3Client, S3Client};
+use crate::clients::s3::{NoopS3Client, ObjectStoreClient, S3Client};
+use vectorstore_core::blob_store::GATEWAY_ENV;
 use crate::clients::search::HttpSearchClient;
 use crate::clients::turbopuffer::{
     HttpTurbopufferClient, RoutingTurbopufferClient, TurbopufferClient,
@@ -74,11 +75,7 @@ pub async fn run_with_options(options: ServerOptions) {
     let config = Config::from_env();
     let mcp_registry = crate::mcp::registry_from_env()
         .unwrap_or_else(|err| panic!("failed to load MCP registry: {err}"));
-    let bind_host = std::env::var("LAYER_BIND_HOST")
-        .unwrap_or_else(|_| "0.0.0.0".into())
-        .parse::<std::net::IpAddr>()
-        .expect("LAYER_BIND_HOST must be an IP address");
-    let addr = SocketAddr::new(bind_host, config.port);
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let metrics = Arc::new(LayerMetrics::new());
     let telemetry_counters = Arc::new(TelemetryCounters::default());
 
@@ -268,19 +265,19 @@ pub async fn run_with_options(options: ServerOptions) {
     info!("Document cache disabled in public gateway composition");
     let aerospike: Arc<dyn AerospikeClient> = aerospike_runtime.clone();
 
-    let s3_inner: Arc<dyn S3Client> = match config.s3_bucket.as_deref() {
-        Some(bucket) => Arc::new(
-            AwsS3Client::new(bucket, &config.s3_region, config.s3_endpoint.as_deref()).await,
-        ),
+    let s3_inner: Arc<dyn S3Client> = match ObjectStoreClient::from_env(GATEWAY_ENV)
+        .unwrap_or_else(|error| panic!("object store configuration refused: {error}"))
+    {
+        Some(client) => Arc::new(client),
         None => {
             if config.s3_endpoint.is_some() {
                 warn!(
-                    "S3_ENDPOINT is set but S3_BUCKET is not; ignoring the endpoint and \
-                     running without an object store"
+                    "S3_ENDPOINT is set but neither OBJECT_STORE_URL nor S3_BUCKET is; ignoring \
+                     the endpoint and running without an object store"
                 );
             }
             info!(
-                "S3_BUCKET is unset; object store disabled — snapshots, search history, \
+                "OBJECT_STORE_URL and S3_BUCKET are unset; object store disabled — snapshots, search history, \
                  checkpoints, and blobs over the store's cap degrade or report \"object store not configured\""
             );
             Arc::new(NoopS3Client)
@@ -321,6 +318,7 @@ pub async fn run_with_options(options: ServerOptions) {
         Arc::new(crate::agent::DisabledAgentProvider);
 
     let state = Arc::new(AppState {
+        bundle_max_rows: config.bundle_max_rows,
         worker_embedders: Arc::new(Default::default()),
         draining: Arc::new(AtomicBool::new(false)),
         drain_marker_path: config.drain_marker_path.clone(),
@@ -444,7 +442,7 @@ pub async fn run_with_options(options: ServerOptions) {
     let _purge_worker = crate::namespace_purge::spawn_worker(&state);
     let app = crate::build_router_with_mcp(state, mcp_registry);
 
+    info!(addr = %addr, "Hevlayer gateway starting");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    info!(addr = %listener.local_addr().unwrap(), "Hevlayer gateway listening");
     axum::serve(listener, app).await.unwrap();
 }

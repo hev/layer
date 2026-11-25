@@ -138,7 +138,7 @@ spec:
       serviceAccountName: {{ include "layer.fullname" . }}-local-path-provisioner
       priorityClassName: system-node-critical
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       containers:

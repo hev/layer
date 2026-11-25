@@ -2,6 +2,28 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type BundleRequest struct {
+	Filters []interface{} `json:"filters"`
+	IncludeAttributes []string `json:"include_attributes"`
+	MaxRows int64 `json:"max_rows"`
+}
+
+type EdgeBundle struct {
+	Content string `json:"content"`
+	Manifest BundleManifest `json:"manifest"`
+}
+
+type BundleManifest struct {
+	Version string `json:"version"`
+	Namespace string `json:"namespace"`
+	StableAsOf int64 `json:"stable_as_of"`
+	Consistency string `json:"consistency"`
+	RowCount int64 `json:"row_count"`
+	Schema map[string]interface{} `json:"schema"`
+	Tokenizers map[string]string `json:"tokenizers"`
+	ContentHash string `json:"content_hash"`
+}
+
 type ProjectedSourceRequest struct {
 	IncludeAttributes []string `json:"include_attributes"`
 	Scan map[string]interface{} `json:"scan"`
@@ -1241,7 +1263,17 @@ type FieldStat struct {
 	ApproximateSince int64 `json:"approximate_since,omitempty"`
 }
 
+type NamespaceSyncHealth struct {
+	LastSuccessAt *string `json:"last_success_at"`
+	LastAttemptAt string `json:"last_attempt_at"`
+	LastStatus string `json:"last_status"`
+	RowsSeen int64 `json:"rows_seen"`
+	SourceKind string `json:"source_kind"`
+	Pipeline string `json:"pipeline"`
+}
+
 type NamespaceMetadataLayer struct {
+	Sync NamespaceSyncHealth `json:"sync,omitempty"`
 	Title string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
 	FieldStats NamespaceFieldStats `json:"field_stats,omitempty"`
@@ -1520,6 +1552,86 @@ type SearchPerformance struct {
 	L1Ms int64 `json:"l1_ms"`
 	RerankMs int64 `json:"rerank_ms"`
 	TotalMs int64 `json:"total_ms"`
+}
+
+type ArchiveExportRequest struct {
+	Namespace string `json:"namespace"`
+	Store string `json:"store,omitempty"`
+	DistanceMetric string `json:"distanceMetric,omitempty"`
+	Resume string `json:"resume,omitempty"`
+}
+
+type ArchiveRestoreRequest struct {
+	Namespace string `json:"namespace"`
+	Store string `json:"store,omitempty"`
+}
+
+type ArchiveRunPhase struct {
+	Name string `json:"name"`
+	Seconds float64 `json:"seconds"`
+	Detail map[string]interface{} `json:"detail,omitempty"`
+}
+
+type ArchiveRun struct {
+	ID string `json:"id"`
+	Kind string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Store string `json:"store"`
+	State string `json:"state"`
+	StartedAt string `json:"startedAt"`
+	HeartbeatAt string `json:"heartbeatAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Error string `json:"error,omitempty"`
+	Phases []ArchiveRunPhase `json:"phases,omitempty"`
+	Rows int64 `json:"rows,omitempty"`
+	Checkpoint map[string]interface{} `json:"checkpoint,omitempty"`
+	Result map[string]interface{} `json:"result,omitempty"`
+}
+
+type ArchiveTable struct {
+	Format string `json:"format"`
+	Location string `json:"location"`
+	MetadataVersion int64 `json:"metadataVersion"`
+	SnapshotID int64 `json:"snapshotId"`
+	CompactedSeq int64 `json:"compactedSeq"`
+	RowCount int64 `json:"rowCount"`
+	LogicalBytes int64 `json:"logicalBytes"`
+}
+
+type ArchiveEngine struct {
+	Store string `json:"store"`
+	Kind string `json:"kind"`
+	EngineVersion string `json:"engineVersion"`
+	AppliedSeq int64 `json:"appliedSeq"`
+	LoadedAt string `json:"loadedAt"`
+	LoadedFromSnapshot int64 `json:"loadedFromSnapshot"`
+}
+
+type ArchiveManifestSummary struct {
+	FormatVersion int64 `json:"formatVersion"`
+	Incarnation string `json:"incarnation"`
+	CreatedAt string `json:"createdAt"`
+	Mode string `json:"mode"`
+	SchemaVersion int64 `json:"schemaVersion"`
+	Attributes int64 `json:"attributes"`
+	Vectors map[string]interface{} `json:"vectors"`
+	Table ArchiveTable `json:"table,omitempty"`
+	Engines []ArchiveEngine `json:"engines"`
+	DeletedAt string `json:"deletedAt,omitempty"`
+}
+
+type ArchiveNamespace struct {
+	Namespace string `json:"namespace"`
+	Archived bool `json:"archived"`
+	ManifestUrl string `json:"manifestUrl"`
+	Manifest ArchiveManifestSummary `json:"manifest,omitempty"`
+	Runs []ArchiveRun `json:"runs"`
+}
+
+type ArchiveLicenseRequired struct {
+	Error string `json:"error"`
+	Feature string `json:"feature"`
+	RenewalUrl string `json:"renewal_url,omitempty"`
 }
 
 type Error struct {
@@ -1817,6 +1929,7 @@ type ApiKeyEntitlement struct {
 	Scopes []string `json:"scopes,omitempty"`
 	Namespaces []string `json:"namespaces,omitempty"`
 	Claims []string `json:"claims,omitempty"`
+	SecretRef *SecretKeyRef `json:"secretRef,omitempty"`
 }
 
 type ApiKeyEntitlements map[string]ApiKeyEntitlement
@@ -1874,4 +1987,13 @@ type AuthenticateKeyResponse struct {
 	Owner string `json:"owner,omitempty"`
 	Entitlements ApiKeyEntitlements `json:"entitlements"`
 	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+type VerifyKeyResponse struct {
+	KeyID string `json:"keyId"`
+	Name string `json:"name"`
+	Owner string `json:"owner,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	IssuerKeyID string `json:"issuerKeyId,omitempty"`
+	Entitlements ApiKeyEntitlements `json:"entitlements"`
 }

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod blob_store;
 pub mod capabilities;
 pub mod delete_timing;
 pub mod document_cache;
@@ -16,3 +17,5 @@ pub mod search;
 pub mod search_profile;
 pub mod turbopuffer;
 pub mod vector_store;
+
+pub mod source_sync;

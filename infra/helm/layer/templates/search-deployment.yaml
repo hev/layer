@@ -1,4 +1,7 @@
 {{- if .Values.search.enabled }}
+{{- if include "layer.azure" . }}
+{{- fail "search.enabled is not supported with cloud=azure: hev search reads S3 only." }}
+{{- end }}
 {{- if not (.Values.search.image | default "" | trim) }}
 {{- fail "search.image is required when search.enabled=true; use the mesh-account ECR image, never ghcr.io/hev/*." }}
 {{- end }}
@@ -40,7 +43,7 @@ spec:
       serviceAccountName: {{ include "layer.serviceAccountName" . }}
       {{- include "layer.priorityClassName" (dict "root" $ "tier" "platform") | nindent 6 }}
       nodeSelector:
-        {{- include "layer.nodeSelector" (dict "role" "system") | nindent 8 }}
+        {{- include "layer.nodeSelector" (dict "root" $ "role" "system") | nindent 8 }}
       tolerations:
         {{- include "layer.roleToleration" (dict "role" "system") | nindent 8 }}
       containers:
