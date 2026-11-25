@@ -74,7 +74,11 @@ pub async fn run_with_options(options: ServerOptions) {
     let config = Config::from_env();
     let mcp_registry = crate::mcp::registry_from_env()
         .unwrap_or_else(|err| panic!("failed to load MCP registry: {err}"));
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let bind_host = std::env::var("LAYER_BIND_HOST")
+        .unwrap_or_else(|_| "0.0.0.0".into())
+        .parse::<std::net::IpAddr>()
+        .expect("LAYER_BIND_HOST must be an IP address");
+    let addr = SocketAddr::new(bind_host, config.port);
     let metrics = Arc::new(LayerMetrics::new());
     let telemetry_counters = Arc::new(TelemetryCounters::default());
 
@@ -440,7 +444,7 @@ pub async fn run_with_options(options: ServerOptions) {
     let _purge_worker = crate::namespace_purge::spawn_worker(&state);
     let app = crate::build_router_with_mcp(state, mcp_registry);
 
-    info!(addr = %addr, "Hevlayer gateway starting");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    info!(addr = %listener.local_addr().unwrap(), "Hevlayer gateway listening");
     axum::serve(listener, app).await.unwrap();
 }
