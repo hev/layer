@@ -203,6 +203,9 @@ gateway:
     preStopSleepSeconds: 20
     terminationGracePeriodSeconds: 75
   nodeRole: infra
+  workIdentity:
+    # Enable once the work identity schema and the gateway Secret are ready.
+    enabled: false
   queue:
     segmentSize: 10000
     # RFC 0001: postgres is gateway-internal scratch state, not a product

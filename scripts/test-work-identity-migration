@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+container=${1:?disposable Postgres container required}
+sql() {
+    timeout 30 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres "$@"
+}
+expect_failure() {
+    local expected=$1 output
+    shift
+    if output=$("$@" 2>&1) || [[ $output != *"$expected"* ]]; then
+        printf 'Expected migration refusal: %s\n%s\n' "$expected" "$output" >&2
+        exit 1
+    fi
+}
+
+sql <<'SQL'
+CREATE ROLE identity_owner NOLOGIN NOINHERIT;
+CREATE ROLE identity_runtime LOGIN NOINHERIT;
+CREATE TABLE public.work_identity_workspace (trap text);
+CREATE SCHEMA kitchen_fixture;
+CREATE TABLE kitchen_fixture.unrelated (id int);
+SQL
+
+directory=/tmp/work-identity
+migrate() {
+    sql -v identity_owner=identity_owner -f "$directory/001.sql"
+}
+
+# Inject a failure into the production entry point after relation DDL and
+# before the ledger is written.
+sed '/^CREATE TABLE work_identity.schema_migrations/i SELECT 1 / 0;' \
+    apps/layer-gateway/migrations/work-identity/001.sql |
+    timeout 10 docker exec -i "$container" sh -c 'cat > /tmp/work-identity/injected-failure.sql'
+expect_failure 'division by zero' sql -v identity_owner=identity_owner -f "$directory/injected-failure.sql"
+[[ $(sql -Atc "SELECT to_regnamespace('work_identity') IS NULL") == t ]]
+
+sql -c 'CREATE SCHEMA work_identity AUTHORIZATION identity_owner'
+expect_failure 'work identity schema has no migration ledger' migrate
+sql -c 'DROP SCHEMA work_identity'
+migrate
+migrate
+sql -c 'ALTER TABLE work_identity.work_identity_workspace ADD COLUMN unexpected text'
+expect_failure 'incompatible work identity schema or migration version' migrate
+sql -c 'ALTER TABLE work_identity.work_identity_workspace DROP COLUMN unexpected'
+sql -c 'UPDATE work_identity.schema_migrations SET version = 2'
+expect_failure 'incompatible work identity schema or migration version' migrate
+sql -c 'UPDATE work_identity.schema_migrations SET version = 1'
+migrate
+
+sql -v workspace_id=10000000-0000-4000-8000-000000000001 -v workspace_label=hev \
+    -f "$directory/seed-workspace.sql"
+sql -v workspace_id=10000000-0000-4000-8000-000000000001 -v workspace_label=hev \
+    -f "$directory/seed-workspace.sql"
+expect_failure 'no rows returned' sql -v workspace_id=10000000-0000-4000-8000-000000000001 \
+    -v workspace_label=other -f "$directory/seed-workspace.sql"
+sql -v workspace_id=10000000-0000-4000-8000-000000000002 -v workspace_label=other \
+    -f "$directory/seed-workspace.sql"
+
+# Fail closed when unrelated access is inherited via PUBLIC.
+grant_runtime() {
+    sql -v runtime_role=identity_runtime -c 'SET ROLE identity_owner' -f "$directory/runtime-grants.sql"
+}
+sql -c 'GRANT SELECT ON public.work_identity_workspace TO PUBLIC'
+expect_failure 'unexpected effective privileges' grant_runtime
+sql -c 'REVOKE SELECT ON public.work_identity_workspace FROM PUBLIC'
+sql -c 'GRANT UPDATE (label) ON work_identity.work_identity_workspace TO identity_runtime'
+expect_failure 'unexpected effective privileges' grant_runtime
+sql -c 'REVOKE UPDATE (label) ON work_identity.work_identity_workspace FROM identity_runtime'
+sql -c 'GRANT SELECT (fingerprint) ON work_identity.schema_migrations TO PUBLIC'
+expect_failure 'unexpected effective privileges' grant_runtime
+sql -c 'REVOKE SELECT (fingerprint) ON work_identity.schema_migrations FROM PUBLIC'
+sql -c 'GRANT SELECT (id) ON work_identity.work_identity_workspace TO identity_runtime WITH GRANT OPTION'
+expect_failure 'unexpected effective privileges' grant_runtime
+sql -c 'REVOKE SELECT (id) ON work_identity.work_identity_workspace FROM identity_runtime'
+grant_runtime
+
+# The approved runtime works with the provider's default PUBLIC ACLs.
+# Exercise the residual capability only in this disposable transaction.
+[[ $(sql -qAt <<'SQL'
+BEGIN;
+SET LOCAL ROLE identity_runtime;
+SELECT pg_catalog.lo_create(0) > 0;
+ROLLBACK;
+SQL
+) == t ]]
+
+sql <<'SQL'
+SET SESSION AUTHORIZATION identity_runtime;
+SET search_path = public, pg_temp;
+CREATE TEMP TABLE work_identity_workspace (trap text);
+INSERT INTO pg_temp.work_identity_workspace VALUES ('shadow');
+DO $test$
+BEGIN
+    IF (SELECT label FROM work_identity.work_identity_workspace
+        WHERE id = '10000000-0000-4000-8000-000000000001') IS DISTINCT FROM 'hev'
+    THEN
+        RAISE EXCEPTION 'qualified workspace lookup reached a shadow';
+    END IF;
+END
+$test$;
+SQL
+expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; SELECT * FROM public.work_identity_workspace'
+expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; SELECT * FROM kitchen_fixture.unrelated'
+expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; CREATE TABLE public.denied (id int)'
+expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; CREATE SCHEMA denied'
+expect_failure 'must be owner' sql -c 'SET ROLE identity_runtime; DROP TABLE work_identity.work_identity_workspace'
+expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; DELETE FROM work_identity.work_identity_workspace'
+expect_failure 'permission denied' sql -c "SET ROLE identity_runtime; UPDATE work_identity.work_identity_workspace SET label = 'wrong'"

@@ -433,6 +433,15 @@ spec:
             {{- with include "layer.objectStoreEnv" . }}
             {{- . | trim | nindent 12 }}
             {{- end }}
+            {{- if (dig "workIdentity" "enabled" false .Values.gateway) }}
+            - name: LAYER_WORK_IDENTITY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: layer-work-identity-db
+                  key: url
+            - name: LAYER_WORK_IDENTITY_REQUIRE_TLS
+              value: "true"
+            {{- end }}
             {{- if .Values.gateway.queue.embedded }}
             - name: DATABASE_URL
               value: "postgres://{{ .Values.gateway.queue.postgres.user }}@127.0.0.1:5432/{{ .Values.gateway.queue.postgres.database }}"
