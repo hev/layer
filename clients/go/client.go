@@ -2459,6 +2459,24 @@ func (client *Client) PromoteUdfCandidateWithPerf(ctx context.Context, udfID str
 }
 
 
+func (client *Client) ProvisionWorkIdentityWorkspace(ctx context.Context, body *WorkIdentityWorkspace, options ...RequestOption) (*WorkIdentityWorkspace, error) {
+	out := WorkIdentityWorkspace{}
+	if _, err := client.request(ctx, "POST", "/v1/work-identity/workspaces", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ProvisionWorkIdentityWorkspaceWithPerf(ctx context.Context, body *WorkIdentityWorkspace, options ...RequestOption) (*LayerResponse[WorkIdentityWorkspace], error) {
+	out := WorkIdentityWorkspace{}
+	perf, err := client.request(ctx, "POST", "/v1/work-identity/workspaces", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[WorkIdentityWorkspace]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) PutBlob(ctx context.Context, namespace string, body []byte, params *PutBlobParams, options ...RequestOption) (*BlobPutResponse, error) {
 	query, err := params.query()
 	if err != nil {

@@ -57,6 +57,18 @@ expect_failure 'no rows returned' sql -v workspace_id=10000000-0000-4000-8000-00
 sql -v workspace_id=10000000-0000-4000-8000-000000000002 -v workspace_label=other \
     -f "$directory/seed-workspace.sql"
 
+upgrade() {
+    sql -v identity_owner=identity_owner -f "$directory/002.sql"
+}
+sql -c "INSERT INTO work_identity.work_identity_workspace (id,label) VALUES ('10000000-0000-4000-8000-000000000003','hev')"
+expect_failure 'work_identity_workspace_label_key' upgrade
+[[ $(sql -Atc 'SELECT version FROM work_identity.schema_migrations') == 1 ]]
+sql -c "DELETE FROM work_identity.work_identity_workspace WHERE id = '10000000-0000-4000-8000-000000000003'"
+upgrade
+upgrade
+migrate
+[[ $(sql -Atc 'SELECT version FROM work_identity.schema_migrations') == 2 ]]
+
 # Fail closed when unrelated access is inherited via PUBLIC.
 grant_runtime() {
     sql -v runtime_role=identity_runtime -c 'SET ROLE identity_owner' -f "$directory/runtime-grants.sql"
@@ -73,6 +85,10 @@ sql -c 'REVOKE SELECT (fingerprint) ON work_identity.schema_migrations FROM PUBL
 sql -c 'GRANT SELECT (id) ON work_identity.work_identity_workspace TO identity_runtime WITH GRANT OPTION'
 expect_failure 'unexpected effective privileges' grant_runtime
 sql -c 'REVOKE SELECT (id) ON work_identity.work_identity_workspace FROM identity_runtime'
+sql -c 'GRANT INSERT (next_change) ON work_identity.work_identity_workspace TO identity_runtime'
+expect_failure 'unexpected effective privileges' grant_runtime
+sql -c 'REVOKE INSERT (next_change) ON work_identity.work_identity_workspace FROM identity_runtime'
+grant_runtime
 grant_runtime
 
 # The approved runtime works with the provider's default PUBLIC ACLs.
@@ -107,3 +123,13 @@ expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; CREATE SCH
 expect_failure 'must be owner' sql -c 'SET ROLE identity_runtime; DROP TABLE work_identity.work_identity_workspace'
 expect_failure 'permission denied' sql -c 'SET ROLE identity_runtime; DELETE FROM work_identity.work_identity_workspace'
 expect_failure 'permission denied' sql -c "SET ROLE identity_runtime; UPDATE work_identity.work_identity_workspace SET label = 'wrong'"
+
+expect_failure 'permission denied' sql -c 'SET SESSION AUTHORIZATION identity_runtime; SET ROLE identity_owner'
+expect_failure 'permission denied' sql -c "SET ROLE identity_runtime; INSERT INTO work_identity.work_identity_workspace (id,label,next_ordinal) VALUES (gen_random_uuid(),'bad',2)"
+sql <<'SQL'
+BEGIN;
+SET LOCAL ROLE identity_runtime;
+INSERT INTO work_identity.work_identity_workspace (id, label)
+VALUES (gen_random_uuid(), 'test-runtime');
+ROLLBACK;
+SQL

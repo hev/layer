@@ -3,15 +3,25 @@
 The opt-in Layer Pro API uses PlanetScale Postgres for hosted identity. Kit,
 agents and workers use the same authenticated HTTP API with hosted or local
 Layer. The test stack installs an isolated schema and seeds workspace grants.
-Deployment and workspace provisioning are separate from this slice.
+Hosted workspace provisioning uses the authenticated Pro endpoint below.
 
 The namespace is `work-<workspace UUID>`. Clients need a minted key with an
 explicit grant for that namespace on its routed Layer store. In Pro, a Layer
 administrator provisions the `work-identity` claim on that store entitlement
-alongside the exact namespace and required read or write scope. Delegated
-vector-store minters cannot issue claims. In CE, the local identity grant file
+alongside the exact namespace and required read or write scope. A minter with
+the claim on that store can delegate it to a read/write key restricted to a
+single canonical `work-<UUID>` namespace within its mint prefix. In CE, the local identity grant file
 supplies the store, exact namespace and scopes. Both adapters check grants
 before database access. Use bearer credentials in the Authorization header.
+
+In Pro, POST to `/v1/work-identity/workspaces` with a JSON object containing
+`workspace_id` (UUID) and `label` (matching `[a-z][a-z0-9-]{0,31}`). The
+bearer key needs `mint` or `admin` scope and the `work-identity` claim on the
+routed vectorstore entitlement. Its namespace grant must cover
+`work-<workspace_id>`. This endpoint returns 200 with the UUID and label on
+creation or an identical replay. Replays preserve allocation counters. A
+different label for the same UUID or a label already bound to another UUID
+returns 409. A valid key outside the grant receives 404.
 
 POST to `/v2/namespaces/{namespace}/work-identity` to write and
 `/v2/namespaces/{namespace}/work-identity/query` to read. Bodies are JSON

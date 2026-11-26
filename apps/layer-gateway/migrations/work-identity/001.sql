@@ -62,6 +62,9 @@ LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$
 $$;
 
 \if :clean_install
+\if :{?work_identity_upgrade_v2}
+DO $$ BEGIN RAISE EXCEPTION 'apply work identity 001.sql before 002.sql'; END $$;
+\endif
 REVOKE ALL ON SCHEMA work_identity FROM PUBLIC;
 \ir 001-relations.sql
 CREATE TABLE work_identity.schema_migrations (
@@ -86,12 +89,29 @@ BEGIN
     END IF;
     IF (SELECT count(*) FROM work_identity.schema_migrations) <> 1 OR NOT EXISTS (
         SELECT 1 FROM work_identity.schema_migrations
-        WHERE version = 1 AND fingerprint = pg_temp.identity_fingerprint()
+        WHERE version IN (1, 2) AND fingerprint = pg_temp.identity_fingerprint()
+          AND (version = 2) = EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conrelid = to_regclass('work_identity.work_identity_workspace')
+                AND conname = 'work_identity_workspace_label_key' AND contype = 'u'
+          )
     ) THEN
         RAISE EXCEPTION 'incompatible work identity schema or migration version';
     END IF;
 END
 $verify$;
+\endif
+\if :{?work_identity_upgrade_v2}
+SELECT version = 1 AS upgrade_required FROM work_identity.schema_migrations \gset
+\if :upgrade_required
+ALTER TABLE work_identity.work_identity_workspace
+    DROP CONSTRAINT work_identity_workspace_label_check,
+    ADD CONSTRAINT work_identity_workspace_label_check CHECK (label COLLATE "C" ~ '^[a-z][a-z0-9-]{0,31}$'),
+    ADD CONSTRAINT work_identity_workspace_label_key UNIQUE (label);
+UPDATE work_identity.schema_migrations
+SET version = 2, fingerprint = pg_temp.identity_fingerprint()
+WHERE version = 1;
+\endif
 \endif
 DROP FUNCTION pg_temp.identity_fingerprint();
 COMMIT;

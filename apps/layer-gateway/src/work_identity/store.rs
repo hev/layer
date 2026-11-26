@@ -94,16 +94,20 @@ pub(super) async fn query(pool: &PgPool, workspace: Uuid, query: Query) -> Resul
     Ok(value)
 }
 
-fn valid_address(address: &str) -> bool {
-    let Some((label, segments)) = address.split_once('-') else {
-        return false;
-    };
-    address.len() <= 148
-        && (1..=16).contains(&label.len())
+pub(super) fn valid_label(label: &str) -> bool {
+    (1..=32).contains(&label.len())
         && label.as_bytes()[0].is_ascii_lowercase()
         && label
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_address(address: &str) -> bool {
+    let Some((label, segments)) = address.rsplit_once('-') else {
+        return false;
+    };
+    address.len() <= 164
+        && valid_label(label)
         && segments
             .split('.')
             .take(MAX_DEPTH + 1)

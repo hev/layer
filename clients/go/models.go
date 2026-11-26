@@ -2,6 +2,11 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type WorkIdentityWorkspace struct {
+	WorkspaceID string `json:"workspace_id"`
+	Label string `json:"label"`
+}
+
 type BundleRequest struct {
 	Filters []interface{} `json:"filters"`
 	IncludeAttributes []string `json:"include_attributes"`

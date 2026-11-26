@@ -32,6 +32,7 @@ CREATE TEMP TABLE identity_column_grants (
 INSERT INTO pg_temp.identity_column_grants VALUES
     ('schema_migrations', 'SELECT', '{version}'),
     ('work_identity_workspace', 'SELECT', '{id,label,next_ordinal,next_change}'),
+    ('work_identity_workspace', 'INSERT', '{id,label}'),
     ('work_identity_workspace', 'UPDATE', '{next_ordinal,next_change}'),
     ('work_identity_ask', 'SELECT', '{workspace,id,ordinal,body}'),
     ('work_identity_ask', 'INSERT', '{workspace,id,ordinal,body}'),

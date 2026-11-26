@@ -51,7 +51,7 @@ fn configured_pool() -> Option<Database> {
                     .execute(&mut *connection)
                     .await?;
                 let compatible: bool = sqlx::query_scalar(
-                    "SELECT count(version) = 1 AND min(version) = 1
+                    "SELECT count(version) = 1 AND min(version) IN (1, 2)
                      FROM work_identity.schema_migrations",
                 )
                 .fetch_one(connection)
@@ -71,13 +71,17 @@ fn configured_pool() -> Option<Database> {
 pub(super) fn configured_router(state: Arc<AppState>) -> Option<Router> {
     let database = configured_pool()?;
     let auth = Authorization::new(state);
+    let router = Router::new()
+        .route(WRITE_ROUTE, post(write))
+        .route(QUERY_ROUTE, post(query))
+        .layer(axum::middleware::from_fn_with_state(
+            auth.clone(),
+            authorize,
+        ));
     Some(
-        Router::new()
-            .route(WRITE_ROUTE, post(write))
-            .route(QUERY_ROUTE, post(query))
+        router
             .layer(DefaultBodyLimit::max(4096))
-            .layer(Extension(database))
-            .layer(axum::middleware::from_fn_with_state(auth, authorize)),
+            .layer(Extension(database)),
     )
 }
 
@@ -92,13 +96,7 @@ async fn authorize(
     } else {
         ApiScope::Write
     };
-    let key = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| token.len() <= 256)
-        .and_then(|token| auth.authenticate(token));
+    let key = bearer(request.headers()).and_then(|token| auth.authenticate(token));
     let Some(key) = key else {
         return Failure::Unauthorized.into_response();
     };
@@ -117,6 +115,15 @@ async fn authorize(
     }
     request.extensions_mut().insert(workspace);
     next.run(request).await
+}
+
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| token.len() <= 256)
 }
 
 #[derive(Debug)]

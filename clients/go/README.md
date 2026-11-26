@@ -98,6 +98,7 @@ and pipeline/scan/warm-cache helper methods.
 - `MintKey`
 - `PauseUdf`
 - `PromoteUdfCandidate`
+- `ProvisionWorkIdentityWorkspace`
 - `PutBlob`
 - `PutPipelineDocumentChunks`
 - `PutPipelineDocumentRows`
