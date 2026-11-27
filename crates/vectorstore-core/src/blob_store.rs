@@ -17,17 +17,22 @@
 //! `AZURE_STORAGE_ENDPOINT` overrides the account endpoint otherwise.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use object_store::{
-    aws::{AmazonS3Builder, S3ConditionalPut},
+    aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut},
     azure::MicrosoftAzureBuilder,
     path::Path,
+    signer::Signer,
     ObjectMeta, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
 
-use crate::s3::{S3Client, S3Error, WitnessObject, WitnessObjectStore};
+use crate::s3::{
+    PresignedPut, S3Client, S3Error, WitnessObject, WitnessObjectStore,
+    STAGED_UPLOAD_NOT_CONFIGURED,
+};
 
 /// Selects the backend and location of durable state.
 pub const OBJECT_STORE_URL_ENV: &str = "OBJECT_STORE_URL";
@@ -184,6 +189,7 @@ impl LegacyEnv {
 pub struct ObjectStoreClient {
     store: Arc<dyn ObjectStore>,
     location: ObjectStoreUrl,
+    staging: Option<(Arc<AmazonS3>, String)>,
 }
 
 impl ObjectStoreClient {
@@ -223,16 +229,26 @@ impl ObjectStoreClient {
     }
 
     pub fn new(location: ObjectStoreUrl, s3: &S3Settings) -> Result<Self, S3Error> {
+        let mut staging = None;
         let store: Arc<dyn ObjectStore> = match location.backend {
             Backend::S3 => {
                 let mut builder = AmazonS3Builder::from_env()
                     .with_bucket_name(&location.bucket)
                     .with_conditional_put(S3ConditionalPut::ETagMatch);
-                if let Some(region) = &s3.region {
+                let configured_region = s3
+                    .region
+                    .clone()
+                    .or_else(|| builder.get_config_value(&AmazonS3ConfigKey::Region));
+                let endpoint = builder
+                    .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
+                    .or_else(|| s3.endpoint.clone())
+                    .or_else(|| builder.get_config_value(&AmazonS3ConfigKey::Endpoint));
+                let staging_region =
+                    resolve_staging_region(configured_region.as_deref(), endpoint.as_deref());
+                // Preserve the legacy default for ordinary object-store operations.
+                if let Some(region) = configured_region.as_ref().or(staging_region.as_ref()) {
                     builder = builder.with_region(region);
-                } else if std::env::var("AWS_REGION").is_err()
-                    && std::env::var("AWS_DEFAULT_REGION").is_err()
-                {
+                } else {
                     builder = builder.with_region("us-east-1");
                 }
                 if let Some(endpoint) = &s3.endpoint {
@@ -241,7 +257,9 @@ impl ObjectStoreClient {
                         .with_virtual_hosted_style_request(false)
                         .with_allow_http(endpoint.starts_with("http://"));
                 }
-                Arc::new(builder.build().map_err(store_error)?)
+                let client = Arc::new(builder.build().map_err(store_error)?);
+                staging = staging_region.map(|region| (client.clone(), region));
+                client
             }
             Backend::Azure => Arc::new(
                 MicrosoftAzureBuilder::from_env()
@@ -250,12 +268,20 @@ impl ObjectStoreClient {
                     .map_err(store_error)?,
             ),
         };
-        Ok(Self { store, location })
+        Ok(Self {
+            store,
+            location,
+            staging,
+        })
     }
 
     /// Wrap an existing store (tests, or a store built elsewhere).
     pub fn from_store(store: Arc<dyn ObjectStore>, location: ObjectStoreUrl) -> Self {
-        Self { store, location }
+        Self {
+            store,
+            location,
+            staging: None,
+        }
     }
 
     pub fn location(&self) -> &ObjectStoreUrl {
@@ -271,6 +297,7 @@ impl ObjectStoreClient {
         Self {
             store: self.store.clone(),
             location: self.location.child(segment),
+            staging: self.staging.clone(),
         }
     }
 
@@ -368,6 +395,118 @@ impl ObjectStoreClient {
     }
 }
 
+fn resolve_staging_region(explicit: Option<&str>, endpoint: Option<&str>) -> Option<String> {
+    let endpoint = endpoint.and_then(|value| reqwest::Url::parse(value).ok());
+    let inferred = endpoint.as_ref().and_then(|url| {
+        let host = url.host_str()?;
+        let host = host
+            .strip_suffix(".amazonaws.com.cn")
+            .or_else(|| host.strip_suffix(".amazonaws.com"))?;
+        let mut labels = host.rsplit('.');
+        let last = labels.next()?;
+        let region = if let Some(region) = last.strip_prefix("s3-") {
+            region
+        } else {
+            let service = match labels.next()? {
+                "dualstack" => labels.next()?,
+                service => service,
+            };
+            if service != "s3" {
+                return None;
+            }
+            last
+        };
+        region
+            .rsplit_once('-')
+            .filter(|(prefix, suffix)| {
+                prefix.contains('-')
+                    && !suffix.is_empty()
+                    && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .map(|_| region)
+    });
+    match (explicit, inferred) {
+        (Some(a), Some(b)) if a != b => None,
+        (Some(region), _) | (None, Some(region)) => Some(region.into()),
+        (None, None) => None,
+    }
+}
+
+fn sign_create_put(
+    mut url: reqwest::Url,
+    region: &str,
+    credential: &object_store::aws::AwsCredential,
+    size: usize,
+    sha256: [u8; 32],
+    now: SystemTime,
+    ttl: Duration,
+) -> Result<PresignedPut, S3Error> {
+    use aws_credential_types::Credentials;
+    use aws_sigv4::http_request::{
+        sign, PercentEncodingMode, SignableBody, SignableRequest, SignatureLocation,
+        SigningSettings, UriPathNormalizationMode,
+    };
+    use aws_sigv4::sign::v4;
+    use base64::Engine;
+
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.scheme(), "http" | "https")
+    {
+        return Err(S3Error("invalid S3 signing endpoint".into()));
+    }
+    let headers: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::from([
+        ("content-length".into(), size.to_string()),
+        ("content-type".into(), "application/octet-stream".into()),
+        ("if-none-match".into(), "*".into()),
+        (
+            "x-amz-checksum-sha256".into(),
+            base64::engine::general_purpose::STANDARD.encode(sha256),
+        ),
+    ]);
+    let identity = Credentials::new(
+        &credential.key_id,
+        &credential.secret_key,
+        credential.token.clone(),
+        None,
+        "object_store",
+    )
+    .into();
+    let mut settings = SigningSettings::default();
+    settings.signature_location = SignatureLocation::QueryParams;
+    settings.expires_in = Some(ttl);
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("s3")
+        .time(now)
+        .settings(settings)
+        .build()
+        .map_err(|_| S3Error("invalid S3 signing configuration".into()))?;
+    let request = SignableRequest::new(
+        "PUT",
+        url.as_str(),
+        headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+        SignableBody::UnsignedPayload,
+    )
+    .map_err(|_| S3Error("invalid S3 upload request".into()))?;
+    let (instructions, _) = sign(request, &params.into())
+        .map_err(|_| S3Error("could not sign S3 upload grant".into()))?
+        .into_parts();
+    url.query_pairs_mut().extend_pairs(instructions.params());
+    Ok(PresignedPut {
+        url: url.into(),
+        headers,
+    })
+}
+
 /// One listed object, relative to the client's prefix.
 #[derive(Clone, Debug)]
 pub struct ObjectEntry {
@@ -401,6 +540,42 @@ impl S3Client for ObjectStoreClient {
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(store_error(error)),
         }
+    }
+
+    async fn get_limited(&self, key: &str, limit: u64) -> Result<Option<Vec<u8>>, S3Error> {
+        ObjectStoreClient::get_limited(self, key, limit).await
+    }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        size: usize,
+        sha256: [u8; 32],
+        now: SystemTime,
+        ttl: Duration,
+    ) -> Result<PresignedPut, S3Error> {
+        let (client, region) = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| S3Error(STAGED_UPLOAD_NOT_CONFIGURED.into()))?;
+        let path = self.path(key)?;
+        // The adapter owns endpoint resolution, path encoding and credentials.
+        // Its public signer provides the URL but does not accept signed headers.
+        // Discard its signature and sign the exact conditional, bounded request.
+        let mut url = client
+            .signed_url(reqwest::Method::PUT, &path, ttl)
+            .await
+            .map_err(|_| S3Error("could not resolve S3 signing endpoint".into()))?;
+        url.set_query(None);
+        if resolve_staging_region(Some(region), Some(url.as_str())).is_none() {
+            return Err(S3Error(STAGED_UPLOAD_NOT_CONFIGURED.into()));
+        }
+        let credential = client
+            .credentials()
+            .get_credential()
+            .await
+            .map_err(|_| S3Error("could not resolve S3 signing credentials".into()))?;
+        sign_create_put(url, region, &credential, size, sha256, now, ttl)
     }
 
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, S3Error> {
@@ -535,6 +710,40 @@ mod tests {
         assert_eq!(client.list_keys("t").await.unwrap(), vec!["top"]);
         assert!(client.put("/lead", vec![]).await.is_err());
         assert!(client.put("trail/", vec![]).await.is_err());
+    }
+
+    #[test]
+    fn staging_region_matches_aws_endpoint_or_requires_explicit_region() {
+        for (endpoint, region) in [
+            ("https://s3.us-west-2.amazonaws.com", "us-west-2"),
+            (
+                "https://bucket.with.dots.s3.dualstack.eu-west-1.amazonaws.com",
+                "eu-west-1",
+            ),
+            ("https://bucket.s3-us-east-2.amazonaws.com", "us-east-2"),
+            ("https://s3.cn-north-1.amazonaws.com.cn", "cn-north-1"),
+        ] {
+            assert_eq!(
+                resolve_staging_region(None, Some(endpoint)).as_deref(),
+                Some(region)
+            );
+            assert_eq!(
+                resolve_staging_region(Some("other-1"), Some(endpoint)),
+                None
+            );
+        }
+        for endpoint in [
+            None,
+            Some("https://s3.amazonaws.com"),
+            Some("https://s3.us-west-2.amazonaws.com.example.net"),
+            Some("http://127.0.0.1:9000"),
+        ] {
+            assert_eq!(resolve_staging_region(None, endpoint), None);
+            assert_eq!(
+                resolve_staging_region(Some("us-west-2"), endpoint).as_deref(),
+                Some("us-west-2")
+            );
+        }
     }
 
     async fn mock_s3(app: axum::Router) -> (ObjectStoreClient, tokio::task::JoinHandle<()>) {

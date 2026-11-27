@@ -90,6 +90,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "layer_wal" {
       days_after_initiation = 1
     }
   }
+
+  # Staged uploads and grant manifests can outlive a 15-minute upload grant.
+  # Expire their current versions after S3's minimum of one day.
+  rule {
+    id     = "expire-layer-blob-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = "blob-uploads/"
+    }
+
+    expiration {
+      days = 1
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "layer_wal" {

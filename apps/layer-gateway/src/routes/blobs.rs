@@ -3,8 +3,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG};
+use axum::extract::{OriginalUri, Path, Query, State};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, ETAG, X_CONTENT_TYPE_OPTIONS,
+};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -18,7 +20,7 @@ use crate::error::AppError;
 use crate::models::BlobPutResponse;
 use crate::AppState;
 
-const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
+pub(super) const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
 const CACHE_CONTROL_IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// turbopuffer's largest `top_k`: one move page is one store query.
 const MAX_MOVE_PAGE_SIZE: u32 = 10_000;
@@ -198,7 +200,17 @@ pub async fn put_blob(
 pub async fn get_blob(
     State(state): State<Arc<AppState>>,
     Path((namespace, sha256)): Path<(String, String)>,
+    OriginalUri(uri): OriginalUri,
+    caller: Option<axum::Extension<crate::auth::CallerGrant>>,
 ) -> Result<impl IntoResponse, AppError> {
+    if uri.path().split('/').nth(3) != Some(namespace.as_str()) {
+        crate::auth::authorize_namespace(
+            &state,
+            caller.as_deref(),
+            crate::auth::ApiScope::Read,
+            &namespace,
+        )?;
+    }
     validate_namespace(&namespace)?;
     validate_sha256(&sha256)?;
     let sha256 = sha256.to_ascii_lowercase();
@@ -232,10 +244,21 @@ pub async fn get_blob(
         CONTENT_TYPE,
         HeaderValue::from_static(sniff_content_type(&bytes)),
     );
-    headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static(CACHE_CONTROL_IMMUTABLE),
-    );
+    if bytes.len() > MAX_BLOB_BYTES {
+        if caller.is_none() {
+            return Err(AppError::Forbidden(
+                "staged blobs require a verified Layer read key".into(),
+            ));
+        }
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        headers.insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+        headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    } else {
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static(CACHE_CONTROL_IMMUTABLE),
+        );
+    }
     headers.insert(
         ETAG,
         HeaderValue::from_str(&format!("\"{sha256}\""))
@@ -661,6 +684,10 @@ async fn read_blob_through(
         .await?
         .ok_or_else(|| blob_not_found(sha256))?;
 
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Ok(bytes);
+    }
+
     if let Err(e) = state
         .aerospike
         .put_raw(&blob_cache_set(namespace), sha256, &bytes)
@@ -687,7 +714,7 @@ fn validate_namespace(namespace: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_sha256(value: &str) -> Result<(), AppError> {
+pub(super) fn validate_sha256(value: &str) -> Result<(), AppError> {
     if is_valid_sha256(value) {
         return Ok(());
     }
@@ -696,9 +723,8 @@ fn validate_sha256(value: &str) -> Result<(), AppError> {
     ))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub(crate) fn is_valid_sha256(value: &str) -> bool {
@@ -713,7 +739,7 @@ pub(crate) fn blob_cache_set(namespace: &str) -> String {
     format!("blob_{namespace}")
 }
 
-fn blob_reference(namespace: &str, sha256: &str) -> String {
+pub(super) fn blob_reference(namespace: &str, sha256: &str) -> String {
     layer_original::reference(namespace, sha256)
 }
 

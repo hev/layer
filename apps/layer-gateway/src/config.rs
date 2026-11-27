@@ -19,7 +19,7 @@ pub struct Config {
     /// When set it selects the backend and location; `S3_BUCKET` is ignored.
     pub object_store_url: Option<String>,
     pub s3_bucket: Option<String>,
-    pub s3_region: String,
+    pub s3_region: Option<String>,
     pub s3_endpoint: Option<String>,
     /// `LAYER_BLOB_STORAGE`: `auto` (S3 for turbopuffer namespaces when S3 is
     /// configured), `s3` or `store`.
@@ -158,6 +158,13 @@ pub struct Config {
 }
 
 impl Config {
+    pub(crate) fn s3_settings(&self) -> vectorstore_core::blob_store::S3Settings {
+        vectorstore_core::blob_store::S3Settings {
+            region: self.s3_region.clone(),
+            endpoint: self.s3_endpoint.clone(),
+        }
+    }
+
     pub fn from_env() -> Self {
         let index_namespace = env::var("LAYER_INDEX_NAMESPACE")
             .ok()
@@ -211,7 +218,7 @@ impl Config {
                 .ok()
                 .and_then(trimmed_non_empty),
             s3_bucket: env::var("S3_BUCKET").ok().and_then(trimmed_non_empty),
-            s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            s3_region: env::var("S3_REGION").ok().and_then(trimmed_non_empty),
             s3_endpoint: env::var("S3_ENDPOINT").ok(),
             blob_storage: blob_storage_preference(env::var("LAYER_BLOB_STORAGE").ok().as_deref()),
             index_gc_enabled: env::var("LAYER_INDEX_GC_ENABLED")
@@ -608,6 +615,157 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn staged_s3_region_uses_gateway_startup_configuration() {
+        use std::time::{Duration, SystemTime};
+        use vectorstore_core::blob_store::{ObjectStoreClient, ObjectStoreUrl};
+        use vectorstore_core::s3::{S3Client, STAGED_UPLOAD_NOT_CONFIGURED};
+
+        const EXPECTED: &str = "LAYER_TEST_EXPECTED_SIGNING_REGION";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            let config = super::Config::from_env();
+            let location =
+                ObjectStoreUrl::parse(config.object_store_url.as_deref().unwrap()).unwrap();
+            let client = ObjectStoreClient::new(location, &config.s3_settings()).unwrap();
+            let grant = client
+                .presign_put(
+                    "blob-uploads/fixture",
+                    11 * 1024 * 1024,
+                    [0; 32],
+                    SystemTime::now(),
+                    Duration::from_secs(60),
+                )
+                .await;
+            if expected.is_empty() {
+                assert_eq!(grant.err().unwrap().0, STAGED_UPLOAD_NOT_CONFIGURED);
+            } else {
+                let url = reqwest::Url::parse(&grant.unwrap().url).unwrap();
+                let region_matches = url.query_pairs().any(|(name, value)| {
+                    name == "X-Amz-Credential" && value.split('/').nth(2) == Some(expected.as_str())
+                });
+                assert!(region_matches, "expected signing region {expected}");
+            }
+            return;
+        }
+
+        let custom = "https://objects.example.test";
+        let regional = "https://s3.eu-west-1.amazonaws.com";
+        for (label, endpoint, explicit, aws, default, expected) in [
+            (
+                "explicit precedes AWS",
+                Some(custom),
+                Some("us-west-2"),
+                Some("us-east-2"),
+                Some("ca-central-1"),
+                "us-west-2",
+            ),
+            (
+                "AWS region precedes default",
+                Some(custom),
+                None,
+                Some("us-east-2"),
+                Some("ca-central-1"),
+                "us-east-2",
+            ),
+            (
+                "AWS default region",
+                Some(custom),
+                None,
+                None,
+                Some("ca-central-1"),
+                "ca-central-1",
+            ),
+            (
+                "regional AWS endpoint",
+                Some(regional),
+                None,
+                None,
+                None,
+                "eu-west-1",
+            ),
+            (
+                "matching explicit region",
+                Some(regional),
+                Some("eu-west-1"),
+                None,
+                None,
+                "eu-west-1",
+            ),
+            (
+                "mismatched AWS region",
+                Some(regional),
+                None,
+                Some("us-west-2"),
+                None,
+                "",
+            ),
+            (
+                "custom endpoint without region",
+                Some(custom),
+                None,
+                None,
+                None,
+                "",
+            ),
+            (
+                "blank explicit region",
+                Some(custom),
+                Some(" "),
+                None,
+                None,
+                "",
+            ),
+            (
+                "implicit endpoint without region",
+                None,
+                None,
+                None,
+                None,
+                "",
+            ),
+            (
+                "implicit endpoint with region",
+                None,
+                Some("us-west-2"),
+                None,
+                None,
+                "us-west-2",
+            ),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "config::tests::staged_s3_region_uses_gateway_startup_configuration",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(EXPECTED, expected)
+                .env("OBJECT_STORE_URL", "s3://fixture-bucket")
+                .env("TURBOPUFFER_API_KEY", "fixture-store-key")
+                .env("AWS_ACCESS_KEY_ID", "fixture-access")
+                .env("AWS_SECRET_ACCESS_KEY", "fixture-secret");
+            for (key, value) in [
+                ("S3_ENDPOINT", endpoint),
+                ("S3_REGION", explicit),
+                ("AWS_REGION", aws),
+                ("AWS_DEFAULT_REGION", default),
+            ] {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{label} ({}): {stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn pinned_federated_configuration_has_independent_default_and_hard_ceiling() {
         for (raw, expected) in [

@@ -19,10 +19,12 @@ and pipeline/scan/warm-cache helper methods.
 - `ClaimDocuments`
 - `ClaimUdfItems`
 - `CompareUdfCandidate`
+- `CompleteBlobUpload`
 - `CompleteUdfItems`
 - `CopyNamespace`
 - `CreateArchiveExport`
 - `CreateArchiveRestore`
+- `CreateBlobUpload`
 - `CreateCheckpoint`
 - `CreatePipeline`
 - `CreateScan`

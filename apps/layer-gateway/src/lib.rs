@@ -1119,6 +1119,14 @@ pub fn build_router_with_mcp(state: Arc<AppState>, mcp: Option<Arc<mcp::McpRegis
             put(routes::blobs::put_blob),
         )
         .route(
+            "/v1/namespaces/{namespace}/blobs/uploads",
+            post(routes::blob_uploads::create).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/blobs/uploads/{upload_id}/complete",
+            post(routes::blob_uploads::complete),
+        )
+        .route(
             "/v1/namespaces/{namespace}/blobs/{sha256}",
             get(routes::blobs::get_blob),
         )

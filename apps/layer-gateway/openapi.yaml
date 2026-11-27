@@ -542,6 +542,92 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/v1/namespaces/{namespace}/blobs/uploads":
+    post:
+      operationId: createBlobUpload
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Issue a private S3 PUT grant for staged video
+      description: Requires a verified namespace write key and an S3 object store
+        with a resolved signing region. Upload the original bytes using the returned
+        URL, method and exact headers, then call completeBlobUpload. The URL is a
+        short-lived credential and must be kept private.
+      tags:
+      - blobs
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/BlobUploadSpec"
+      responses:
+        '201':
+          description: Upload grant created. Expires after 15 minutes.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/BlobUploadGrant"
+        '401':
+          description: Layer API key missing
+        '403':
+          description: Caller lacks verified write access to the namespace
+        '413':
+          description: Upload exceeds the size limit
+        '422':
+          description: Invalid upload metadata
+        '502':
+          description: S3 grant creation failed
+        '503':
+          description: Compatible S3 staging is unavailable
+  "/v1/namespaces/{namespace}/blobs/uploads/{upload_id}/complete":
+    post:
+      operationId: completeBlobUpload
+      x-hevlayer-store-support:
+        turbopuffer: supported
+        search: supported
+        pgvector: supported
+      summary: Validate and publish a staged video
+      description: Requires a verified namespace write key. Validates the staged object's
+        declared size, SHA-256 and video container metadata before promoting it into
+        content-addressed storage. Safe to retry through grant expiry.
+      tags:
+      - blobs
+      parameters:
+      - "$ref": "#/components/parameters/namespace"
+      - name: upload_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+        description: Opaque upload ID returned by createBlobUpload.
+      responses:
+        '200':
+          description: Published blob
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/BlobPutResponse"
+        '401':
+          description: Layer API key missing
+        '403':
+          description: Caller lacks verified write access or the grant expired
+        '404':
+          description: Upload grant absent from the requested namespace
+        '409':
+          description: Upload grant has no staged bytes
+        '413':
+          description: Staged object exceeds its declared size
+        '422':
+          description: Staged bytes do not match the grant or media policy
+        '502':
+          description: S3 read or write failed
+        '503':
+          description: Compatible S3 staging or finalize capacity is unavailable
   "/v1/namespaces/{namespace}/blobs/{sha256}":
     get:
       operationId: getBlob
@@ -553,8 +639,8 @@ paths:
       description: 'Serve immutable blob bytes by sha256. When the Aerospike cache
         is configured the gateway reads it first; on a miss it reads the namespace''s
         store (for stores with native bytes), then S3, and backfills the cache best-effort.
-        Successful responses carry immutable cache headers and an ETag equal to the
-        content hash.
+        Staged video is served as a private attachment. Successful responses carry
+        an ETag equal to the content hash.
 
         '
       tags:
@@ -567,7 +653,7 @@ paths:
         schema:
           type: string
           pattern: "^[0-9a-fA-F]{64}$"
-        description: Hex sha256 returned by `putBlob`.
+        description: Hex sha256 returned by `putBlob` or `completeBlobUpload`.
       responses:
         '200':
           description: Blob bytes
@@ -575,7 +661,8 @@ paths:
             Cache-Control:
               schema:
                 type: string
-              description: Always `public, max-age=31536000, immutable`.
+              description: "`public, max-age=31536000, immutable` for direct blobs
+                and `private, no-store` for staged video."
             ETag:
               schema:
                 type: string
@@ -3277,6 +3364,59 @@ components:
         billing:
           type: object
           additionalProperties: true
+    BlobUploadSpec:
+      type: object
+      additionalProperties: false
+      required:
+      - size
+      - sha256
+      - content_type
+      properties:
+        size:
+          type: integer
+          format: int64
+          minimum: 10485761
+          maximum: 104857600
+          description: Exact body size in bytes.
+        sha256:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+        content_type:
+          type: string
+          enum:
+          - video/mp4
+          - video/quicktime
+          - video/webm
+    BlobUploadGrant:
+      type: object
+      required:
+      - upload_id
+      - upload_url
+      - method
+      - headers
+      - expires_at
+      properties:
+        upload_id:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+        upload_url:
+          type: string
+          format: uri
+          description: Private, presigned URL for one create-only S3 PUT.
+        method:
+          type: string
+          enum:
+          - PUT
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Exact headers to send to S3, including the checksum and content
+            length.
+        expires_at:
+          type: integer
+          format: int64
+          description: Expiry in Unix seconds.
     BlobPutResponse:
       type: object
       required:

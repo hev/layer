@@ -849,6 +849,24 @@ func (client *Client) CompareUdfCandidateWithPerf(ctx context.Context, udfID str
 }
 
 
+func (client *Client) CompleteBlobUpload(ctx context.Context, namespace string, uploadID string, options ...RequestOption) (*BlobPutResponse, error) {
+	out := BlobPutResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/blobs/uploads/%s/complete", url.PathEscape(namespace), url.PathEscape(uploadID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CompleteBlobUploadWithPerf(ctx context.Context, namespace string, uploadID string, options ...RequestOption) (*LayerResponse[BlobPutResponse], error) {
+	out := BlobPutResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/blobs/uploads/%s/complete", url.PathEscape(namespace), url.PathEscape(uploadID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[BlobPutResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) CompleteUdfItems(ctx context.Context, udfID string, body *UdfCompleteRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
@@ -926,6 +944,24 @@ func (client *Client) CreateArchiveRestoreWithPerf(ctx context.Context, body *Ar
 		return nil, err
 	}
 	return &LayerResponse[ArchiveRun]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) CreateBlobUpload(ctx context.Context, namespace string, body *BlobUploadSpec, options ...RequestOption) (*BlobUploadGrant, error) {
+	out := BlobUploadGrant{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/blobs/uploads", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CreateBlobUploadWithPerf(ctx context.Context, namespace string, body *BlobUploadSpec, options ...RequestOption) (*LayerResponse[BlobUploadGrant], error) {
+	out := BlobUploadGrant{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/blobs/uploads", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[BlobUploadGrant]{Data: out, Perf: *perf}, nil
 }
 
 

@@ -3038,6 +3038,25 @@ impl S3Client for MetricsS3Client {
         result
     }
 
+    async fn get_limited(&self, key: &str, limit: u64) -> Result<Option<Vec<u8>>, S3Error> {
+        let start = Instant::now();
+        let result = self.inner.get_limited(key, limit).await;
+        self.metrics
+            .observe_s3_op("get", s3_status(&result), elapsed(start));
+        result
+    }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        size: usize,
+        sha256: [u8; 32],
+        now: std::time::SystemTime,
+        ttl: std::time::Duration,
+    ) -> Result<vectorstore_core::s3::PresignedPut, S3Error> {
+        self.inner.presign_put(key, size, sha256, now, ttl).await
+    }
+
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, S3Error> {
         let start = Instant::now();
         let result = self.inner.list_keys(prefix).await;

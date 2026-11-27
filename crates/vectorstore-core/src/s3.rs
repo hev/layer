@@ -21,6 +21,15 @@ impl S3Error {
     }
 }
 
+/// A scoped client PUT. Treat the returned URL as a bearer credential.
+pub struct PresignedPut {
+    pub url: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+pub const STAGED_UPLOAD_NOT_CONFIGURED: &str =
+    "staged uploads require S3 with a matching, explicit or inferable region";
+
 #[async_trait]
 pub trait S3Client: Send + Sync {
     /// Put an object, replacing any existing object at the same key.
@@ -32,6 +41,24 @@ pub trait S3Client: Send + Sync {
 
     /// Get an object by key.
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, S3Error>;
+
+    /// Read through a bounded buffer. Staged-upload providers must implement
+    /// this without reading a larger body into memory.
+    async fn get_limited(&self, _key: &str, _limit: u64) -> Result<Option<Vec<u8>>, S3Error> {
+        Err(S3Error(STAGED_UPLOAD_NOT_CONFIGURED.into()))
+    }
+
+    /// Sign a create-only PUT for a single key, exact length and SHA-256.
+    async fn presign_put(
+        &self,
+        _key: &str,
+        _size: usize,
+        _sha256: [u8; 32],
+        _now: std::time::SystemTime,
+        _ttl: std::time::Duration,
+    ) -> Result<PresignedPut, S3Error> {
+        Err(S3Error(STAGED_UPLOAD_NOT_CONFIGURED.into()))
+    }
 
     /// List objects with a given prefix, sorted by key.
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, S3Error>;

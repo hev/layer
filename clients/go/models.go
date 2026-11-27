@@ -670,6 +670,20 @@ type StatusResponse struct {
 	Billing map[string]interface{} `json:"billing,omitempty"`
 }
 
+type BlobUploadSpec struct {
+	Size int64 `json:"size"`
+	Sha256 string `json:"sha256"`
+	ContentType string `json:"content_type"`
+}
+
+type BlobUploadGrant struct {
+	UploadID string `json:"upload_id"`
+	UploadUrl string `json:"upload_url"`
+	Method string `json:"method"`
+	Headers map[string]string `json:"headers"`
+	ExpiresAt int64 `json:"expires_at"`
+}
+
 type BlobPutResponse struct {
 	Ref string `json:"ref"`
 	Sha256 string `json:"sha256"`
